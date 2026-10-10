@@ -31,7 +31,15 @@ Clash 是基于 [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) 的独�
 | [Clash-Adapter](https://github.com/ProjectClash/Clash-Adapter) | Swift 数据包桥接与扩展生命周期组件 |
 | [Clash-Client](https://github.com/ProjectClash/Clash-Client) | iOS、iPadOS、macOS 和 tvOS 原生应用及扩展 |
 
-上游基线版本表示代理引擎版本，与 App Store 应用版本、SDK 发布标签分别管理。`main` 上未打发布标签的源码按预发布版本管理；集成时请固定具体提交。已发布的 SDK 版本及下载见[发行版页面](https://github.com/ProjectClash/Clash/releases)。
+## 版本与下载
+
+| 组件 | 当前基准 |
+| --- | --- |
+| 上游引擎 | mihomo **v1.19.32**，记录于 [`UPSTREAM_VERSION`](UPSTREAM_VERSION) |
+| 已发布的 Apple SDK | [`v1.19.32-clash.1`](https://github.com/ProjectClash/Clash/releases/tag/v1.19.32-clash.1) |
+| 客户端集成 | 客户端的 [`Dependencies.lock.json`](https://github.com/ProjectClash/Clash-Client/blob/main/Dependencies.lock.json) 固定 Kernel 和 Adapter 提交 |
+
+上游引擎版本、SDK 发布标签和 App Store 应用版本分别管理。复现 SDK 发行版时请使用发布标签；`main` 可能包含后续修改。Client 和 Adapter 源码目前按提交发布，没有各自的发行标签。
 
 SDK 下载包包含五个 Apple 平台切片、许可证声明和源码清单。每次发布另附独立的许可证压缩包、macOS 所用 EasyTier 内嵌内核的对应源码包，以及用于核对下载文件的 `SHA256SUMS`。
 
@@ -50,17 +58,20 @@ Apple SDK 的 iOS 和 tvOS 切片使用 `no_easytier`，不包含 EasyTier；mac
 
 需要 macOS、完整的 Xcode，以及 iOS、macOS、tvOS SDK。绑定模块在 [`bind/clash/go.mod`](bind/clash/go.mod) 中声明 Go 1.26.0，并选择 Go 1.26.9 工具链；请允许 Go 获取该工具链，或自行安装。
 
-完整克隆仓库及标签，然后安装固定版本的 gomobile 工具：
+构建当前正式 SDK 时，完整克隆仓库及标签，切到发行版，再安装固定版本的 gomobile 工具：
 
 ```sh
 git clone https://github.com/ProjectClash/Clash.git
 cd Clash
+git checkout --detach v1.19.32-clash.1
 go install github.com/sagernet/gomobile/cmd/gomobile@v0.1.13
 go install github.com/sagernet/gomobile/cmd/gobind@v0.1.13
 make lib_apple
 ```
 
-内核版本由随源码发布的 `UPSTREAM_VERSION` 指定，避免升级源码后误用较旧的 SDK 标签。SDK 发布版本仍由当前提交的发布标签决定；普通源码构建标为 `dev-<提交>`。
+请将完整 Xcode 设为当前开发工具目录，而非独立的 Command Line Tools。如果 Xcode 安装在标准路径，可在构建环境设置 `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`。
+
+内核版本由随源码发布的 `UPSTREAM_VERSION` 指定，避免升级源码后误用较旧的 SDK 标签。SDK 发布版本由当前提交的发布标签决定；改为构建未打标签的提交时，版本标为 `dev-<提交>`。Go 依赖分别记录在仓根及绑定模块的 `go.mod`/`go.sum` 中，SDK 构建会使用这两个模块。
 
 输出为 `Clash.xcframework`，包含五个平台切片：
 
@@ -72,7 +83,7 @@ make lib_apple
 | tvOS 真机 | arm64 |
 | tvOS 模拟器 | arm64、x86_64 |
 
-SDK 是静态框架，直接链接时将嵌入选项设为 **Do Not Embed**，并链接 `libresolv`。应用和扩展可通过共享的动态框架封装它，避免重复打包内核；Client 的 iOS 和 macOS 工程已采用这种结构。具体接口以所固定提交生成的头文件为准。应用源码正在 [Clash-Client](https://github.com/ProjectClash/Clash-Client) 整理发布。
+SDK 是静态框架，直接链接时将嵌入选项设为 **Do Not Embed**，并链接 `libresolv`。应用和扩展可通过共享的动态框架封装它，避免重复打包内核；Client 的 iOS 和 macOS 工程已采用这种结构。具体接口以所固定提交生成的头文件为准。应用源码和构建说明已在 [Clash-Client](https://github.com/ProjectClash/Clash-Client) 公开；Mac 应用内置的控制器终端工具位于 [Clash-Client/cli](https://github.com/ProjectClash/Clash-Client/tree/main/cli)。
 
 ## 开发与反馈
 

@@ -31,7 +31,15 @@ The upstream GPL-3.0 license remains in [LICENSE](LICENSE). See [NOTICE](NOTICE)
 | [Clash-Adapter](https://github.com/ProjectClash/Clash-Adapter) | Swift packet-flow bridge and provider lifecycle components |
 | [Clash-Client](https://github.com/ProjectClash/Clash-Client) | Native iOS, iPadOS, macOS and tvOS applications and extensions |
 
-The upstream baseline version describes the proxy engine. It is separate from the App Store app version and the SDK release tag. Untagged source on `main` is pre-release; pin a specific revision when integrating it. Published SDK versions and downloads are listed in [Releases](https://github.com/ProjectClash/Clash/releases).
+## Versions and downloads
+
+| Component | Current reference |
+| --- | --- |
+| Upstream engine | mihomo **v1.19.32**, recorded in [`UPSTREAM_VERSION`](UPSTREAM_VERSION) |
+| Released Apple SDK | [`v1.19.32-clash.1`](https://github.com/ProjectClash/Clash/releases/tag/v1.19.32-clash.1) |
+| Client integration | Kernel and Adapter commits pinned in the Client's [`Dependencies.lock.json`](https://github.com/ProjectClash/Clash-Client/blob/main/Dependencies.lock.json) |
+
+The upstream engine version, SDK release tag and App Store app versions are separate. Use a release tag to reproduce an SDK release; `main` can contain later changes. Client and Adapter source are currently published by commit, without their own release tags.
 
 SDK downloads include all five Apple slices, license notices and a source manifest. Each release also provides the notices separately, the source archive for the embedded EasyTier core used by macOS, and `SHA256SUMS` for checking downloaded assets.
 
@@ -50,17 +58,20 @@ The iOS and tvOS SDK slices use `no_easytier` and do not include EasyTier. The m
 
 Use macOS with the full Xcode installation and the iOS, macOS and tvOS SDKs. The binding module declares Go 1.26.0 and selects toolchain Go 1.26.9 in [`bind/clash/go.mod`](bind/clash/go.mod); allow Go to obtain that toolchain, or install it explicitly.
 
-Clone the repository with its history and tags, then install the pinned gomobile tools:
+To build the current released SDK, clone the repository with its history and tags, check out the release, then install the pinned gomobile tools:
 
 ```sh
 git clone https://github.com/ProjectClash/Clash.git
 cd Clash
+git checkout --detach v1.19.32-clash.1
 go install github.com/sagernet/gomobile/cmd/gomobile@v0.1.13
 go install github.com/sagernet/gomobile/cmd/gobind@v0.1.13
 make lib_apple
 ```
 
-The core version comes from `UPSTREAM_VERSION`, shipped with the source, so a source upgrade does not inherit an older SDK tag. The SDK release version still comes from a release tag at the current commit; ordinary source builds are labeled `dev-<commit>`.
+Select the full Xcode installation as your active developer directory, rather than standalone Command Line Tools. If Xcode is installed at the standard path, you can set `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` in your build environment.
+
+The core version comes from `UPSTREAM_VERSION`, shipped with the source, so a source upgrade does not inherit an older SDK tag. The SDK release version comes from a release tag at the current commit; building an untagged revision instead produces `dev-<commit>`. Go dependencies are recorded in the root and binding module's `go.mod`/`go.sum` files; the SDK build uses both modules.
 
 The output is `Clash.xcframework`, containing five platform slices:
 
@@ -72,7 +83,7 @@ The output is `Clash.xcframework`, containing five platform slices:
 | tvOS device | arm64 |
 | tvOS Simulator | arm64, x86_64 |
 
-The SDK framework is static: choose **Do Not Embed** when linking it directly, and link `libresolv`. An app and its extension can share a dynamic framework wrapping the static SDK to avoid packaging the kernel twice; the iOS and macOS Client projects use this arrangement. Use the generated headers for the API of your pinned revision. The application source is being prepared in [Clash-Client](https://github.com/ProjectClash/Clash-Client).
+The SDK framework is static: choose **Do Not Embed** when linking it directly, and link `libresolv`. An app and its extension can share a dynamic framework wrapping the static SDK to avoid packaging the kernel twice; the iOS and macOS Client projects use this arrangement. Use the generated headers for the API of your pinned revision. The application source and build instructions are available in [Clash-Client](https://github.com/ProjectClash/Clash-Client). The Mac app's bundled controller helper is maintained in [Clash-Client/cli](https://github.com/ProjectClash/Clash-Client/tree/main/cli).
 
 ## Development and feedback
 
