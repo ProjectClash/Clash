@@ -1,0 +1,18 @@
+# Binaries and test artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Local Go workspace files
+go.work
+go.work.sum
+
+# Editors and operating systems
+.idea/
+.vscode/
+.fleet/
+.DS_Store

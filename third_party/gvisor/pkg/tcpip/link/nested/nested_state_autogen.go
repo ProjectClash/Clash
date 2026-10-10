@@ -1,0 +1,41 @@
+
+package nested
+
+import (
+	"context"
+
+	"github.com/metacubex/gvisor/pkg/state"
+)
+
+func (e *Endpoint) StateTypeName() string {
+	return "pkg/tcpip/link/nested.Endpoint"
+}
+
+func (e *Endpoint) StateFields() []string {
+	return []string{
+		"child",
+		"embedder",
+		"dispatcher",
+	}
+}
+
+func (e *Endpoint) beforeSave() {}
+
+func (e *Endpoint) StateSave(stateSinkObject state.Sink) {
+	e.beforeSave()
+	stateSinkObject.Save(0, &e.child)
+	stateSinkObject.Save(1, &e.embedder)
+	stateSinkObject.Save(2, &e.dispatcher)
+}
+
+func (e *Endpoint) afterLoad(context.Context) {}
+
+func (e *Endpoint) StateLoad(ctx context.Context, stateSourceObject state.Source) {
+	stateSourceObject.Load(0, &e.child)
+	stateSourceObject.Load(1, &e.embedder)
+	stateSourceObject.Load(2, &e.dispatcher)
+}
+
+func init() {
+	state.Register((*Endpoint)(nil))
+}

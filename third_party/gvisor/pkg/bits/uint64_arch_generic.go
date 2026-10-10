@@ -1,0 +1,49 @@
+// Copyright 2018 The gVisor Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build !amd64 && !arm64
+// +build !amd64,!arm64
+
+package bits
+
+func TrailingZeros64(x uint64) int {
+	if x == 0 {
+		return 64
+	}
+	i := 0
+	for ; x&1 == 0; i++ {
+		x >>= 1
+	}
+	return i
+}
+
+func MostSignificantOne64(x uint64) int {
+	if x == 0 {
+		return 64
+	}
+	i := 63
+	for ; x&(1<<63) == 0; i-- {
+		x <<= 1
+	}
+	return i
+}
+
+func ForEachSetBit64(x uint64, f func(i int)) {
+	for i := 0; x != 0; i++ {
+		if x&1 != 0 {
+			f(i)
+		}
+		x >>= 1
+	}
+}

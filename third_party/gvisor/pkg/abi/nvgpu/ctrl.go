@@ -1,0 +1,729 @@
+// Copyright 2023 The gVisor Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package nvgpu
+
+import (
+	"github.com/metacubex/gvisor/pkg/common/structs"
+)
+
+const (
+	RM_GSS_LEGACY_MASK = 0x00008000
+)
+
+const (
+	RMAPI_PARAM_COPY_MAX_PARAMS_SIZE = 1 * 1024 * 1024
+)
+
+
+type NVXXXX_CTRL_XXX_INFO struct {
+	_     structs.HostLayout
+	Index uint32
+	Data  uint32
+}
+
+var CtrlXxxInfoSize = uint32((*NVXXXX_CTRL_XXX_INFO)(nil).SizeBytes())
+
+type HasCtrlInfoList interface {
+	ListSize() uint32
+	SetCtrlInfoList(ptr P64)
+	CtrlInfoList() P64
+}
+
+const (
+	NV0000_CTRL_CMD_CLIENT_GET_ADDR_SPACE_TYPE        = 0xd01
+	NV0000_CTRL_CMD_CLIENT_SET_INHERITED_SHARE_POLICY = 0xd04
+)
+
+const (
+	NV0000_CTRL_CMD_GPU_GET_ATTACHED_IDS      = 0x201
+	NV0000_CTRL_CMD_GPU_GET_ID_INFO           = 0x202
+	NV0000_CTRL_CMD_GPU_GET_DEVICE_IDS        = 0x204
+	NV0000_CTRL_CMD_GPU_GET_ID_INFO_V2        = 0x205
+	NV0000_CTRL_CMD_GPU_GET_PROBED_IDS        = 0x214
+	NV0000_CTRL_CMD_GPU_ATTACH_IDS            = 0x215
+	NV0000_CTRL_CMD_GPU_DETACH_IDS            = 0x216
+	NV0000_CTRL_CMD_GPU_GET_PCI_INFO          = 0x21b
+	NV0000_CTRL_CMD_GPU_GET_UUID_FROM_GPU_ID  = 0x275
+	NV0000_CTRL_CMD_GPU_QUERY_DRAIN_STATE     = 0x279
+	NV0000_CTRL_CMD_GPU_GET_MEMOP_ENABLE      = 0x27b
+	NV0000_CTRL_CMD_GPU_GET_ACTIVE_DEVICE_IDS = 0x288
+	NV0000_CTRL_CMD_GPU_ASYNC_ATTACH_ID       = 0x289
+	NV0000_CTRL_CMD_GPU_WAIT_ATTACH_ID        = 0x290
+
+	NV0000_CTRL_GPU_INVALID_ID      = 0xffffffff
+	NV0000_CTRL_GPU_MAX_PROBED_GPUS = NV_MAX_DEVICES
+	NV0000_GPU_MAX_GID_LENGTH       = 0x100
+)
+
+const (
+	NV0000_CTRL_CMD_GPUACCT_GET_ACCOUNTING_STATE = 0xb02
+)
+
+type NV0000_CTRL_GPU_GET_ID_INFO_PARAMS struct {
+	_                 structs.HostLayout
+	GpuID             uint32
+	GpuFlags          uint32
+	DeviceInstance    uint32
+	SubDeviceInstance uint32
+	SzName            P64
+	SliStatus         uint32
+	BoardID           uint32
+	GpuInstance       uint32
+	NumaID            int32
+}
+
+type NV0000_CTRL_GPU_ATTACH_IDS_PARAMS struct {
+	_        structs.HostLayout
+	GPUIDs   [NV0000_CTRL_GPU_MAX_PROBED_GPUS]uint32
+	FailedID uint32
+}
+
+type NV0000_CTRL_GPU_GET_UUID_FROM_GPU_ID_PARAMS struct {
+	_          structs.HostLayout
+	GPUID      uint32
+	Flags      uint32
+	GPUUUID    [NV0000_GPU_MAX_GID_LENGTH]byte
+	UUIDStrLen uint32
+}
+
+const (
+	NV0000_CTRL_CMD_GSYNC_GET_ATTACHED_IDS = 0x301
+)
+
+const (
+	NV0000_CTRL_CMD_SYNC_GPU_BOOST_GROUP_INFO = 0xa04
+)
+
+const (
+	NV0000_CTRL_CMD_SYSTEM_GET_BUILD_VERSION                = 0x101
+	NV0000_CTRL_CMD_SYSTEM_GET_CPU_INFO                     = 0x102
+	NV0000_CTRL_CMD_SYSTEM_GET_P2P_CAPS                     = 0x127
+	NV0000_CTRL_CMD_SYSTEM_GET_P2P_CAPS_V2                  = 0x12b
+	NV0000_CTRL_CMD_SYSTEM_GET_FABRIC_STATUS                = 0x136
+	NV0000_CTRL_CMD_SYSTEM_GET_P2P_CAPS_MATRIX              = 0x13a
+	NV0000_CTRL_CMD_SYSTEM_GET_FEATURES                     = 0x1f0
+	NV0000_CTRL_SYSTEM_GET_BUILD_VERSION_V2_MAX_STRING_SIZE = 256
+	NV0000_CTRL_SYSTEM_MAX_ATTACHED_GPUS                    = 32
+	NV0000_CTRL_P2P_CAPS_INDEX_TABLE_SIZE                   = 9
+)
+
+type NV0000_CTRL_SYSTEM_GET_P2P_CAPS_PARAMS struct {
+	_                  structs.HostLayout
+	GpuIDs             [NV0000_CTRL_SYSTEM_MAX_ATTACHED_GPUS]uint32
+	GpuCount           uint32
+	P2PCaps            uint32
+	P2POptimalReadCEs  uint32
+	P2POptimalWriteCEs uint32
+	P2PCapsStatus      [NV0000_CTRL_P2P_CAPS_INDEX_TABLE_SIZE]uint8
+	_                  [7]byte
+	BusPeerIDs         P64
+}
+
+type NV0000_CTRL_SYSTEM_GET_P2P_CAPS_PARAMS_V550 struct {
+	_ structs.HostLayout
+	NV0000_CTRL_SYSTEM_GET_P2P_CAPS_PARAMS
+	BusEgmPeerIDs P64
+}
+
+const (
+	NV0000_CTRL_CMD_OS_UNIX_EXPORT_OBJECT_TO_FD          = 0x3d05
+	NV0000_CTRL_CMD_OS_UNIX_IMPORT_OBJECT_FROM_FD        = 0x3d06
+	NV0000_CTRL_CMD_OS_UNIX_GET_EXPORT_OBJECT_INFO       = 0x3d08
+	NV0000_CTRL_CMD_OS_UNIX_EXPORT_OBJECTS_TO_FD         = 0x3d0b
+	NV0000_CTRL_CMD_OS_UNIX_IMPORT_OBJECTS_FROM_FD       = 0x3d0c
+	NV0000_OS_UNIX_EXPORT_OBJECT_FD_BUFFER_SIZE          = 64
+	NV0000_CTRL_OS_UNIX_EXPORT_OBJECTS_TO_FD_MAX_OBJECTS = 512
+	NV0000_CTRL_OS_UNIX_IMPORT_OBJECTS_TO_FD_MAX_OBJECTS = 128
+)
+
+type NV0000_CTRL_OS_UNIX_GET_EXPORT_OBJECT_INFO_PARAMS struct {
+	_              structs.HostLayout
+	FD             int32
+	DeviceInstance uint32
+	MaxObjects     uint16
+	Metadata       [NV0000_OS_UNIX_EXPORT_OBJECT_FD_BUFFER_SIZE]uint8
+	Pad            [2]byte
+}
+
+func (p *NV0000_CTRL_OS_UNIX_GET_EXPORT_OBJECT_INFO_PARAMS) GetFrontendFD() int32 {
+	return p.FD
+}
+
+func (p *NV0000_CTRL_OS_UNIX_GET_EXPORT_OBJECT_INFO_PARAMS) SetFrontendFD(fd int32) {
+	p.FD = fd
+}
+
+type NV0000_CTRL_OS_UNIX_GET_EXPORT_OBJECT_INFO_PARAMS_V545 struct {
+	_              structs.HostLayout
+	FD             int32
+	DeviceInstance uint32
+	GpuInstanceID  uint32
+	MaxObjects     uint16
+	Metadata       [NV0000_OS_UNIX_EXPORT_OBJECT_FD_BUFFER_SIZE]uint8
+	Pad            [2]byte
+}
+
+func (p *NV0000_CTRL_OS_UNIX_GET_EXPORT_OBJECT_INFO_PARAMS_V545) GetFrontendFD() int32 {
+	return p.FD
+}
+
+func (p *NV0000_CTRL_OS_UNIX_GET_EXPORT_OBJECT_INFO_PARAMS_V545) SetFrontendFD(fd int32) {
+	p.FD = fd
+}
+
+type NV0000_CTRL_OS_UNIX_EXPORT_OBJECT struct {
+	_    structs.HostLayout
+	Type uint32
+	Data [12]byte
+}
+
+type NV0000_CTRL_OS_UNIX_EXPORT_OBJECT_TO_FD_PARAMS struct {
+	_      structs.HostLayout
+	Object NV0000_CTRL_OS_UNIX_EXPORT_OBJECT
+	FD     int32
+	Flags  uint32
+}
+
+func (p *NV0000_CTRL_OS_UNIX_EXPORT_OBJECT_TO_FD_PARAMS) GetFrontendFD() int32 {
+	return p.FD
+}
+
+func (p *NV0000_CTRL_OS_UNIX_EXPORT_OBJECT_TO_FD_PARAMS) SetFrontendFD(fd int32) {
+	p.FD = fd
+}
+
+type NV0000_CTRL_OS_UNIX_IMPORT_OBJECT_FROM_FD_PARAMS struct {
+	_      structs.HostLayout
+	FD     int32
+	Object NV0000_CTRL_OS_UNIX_EXPORT_OBJECT
+}
+
+func (p *NV0000_CTRL_OS_UNIX_IMPORT_OBJECT_FROM_FD_PARAMS) GetFrontendFD() int32 {
+	return p.FD
+}
+
+func (p *NV0000_CTRL_OS_UNIX_IMPORT_OBJECT_FROM_FD_PARAMS) SetFrontendFD(fd int32) {
+	p.FD = fd
+}
+
+type NV0000_CTRL_OS_UNIX_EXPORT_OBJECTS_TO_FD_PARAMS struct {
+	_          structs.HostLayout
+	FD         int32
+	HDevice    Handle
+	MaxObjects uint16
+	Metadata   [NV0000_OS_UNIX_EXPORT_OBJECT_FD_BUFFER_SIZE]uint8
+	Pad        [2]byte
+	Objects    [NV0000_CTRL_OS_UNIX_EXPORT_OBJECTS_TO_FD_MAX_OBJECTS]Handle
+	NumObjects uint16
+	Index      uint16
+}
+
+func (p *NV0000_CTRL_OS_UNIX_EXPORT_OBJECTS_TO_FD_PARAMS) GetFrontendFD() int32 {
+	return p.FD
+}
+
+func (p *NV0000_CTRL_OS_UNIX_EXPORT_OBJECTS_TO_FD_PARAMS) SetFrontendFD(fd int32) {
+	p.FD = fd
+}
+
+type NV0000_CTRL_OS_UNIX_IMPORT_OBJECTS_FROM_FD_PARAMS struct {
+	_           structs.HostLayout
+	FD          int32
+	HParent     Handle
+	Objects     [NV0000_CTRL_OS_UNIX_IMPORT_OBJECTS_TO_FD_MAX_OBJECTS]Handle
+	ObjectTypes [NV0000_CTRL_OS_UNIX_IMPORT_OBJECTS_TO_FD_MAX_OBJECTS]uint8
+	NumObjects  uint16
+	Index       uint16
+}
+
+func (p *NV0000_CTRL_OS_UNIX_IMPORT_OBJECTS_FROM_FD_PARAMS) GetFrontendFD() int32 {
+	return p.FD
+}
+
+func (p *NV0000_CTRL_OS_UNIX_IMPORT_OBJECTS_FROM_FD_PARAMS) SetFrontendFD(fd int32) {
+	p.FD = fd
+}
+
+type NV0000_CTRL_SYSTEM_GET_BUILD_VERSION_PARAMS struct {
+	_                        structs.HostLayout
+	SizeOfStrings            uint32
+	Pad                      [4]byte
+	PDriverVersionBuffer     P64
+	PVersionBuffer           P64
+	PTitleBuffer             P64
+	ChangelistNumber         uint32
+	OfficialChangelistNumber uint32
+}
+
+const (
+	NV0080_CTRL_CMD_DMA_ADV_SCHED_GET_VA_CAPS = 0x801806
+	NV0080_CTRL_CMD_DMA_GET_CAPS              = 0x80180d
+)
+
+const (
+	NV0041_CTRL_CMD_GET_SURFACE_INFO = 0x410110
+)
+
+const (
+	NV0080_CTRL_CMD_FB_GET_CAPS    = 0x801301
+	NV0080_CTRL_CMD_FB_GET_CAPS_V2 = 0x801307
+)
+
+const (
+	NV0080_CTRL_CMD_FIFO_GET_CAPS                      = 0x801701
+	NV0080_CTRL_CMD_FIFO_GET_ENGINE_CONTEXT_PROPERTIES = 0x801707
+	NV0080_CTRL_CMD_FIFO_GET_CHANNELLIST               = 0x80170d
+	NV0080_CTRL_CMD_FIFO_GET_CAPS_V2                   = 0x801713
+)
+
+type NV0080_CTRL_FIFO_GET_CHANNELLIST_PARAMS struct {
+	_                  structs.HostLayout
+	NumChannels        uint32
+	Pad                [4]byte
+	PChannelHandleList P64
+	PChannelList       P64
+}
+
+const (
+	NV0080_CTRL_CMD_GPU_GET_CLASSLIST              = 0x800201
+	NV0080_CTRL_CMD_GPU_GET_NUM_SUBDEVICES         = 0x800280
+	NV0080_CTRL_CMD_GPU_QUERY_SW_STATE_PERSISTENCE = 0x800288
+	NV0080_CTRL_CMD_GPU_GET_VIRTUALIZATION_MODE    = 0x800289
+	NV0080_CTRL_CMD_GPU_GET_CLASSLIST_V2           = 0x800292
+)
+
+type RmapiParamNvU32List struct {
+	_        structs.HostLayout
+	NumElems uint32
+	Pad      [4]byte
+	List     P64
+}
+
+const (
+	NV0080_CTRL_CMD_GR_GET_CAPS               = 0x801102
+	NV0080_CTRL_CMD_GR_GET_INFO               = 0x801104
+	NV0080_CTRL_CMD_GR_SET_TPC_PARTITION_MODE = 0x801108
+	NV0080_CTRL_CMD_GR_GET_CAPS_V2            = 0x801109
+)
+
+type NV0080_CTRL_GET_CAPS_PARAMS struct {
+	_           structs.HostLayout
+	CapsTblSize uint32
+	Pad         [4]byte
+	CapsTbl     P64
+}
+
+type NV0080_CTRL_GR_ROUTE_INFO struct {
+	_     structs.HostLayout
+	Flags uint32
+	Pad   [4]byte
+	Route uint64
+}
+
+const (
+	NV208F_CTRL_CMD_GPU_VERIFY_INFOROM = 0x208f1105
+)
+
+type NV208F_CTRL_GPU_VERIFY_INFOROM_PARAMS struct {
+	_        structs.HostLayout
+	Result   uint32
+	Checksum uint32
+}
+
+type NvxxxCtrlXxxGetInfoParams struct {
+	_            structs.HostLayout
+	InfoListSize uint32
+	Pad          [4]byte
+	InfoList     P64
+}
+
+func (p *NvxxxCtrlXxxGetInfoParams) ListSize() uint32 {
+	return p.InfoListSize
+}
+
+func (p *NvxxxCtrlXxxGetInfoParams) SetCtrlInfoList(ptr P64) {
+	p.InfoList = ptr
+}
+
+func (p *NvxxxCtrlXxxGetInfoParams) CtrlInfoList() P64 {
+	return p.InfoList
+}
+
+const (
+	NV0080_CTRL_CMD_HOST_GET_CAPS_V2 = 0x801402
+)
+
+const (
+	NV0080_CTRL_CMD_PERF_CUDA_LIMIT_SET_CONTROL = 0x801909
+)
+
+const (
+	NV0080_CTRL_CMD_MSENC_GET_CAPS = 0x801b01
+)
+
+const (
+	NV0080_CTRL_CMD_BSP_GET_CAPS_V2 = 0x801c02
+)
+
+const (
+	NV0080_CTRL_CMD_NVJPG_GET_CAPS_V2 = 0x801f02
+)
+
+const (
+	NV_SEMAPHORE_SURFACE_CTRL_CMD_BIND_CHANNEL   = 0xda0002
+	NV_SEMAPHORE_SURFACE_CTRL_CMD_UNBIND_CHANNEL = 0xda0006
+)
+
+const (
+	NV00DE_CTRL_CMD_REQUEST_DATA_POLL = 0xde0001
+)
+
+const (
+	NV00E0_CTRL_CMD_IMPORT_MEM = 0xe00102
+)
+
+const (
+	NV00F1_CTRL_CMD_GET_FABRIC_EVENTS   = 0xf10001
+	NV00F1_CTRL_CMD_FINISH_MEM_UNIMPORT = 0xf10002
+	NV00F1_CTRL_CMD_DISABLE_IMPORTERS   = 0xf10003
+)
+
+const (
+	NV00F8_CTRL_CMD_DESCRIBE   = 0xf80102
+	NV00F8_CTRL_CMD_ATTACH_MEM = 0xf80103
+)
+
+const (
+	NV00FB_CTRL_CMD_VALIDATE = 0xfb0101
+)
+
+const (
+	NV00FD_CTRL_CMD_GET_INFO          = 0xfd0101
+	NV00FD_CTRL_CMD_ATTACH_MEM        = 0xfd0102
+	NV00FD_CTRL_CMD_ATTACH_GPU        = 0xfd0104
+	NV00FD_CTRL_CMD_DETACH_MEM        = 0xfd0105
+	NV00FD_CTRL_CMD_ATTACH_REMOTE_GPU = 0xfd0106
+	NV00FD_CTRL_CMD_SET_FAILURE       = 0xfd0107
+)
+
+type NV00FD_CTRL_ATTACH_GPU_PARAMS struct {
+	_             structs.HostLayout
+	HSubDevice    Handle
+	Flags         uint32
+	DevDescriptor uint64
+}
+
+const (
+	NV2080_CTRL_CMD_BIOS_GET_INFO = 0x20800802
+)
+
+const (
+	NV2080_CTRL_CMD_BUS_GET_PCI_INFO                   = 0x20801801
+	NV2080_CTRL_CMD_BUS_GET_PCI_BAR_INFO               = 0x20801803
+	NV2080_CTRL_CMD_BUS_GET_INFO                       = 0x20801802
+	NV2080_CTRL_CMD_BUS_GET_INFO_V2                    = 0x20801823
+	NV2080_CTRL_CMD_BUS_GET_PCIE_SUPPORTED_GPU_ATOMICS = 0x2080182a
+	NV2080_CTRL_CMD_BUS_GET_C2C_INFO                   = 0x2080182b
+	NV2080_CTRL_CMD_BUS_GET_PEX_COUNTERS               = 0x20801813
+	NV2080_CTRL_CMD_BUS_GET_PEX_UTIL_COUNTERS          = 0x20801819
+	NV2080_CTRL_CMD_BUS_GET_PCIE_REQ_ATOMICS_CAPS      = 0x20801829
+	NV2080_CTRL_CMD_BUS_GET_PCIE_CPL_ATOMICS_CAPS      = 0x20801830
+)
+
+const (
+	NV2080_CTRL_CMD_CE_GET_CE_PCE_MASK = 0x20802a02
+	NV2080_CTRL_CMD_CE_GET_CAPS_V2     = 0x20802a03
+	NV2080_CTRL_CMD_CE_GET_ALL_CAPS    = 0x20802a0a
+)
+
+const (
+	NV2080_CTRL_CMD_EVENT_SET_NOTIFICATION = 0x20800301
+)
+
+const (
+	NV2080_CTRL_CMD_ECC_GET_REPAIR_STATUS = 0x20803404
+)
+
+const (
+	NV2080_CTRL_CMD_FB_GET_INFO                                    = 0x20801301
+	NV2080_CTRL_CMD_FB_GET_INFO_V2                                 = 0x20801303
+	NV2080_CTRL_CMD_FB_GET_GPU_CACHE_INFO                          = 0x20801315
+	NV2080_CTRL_CMD_FB_GET_FB_REGION_INFO                          = 0x20801320
+	NV2080_CTRL_CMD_FB_GET_SEMAPHORE_SURFACE_LAYOUT                = 0x20801352
+	NV2080_CTRL_CMD_FB_QUERY_DRAM_ENCRYPTION_INFOROM_SUPPORT       = 0x20801358
+	NV2080_CTRL_CMD_FB_QUERY_DRAM_ENCRYPTION_STATUS                = 0x20801359
+	NV2080_CTRL_CMD_FB_QUERY_DRAM_ENCRYPTION_INFOROM_SUPPORT_V575  = NV2080_CTRL_CMD_FB_QUERY_DRAM_ENCRYPTION_INFOROM_SUPPORT - 1
+	NV2080_CTRL_CMD_FB_QUERY_DRAM_ENCRYPTION_STATUS_V575           = NV2080_CTRL_CMD_FB_QUERY_DRAM_ENCRYPTION_STATUS - 1
+	NV2080_CTRL_CMD_FB_GET_OFFLINED_PAGES                          = 0x20801322
+	NV2080_CTRL_CMD_FB_FLUSH_GPU_CACHE                             = 0x2080130e
+	NV2080_CTRL_CMD_FB_QUERY_DRAM_ENCRYPTION_PENDING_CONFIGURATION = 0x20801355
+	NV2080_CTRL_CMD_FB_GET_FS_INFO                                 = 0x20801346
+)
+
+const (
+	NV2080_CTRL_CMD_FIFO_DISABLE_CHANNELS = 0x2080110b
+
+	NV2080_CTRL_FIFO_DISABLE_CHANNELS_MAX_ENTRIES = 64
+)
+
+const (
+	NV2080_CTRL_CMD_FLCN_GET_CTX_BUFFER_SIZE = 0x20803125
+)
+
+type NV2080_CTRL_FIFO_DISABLE_CHANNELS_PARAMS struct {
+	_                      structs.HostLayout
+	BDisable               uint8
+	Pad1                   [3]byte
+	NumChannels            uint32
+	BOnlyDisableScheduling uint8
+	BRewindGpPut           uint8
+	Pad2                   [6]byte
+	PRunlistPreemptEvent   P64
+	HClientList            [NV2080_CTRL_FIFO_DISABLE_CHANNELS_MAX_ENTRIES]Handle
+	HChannelList           [NV2080_CTRL_FIFO_DISABLE_CHANNELS_MAX_ENTRIES]Handle
+}
+
+const (
+	NV2080_CTRL_CMD_GPU_GET_INFO_V2                      = 0x20800102
+	NV2080_CTRL_CMD_GPU_GET_NAME_STRING                  = 0x20800110
+	NV2080_CTRL_CMD_GPU_GET_SHORT_NAME_STRING            = 0x20800111
+	NV2080_CTRL_CMD_GPU_GET_SIMULATION_INFO              = 0x20800119
+	NV2080_CTRL_CMD_GPU_GET_ENGINES                      = 0x20800123
+	NV2080_CTRL_CMD_GPU_QUERY_ECC_STATUS                 = 0x2080012f
+	NV2080_CTRL_CMD_GPU_QUERY_COMPUTE_MODE_RULES         = 0x20800131
+	NV2080_CTRL_CMD_GPU_QUERY_ECC_CONFIGURATION          = 0x20800133
+	NV2080_CTRL_CMD_GPU_GET_OEM_BOARD_INFO               = 0x2080013f
+	NV2080_CTRL_CMD_GPU_GET_ID                           = 0x20800142
+	NV2080_CTRL_CMD_GPU_ACQUIRE_COMPUTE_MODE_RESERVATION = 0x20800145
+	NV2080_CTRL_CMD_GPU_RELEASE_COMPUTE_MODE_RESERVATION = 0x20800146
+	NV2080_CTRL_CMD_GPU_GET_ENGINE_PARTNERLIST           = 0x20800147
+	NV2080_CTRL_CMD_GPU_GET_GID_INFO                     = 0x2080014a
+	NV2080_CTRL_CMD_GPU_GET_INFOROM_OBJECT_VERSION       = 0x2080014b
+	NV2080_CTRL_CMD_GPU_GET_INFOROM_IMAGE_VERSION        = 0x20800156
+	NV2080_CTRL_CMD_GPU_QUERY_INFOROM_ECC_SUPPORT        = 0x20800157
+	NV2080_CTRL_CMD_GPU_GET_ENCODER_CAPACITY             = 0x2080016c
+	NV2080_CTRL_CMD_GPU_GET_ENGINES_V2                   = 0x20800170
+	NV2080_CTRL_CMD_GPU_GET_ACTIVE_PARTITION_IDS         = 0x2080018b
+	NV2080_CTRL_CMD_GPU_GET_PIDS                         = 0x2080018d
+	NV2080_CTRL_CMD_GPU_GET_PID_INFO                     = 0x2080018e
+	NV2080_CTRL_CMD_GPU_GET_COMPUTE_POLICY_CONFIG        = 0x20800195
+	NV2080_CTRL_CMD_GET_GPU_FABRIC_PROBE_INFO            = 0x208001a3
+	NV2080_CTRL_CMD_GPU_GET_NVENC_SW_SESSION_STATS       = 0x2080016d
+	NV2080_CTRL_CMD_GPU_GET_NVFBC_SW_SESSION_STATS       = 0x2080017b
+	NV2080_CTRL_CMD_GPU_GET_SKYLINE_INFO                 = 0x2080019f
+	NV2080_CTRL_CMD_GPU_GET_CHIP_DETAILS                 = 0x208001a4
+	NV2080_CTRL_CMD_GPU_GET_RECOVERY_ACTION              = 0x208001b2
+	NV2080_CTRL_CMD_GPU_EXEC_REG_OPS                     = 0x20800122
+)
+
+const (
+	NV2080_CTRL_CMD_GR_GET_INFO                   = 0x20801201
+	NV2080_CTRL_CMD_GR_GET_ZCULL_INFO             = 0x20801206
+	NV2080_CTRL_CMD_GR_CTXSW_ZCULL_BIND           = 0x20801208
+	NV2080_CTRL_CMD_GR_GET_SM_TO_GPC_TPC_MAPPINGS = 0x2080120f
+	NV2080_CTRL_CMD_GR_SET_CTXSW_PREEMPTION_MODE  = 0x20801210
+	NV2080_CTRL_CMD_GR_GET_CTX_BUFFER_SIZE        = 0x20801218
+	NV2080_CTRL_CMD_GR_GET_GLOBAL_SM_ORDER        = 0x2080121b
+	NV2080_CTRL_CMD_GR_GET_CAPS_V2                = 0x20801227
+	NV2080_CTRL_CMD_GR_GET_GPC_MASK               = 0x2080122a
+	NV2080_CTRL_CMD_GR_GET_TPC_MASK               = 0x2080122b
+	NV2080_CTRL_CMD_GR_GET_SM_ISSUE_RATE_MODIFIER = 0x20801230
+)
+
+const (
+	NV2080_CTRL_CMD_GRMGR_GET_GR_FS_INFO = 0x20803801
+)
+
+const (
+	NV2080_CTRL_CMD_GSP_GET_FEATURES = 0x20803601
+)
+
+type NV2080_CTRL_GR_GET_INFO_PARAMS struct {
+	_ structs.HostLayout
+	NvxxxCtrlXxxGetInfoParams
+	GRRouteInfo NV0080_CTRL_GR_ROUTE_INFO
+}
+
+func (p *NV2080_CTRL_GR_GET_INFO_PARAMS) ListSize() uint32 {
+	return p.InfoListSize
+}
+
+func (p *NV2080_CTRL_GR_GET_INFO_PARAMS) SetCtrlInfoList(ptr P64) {
+	p.InfoList = ptr
+}
+
+func (p *NV2080_CTRL_GR_GET_INFO_PARAMS) CtrlInfoList() P64 {
+	return p.InfoList
+}
+
+type NV2080_CTRL_GPU_REG_OP struct {
+	_               structs.HostLayout
+	RegOp           uint8
+	RegType         uint8
+	RegStatus       uint8
+	RegQuad         uint8
+	RegGroupMask    uint32
+	RegSubGroupMask uint32
+	RegOffset       uint32
+	RegValueHi      uint32
+	RegValueLo      uint32
+	RegAndNMaskHi   uint32
+	RegAndNMaskLo   uint32
+}
+
+var CtrlGpuRegOpSize = uint32((*NV2080_CTRL_GPU_REG_OP)(nil).SizeBytes())
+
+type NV2080_CTRL_GPU_EXEC_REG_OPS_PARAMS struct {
+	_                 structs.HostLayout
+	HClientTarget     Handle
+	HChannelTarget    Handle
+	BNonTransactional uint32
+	Reserved00        [2]uint32
+	RegOpCount        uint32
+	RegOps            P64
+	GRRouteInfo       NV0080_CTRL_GR_ROUTE_INFO
+}
+
+const (
+	NV2080_CTRL_CMD_MC_GET_ARCH_INFO      = 0x20801701
+	NV2080_CTRL_CMD_MC_SERVICE_INTERRUPTS = 0x20801702
+)
+
+const (
+	NV2080_CTRL_CMD_NVLINK_GET_NVLINK_CAPS           = 0x20803001
+	NV2080_CTRL_CMD_NVLINK_GET_NVLINK_STATUS         = 0x20803002
+	NV2080_CTRL_CMD_NVLINK_GET_PLATFORM_INFO         = 0x20803083
+	NV2080_CTRL_CMD_NVLINK_LOCK_REMAP_TABLE_AND_MSE  = 0x2080309d
+	NV2080_CTRL_CMD_NVLINK_SETUP_NVLE_ENCRYPTION_KEY = 0x208030a0
+	NV2080_CTRL_CMD_NVLINK_GET_REMAP_TABLE_INFO_V2   = 0x208030a1
+	NV2080_CTRL_CMD_NVLINK_GET_UPDATE_NVLE_LIDS_V2   = 0x208030a2
+)
+
+const (
+	NV2080_CTRL_CMD_PERF_BOOST              = 0x2080200a
+	NV2080_CTRL_CMD_PERF_GET_CURRENT_PSTATE = 0x20802068
+)
+
+const (
+	NV2080_CTRL_CMD_RC_GET_WATCHDOG_INFO         = 0x20802209
+	NV2080_CTRL_CMD_RC_RELEASE_WATCHDOG_REQUESTS = 0x2080220c
+	NV2080_CTRL_CMD_RC_SOFT_DISABLE_WATCHDOG     = 0x20802210
+)
+
+const (
+	NV2080_CTRL_CMD_TIMER_GET_TIME                          = 0x20800403
+	NV2080_CTRL_CMD_TIMER_GET_GPU_CPU_TIME_CORRELATION_INFO = 0x20800406
+	NV2080_CTRL_CMD_TIMER_SET_GR_TICK_FREQ                  = 0x20800407
+)
+
+const (
+	NV2080_CTRL_CMD_THERMAL_SYSTEM_EXECUTE_V2 = 0x20800513
+)
+
+const (
+	NV2080_CTRL_CMD_OS_UNIX_VIDMEM_PERSISTENCE_STATUS = 0x20803d07
+)
+
+const (
+	NV503C_CTRL_CMD_REGISTER_VA_SPACE = 0x503c0102
+	NV503C_CTRL_CMD_REGISTER_VIDMEM   = 0x503c0104
+	NV503C_CTRL_CMD_UNREGISTER_VIDMEM = 0x503c0105
+)
+
+type NV503C_CTRL_REGISTER_VA_SPACE_PARAMS struct {
+	_            structs.HostLayout
+	HVASpace     Handle
+	Pad          [4]byte
+	VASpaceToken uint64
+}
+
+const (
+	NV83DE_CTRL_CMD_DEBUG_SET_EXCEPTION_MASK        = 0x83de0309
+	NV83DE_CTRL_CMD_DEBUG_READ_ALL_SM_ERROR_STATES  = 0x83de030c
+	NV83DE_CTRL_CMD_DEBUG_CLEAR_ALL_SM_ERROR_STATES = 0x83de0310
+)
+
+const (
+	NVC36F_CTRL_GET_CLASS_ENGINEID                           = 0xc36f0101
+	NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN             = 0xc36f0108
+	NVC36F_CTRL_CMD_GPFIFO_SET_WORK_SUBMIT_TOKEN_NOTIF_INDEX = 0xc36f010a
+)
+
+const (
+	NVC56F_CTRL_CMD_GET_KMB = 0xc56f010b
+)
+
+const (
+	NV906F_CTRL_GET_CLASS_ENGINEID = 0x906f0101
+	NV906F_CTRL_CMD_RESET_CHANNEL  = 0x906f0102
+)
+
+const (
+	NV9096_CTRL_CMD_GET_ZBC_CLEAR_TABLE_SIZE  = 0x90960106
+	NV9096_CTRL_CMD_GET_ZBC_CLEAR_TABLE_ENTRY = 0x90960107
+	NV9096_CTRL_CMD_SET_ZBC_COLOR_CLEAR       = 0x90960101
+)
+
+const (
+	NV90E6_CTRL_CMD_MASTER_GET_VIRTUAL_FUNCTION_ERROR_CONT_INTR_MASK = 0x90e60102
+)
+
+const (
+	NVA06C_CTRL_CMD_GPFIFO_SCHEDULE = 0xa06c0101
+	NVA06C_CTRL_CMD_SET_TIMESLICE   = 0xa06c0103
+	NVA06C_CTRL_CMD_GET_TIMESLICE   = 0xa06c0104
+	NVA06C_CTRL_CMD_PREEMPT         = 0xa06c0105
+)
+
+const (
+	NVA06F_CTRL_CMD_GPFIFO_SCHEDULE = 0xa06f0103
+	NVA06F_CTRL_CMD_BIND            = 0xa06f0104
+)
+
+const (
+	NV90CC_CTRL_CMD_POWER_REQUEST_FEATURES = 0x90cc0301
+	NV90CC_CTRL_CMD_POWER_RELEASE_FEATURES = 0x90cc0302
+)
+
+const (
+	NVB0CC_CTRL_CMD_RESERVE_HWPM_LEGACY        = 0xb0cc0101
+	NVB0CC_CTRL_CMD_RELEASE_HWPM_LEGACY        = 0xb0cc0102
+	NVB0CC_CTRL_CMD_RESERVE_PM_AREA_SMPC       = 0xb0cc0103
+	NVB0CC_CTRL_CMD_RELEASE_PM_AREA_SMPC       = 0xb0cc0104
+	NVB0CC_CTRL_CMD_ALLOC_PMA_STREAM           = 0xb0cc0105
+	NVB0CC_CTRL_CMD_FREE_PMA_STREAM            = 0xb0cc0106
+	NVB0CC_CTRL_CMD_BIND_PM_RESOURCES          = 0xb0cc0107
+	NVB0CC_CTRL_CMD_UNBIND_PM_RESOURCES        = 0xb0cc0108
+	NVB0CC_CTRL_CMD_PMA_STREAM_UPDATE_GET_PUT  = 0xb0cc0109
+	NVB0CC_CTRL_CMD_EXEC_REG_OPS               = 0xb0cc010a
+	NVB0CC_CTRL_CMD_RESERVE_PM_AREA_PC_SAMPLER = 0xb0cc010b
+	NVB0CC_CTRL_CMD_RELEASE_PM_AREA_PC_SAMPLER = 0xb0cc010c
+	NVB0CC_CTRL_CMD_GET_TOTAL_HS_CREDITS       = 0xb0cc010d
+	NVB0CC_CTRL_CMD_SET_HS_CREDITS             = 0xb0cc010e
+	NVB0CC_CTRL_CMD_RESERVE_CCU_PROF           = 0xb0cc0119
+	NVB0CC_CTRL_CMD_POWER_REQUEST_FEATURES     = 0xb0cc0301
+	NVB0CC_CTRL_CMD_POWER_RELEASE_FEATURES     = 0xb0cc0302
+)
+
+const (
+	NV_CONF_COMPUTE_CTRL_CMD_SYSTEM_GET_CAPABILITIES     = 0xcb330101
+	NV_CONF_COMPUTE_CTRL_CMD_SYSTEM_GET_GPUS_STATE       = 0xcb330104
+	NV_CONF_COMPUTE_CTRL_CMD_GPU_GET_NUM_SECURE_CHANNELS = 0xcb33010b
+	NV_CONF_COMPUTE_CTRL_CMD_GPU_GET_KEY_ROTATION_STATE  = 0xcb33010c
+)
+
+const (
+	UNKNOWN_CONTROL_COMMAND_80028B = 0x80028b
+)

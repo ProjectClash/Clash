@@ -1,0 +1,41 @@
+
+package loopback
+
+import (
+	"context"
+
+	"github.com/metacubex/gvisor/pkg/state"
+)
+
+func (e *endpoint) StateTypeName() string {
+	return "pkg/tcpip/link/loopback.endpoint"
+}
+
+func (e *endpoint) StateFields() []string {
+	return []string{
+		"dispatcher",
+		"addr",
+		"mtu",
+	}
+}
+
+func (e *endpoint) beforeSave() {}
+
+func (e *endpoint) StateSave(stateSinkObject state.Sink) {
+	e.beforeSave()
+	stateSinkObject.Save(0, &e.dispatcher)
+	stateSinkObject.Save(1, &e.addr)
+	stateSinkObject.Save(2, &e.mtu)
+}
+
+func (e *endpoint) afterLoad(context.Context) {}
+
+func (e *endpoint) StateLoad(ctx context.Context, stateSourceObject state.Source) {
+	stateSourceObject.Load(0, &e.dispatcher)
+	stateSourceObject.Load(1, &e.addr)
+	stateSourceObject.Load(2, &e.mtu)
+}
+
+func init() {
+	state.Register((*endpoint)(nil))
+}

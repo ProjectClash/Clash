@@ -1,0 +1,38 @@
+
+package faketime
+
+import (
+	"context"
+
+	"github.com/metacubex/gvisor/pkg/state"
+)
+
+func (mc *ManualClock) StateTypeName() string {
+	return "pkg/tcpip/faketime.ManualClock"
+}
+
+func (mc *ManualClock) StateFields() []string {
+	return []string{
+		"runningTimers",
+		"mu",
+	}
+}
+
+func (mc *ManualClock) beforeSave() {}
+
+func (mc *ManualClock) StateSave(stateSinkObject state.Sink) {
+	mc.beforeSave()
+	stateSinkObject.Save(0, &mc.runningTimers)
+	stateSinkObject.Save(1, &mc.mu)
+}
+
+func (mc *ManualClock) afterLoad(context.Context) {}
+
+func (mc *ManualClock) StateLoad(ctx context.Context, stateSourceObject state.Source) {
+	stateSourceObject.Load(0, &mc.runningTimers)
+	stateSourceObject.Load(1, &mc.mu)
+}
+
+func init() {
+	state.Register((*ManualClock)(nil))
+}

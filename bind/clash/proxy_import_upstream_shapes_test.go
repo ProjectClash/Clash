@@ -1,0 +1,57 @@
+package clash
+
+import (
+	"encoding/json"
+	"os"
+	"regexp"
+	"sort"
+	"testing"
+
+	"github.com/ProjectClash/Clash/common/convert"
+)
+
+func TestEveryUpstreamTestedShapeIsImportable(t *testing.T) {
+	raw, err := os.ReadFile("../../common/convert/converter_test.go")
+	if err != nil {
+		t.Skipf("upstream test corpus unavailable in this tree: %v", err)
+	}
+	seen := make(map[string]bool)
+	var uris []string
+	for _, match := range regexp.MustCompile(`"([a-z0-9+]+://[^"]+)"`).FindAllStringSubmatch(string(raw), -1) {
+		if !seen[match[1]] {
+			seen[match[1]] = true
+			uris = append(uris, match[1])
+		}
+	}
+	sort.Strings(uris)
+	if len(uris) == 0 {
+		t.Fatal("no share-link URIs found in the upstream test file; the extraction pattern no longer matches")
+	}
+
+	graded := 0
+	for _, uri := range uris {
+		upstream, upstreamErr := convert.ConvertsV2Ray([]byte(uri))
+		if upstreamErr != nil || len(upstream) == 0 {
+			continue
+		}
+		graded++
+		t.Run(uri, func(t *testing.T) {
+			box, err := InspectProxyPayloadForIOS([]byte(uri), "nodeBundle")
+			if err != nil {
+				t.Fatalf("upstream builds a proxy from this and the importer refused the payload outright: %v", err)
+			}
+			var report proxyImportReport
+			if err := json.Unmarshal([]byte(box.Value), &report); err != nil {
+				t.Fatalf("decode report: %v", err)
+			}
+			if len(report.Proxies) == 0 {
+				t.Fatalf("upstream builds a proxy from this, the importer does not.\n  rejected: %+v\n  unsupported: %+v",
+					report.Skipped, report.Skipped)
+			}
+		})
+	}
+	if graded == 0 {
+		t.Fatal("no URI was graded; upstream built nothing, so this gate proved nothing")
+	}
+	t.Logf("graded %d of %d upstream share-link shapes", graded, len(uris))
+}

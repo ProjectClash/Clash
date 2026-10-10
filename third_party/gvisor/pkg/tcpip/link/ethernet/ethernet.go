@@ -1,0 +1,102 @@
+// Copyright 2020 The gVisor Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package ethernet
+
+import (
+	"github.com/metacubex/gvisor/pkg/tcpip"
+	"github.com/metacubex/gvisor/pkg/tcpip/header"
+	"github.com/metacubex/gvisor/pkg/tcpip/link/nested"
+	"github.com/metacubex/gvisor/pkg/tcpip/stack"
+)
+
+var _ stack.NetworkDispatcher = (*Endpoint)(nil)
+var _ stack.LinkEndpoint = (*Endpoint)(nil)
+
+func New(ep stack.LinkEndpoint) *Endpoint {
+	var e Endpoint
+	e.Endpoint.Init(ep, &e)
+	return &e
+}
+
+type Endpoint struct {
+	nested.Endpoint
+}
+
+func (e *Endpoint) LinkAddress() tcpip.LinkAddress {
+	if l := e.Endpoint.LinkAddress(); len(l) != 0 {
+		return l
+	}
+	return header.UnspecifiedEthernetAddress
+}
+
+func (e *Endpoint) MTU() uint32 {
+	if mtu := e.Endpoint.MTU(); mtu > header.EthernetMinimumSize {
+		return mtu - header.EthernetMinimumSize
+	}
+	return 0
+}
+
+func (e *Endpoint) DeliverNetworkPacket(_ tcpip.NetworkProtocolNumber, pkt *stack.PacketBuffer) {
+	if !e.ParseHeader(pkt) {
+		return
+	}
+	eth := header.Ethernet(pkt.LinkHeader().Slice())
+	dst := eth.DestinationAddress()
+	if dst == header.EthernetBroadcastAddress {
+		pkt.PktType = tcpip.PacketBroadcast
+	} else if header.IsMulticastEthernetAddress(dst) {
+		pkt.PktType = tcpip.PacketMulticast
+	} else if dst == e.LinkAddress() {
+		pkt.PktType = tcpip.PacketHost
+	} else {
+		pkt.PktType = tcpip.PacketOtherHost
+	}
+
+	e.Endpoint.DeliverNetworkPacket(eth.Type(), pkt)
+}
+
+func (e *Endpoint) Capabilities() stack.LinkEndpointCapabilities {
+	c := e.Endpoint.Capabilities()
+	if c&stack.CapabilityLoopback == 0 {
+		c |= stack.CapabilityResolutionRequired
+	}
+	return c
+}
+
+func (e *Endpoint) MaxHeaderLength() uint16 {
+	return header.EthernetMinimumSize + e.Endpoint.MaxHeaderLength()
+}
+
+func (e *Endpoint) ARPHardwareType() header.ARPHardwareType {
+	if a := e.Endpoint.ARPHardwareType(); a != header.ARPHardwareNone {
+		return a
+	}
+	return header.ARPHardwareEther
+}
+
+func (*Endpoint) AddHeader(pkt *stack.PacketBuffer) {
+	eth := header.Ethernet(pkt.LinkHeader().Push(header.EthernetMinimumSize))
+	fields := header.EthernetFields{
+		SrcAddr: pkt.EgressRoute.LocalLinkAddress,
+		DstAddr: pkt.EgressRoute.RemoteLinkAddress,
+		Type:    pkt.NetworkProtocolNumber,
+	}
+	eth.Encode(&fields)
+}
+
+func (*Endpoint) ParseHeader(pkt *stack.PacketBuffer) bool {
+	_, ok := pkt.LinkHeader().Consume(header.EthernetMinimumSize)
+	return ok
+}

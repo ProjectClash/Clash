@@ -1,0 +1,110 @@
+package tun
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/metacubex/gvisor/pkg/atomicbitops"
+	"github.com/metacubex/gvisor/pkg/refs"
+)
+
+const tunEndpointenableLogging = false
+
+var tunEndpointobj *tunEndpoint
+
+type tunEndpointRefs struct {
+	refCount atomicbitops.Int64
+}
+
+func (r *tunEndpointRefs) InitRefs() {
+
+	r.refCount.RacyStore(1)
+	refs.Register(r)
+}
+
+func (r *tunEndpointRefs) RefType() string {
+	return fmt.Sprintf("%T", tunEndpointobj)[1:]
+}
+
+func (r *tunEndpointRefs) LeakMessage() string {
+	return fmt.Sprintf("[%s %p] reference count of %d instead of 0", r.RefType(), r, r.ReadRefs())
+}
+
+func (r *tunEndpointRefs) LogRefs() bool {
+	return tunEndpointenableLogging
+}
+
+func (r *tunEndpointRefs) ReadRefs() int64 {
+	return r.refCount.Load()
+}
+
+// IncRef implements refs.RefCounter.IncRef.
+//
+//go:nosplit
+func (r *tunEndpointRefs) IncRef() {
+	v := r.refCount.Add(1)
+	if tunEndpointenableLogging {
+		refs.LogIncRef(r, v)
+	}
+	if v <= 1 {
+		panic(fmt.Sprintf("Incrementing non-positive count %p on %s", r, r.RefType()))
+	}
+}
+
+// TryIncRef implements refs.TryRefCounter.TryIncRef.
+//
+// To do this safely without a loop, a speculative reference is first acquired
+// on the object. This allows multiple concurrent TryIncRef calls to distinguish
+// other TryIncRef calls from genuine references held.
+//
+//go:nosplit
+func (r *tunEndpointRefs) TryIncRef() bool {
+	const speculativeRef = 1 << 32
+	if v := r.refCount.Add(speculativeRef); int32(v) == 0 {
+
+		r.refCount.Add(-speculativeRef)
+		return false
+	}
+
+	v := r.refCount.Add(-speculativeRef + 1)
+	if tunEndpointenableLogging {
+		refs.LogTryIncRef(r, v)
+	}
+	return true
+}
+
+// DecRef implements refs.RefCounter.DecRef.
+//
+// Note that speculative references are counted here. Since they were added
+// prior to real references reaching zero, they will successfully convert to
+// real references. In other words, we see speculative references only in the
+// following case:
+//
+//	A: TryIncRef [speculative increase => sees non-negative references]
+//	B: DecRef [real decrease]
+//	A: TryIncRef [transform speculative to real]
+//
+//go:nosplit
+func (r *tunEndpointRefs) DecRef(destroy func()) {
+	v := r.refCount.Add(-1)
+	if tunEndpointenableLogging {
+		refs.LogDecRef(r, v)
+	}
+	switch {
+	case v < 0:
+		panic(fmt.Sprintf("Decrementing non-positive ref count %p, owned by %s", r, r.RefType()))
+
+	case v == 0:
+		refs.Unregister(r)
+
+		if destroy != nil {
+			destroy()
+		}
+	}
+}
+
+func (r *tunEndpointRefs) afterLoad(context.Context) {
+	if r.ReadRefs() > 0 {
+		refs.Register(r)
+	}
+}
