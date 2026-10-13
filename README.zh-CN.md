@@ -36,7 +36,7 @@ Clash 是基于 [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) 的独�
 | 组件 | 当前基准 |
 | --- | --- |
 | 上游引擎 | mihomo **v1.19.32**，记录于 [`UPSTREAM_VERSION`](UPSTREAM_VERSION) |
-| 已发布的 Apple SDK | [`v1.19.32-clash.1`](https://github.com/ProjectClash/Clash/releases/tag/v1.19.32-clash.1) |
+| 已发布的 Apple SDK | [`v1.19.32-clash.2`](https://github.com/ProjectClash/Clash/releases/tag/v1.19.32-clash.2) |
 | 客户端集成 | 客户端的 [`Dependencies.lock.json`](https://github.com/ProjectClash/Clash-Client/blob/main/Dependencies.lock.json) 固定 Kernel 和 Adapter 提交 |
 
 上游引擎版本、SDK 发布标签和 App Store 应用版本分别管理。复现 SDK 发行版时请使用发布标签；`main` 可能包含后续修改。Client 和 Adapter 源码目前按提交发布，没有各自的发行标签。
