@@ -243,6 +243,8 @@ type Node struct {
 
 	Line   int
 	Column int
+
+	clash *clashSequence
 }
 
 func (n *Node) IsZero() bool {

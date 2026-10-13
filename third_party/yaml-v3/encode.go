@@ -405,6 +405,9 @@ func (e *encoder) nodev(in reflect.Value) {
 }
 
 func (e *encoder) node(node *Node, tail string) {
+	if node.clash != nil {
+		failf("the sequence at line %d was decoded item by item and holds no nodes to encode", node.Line)
+	}
 	if node.Kind == 0 && node.IsZero() {
 		e.nilv()
 		return

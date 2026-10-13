@@ -34,6 +34,7 @@ type parser struct {
 	anchors  map[string]*Node
 	doneInit bool
 	textless bool
+	clash    *clashStreamState
 }
 
 func newParser(b []byte) *parser {
@@ -191,6 +192,7 @@ func (p *parser) document() *Node {
 	n := p.node(DocumentNode, "", "", "")
 	p.doc = n
 	p.expect(yaml_DOCUMENT_START_EVENT)
+	p.clashDocument()
 	p.parseChild(n)
 	if p.peek() == yaml_DOCUMENT_END_EVENT {
 		n.FootComment = string(p.event.foot_comment)
@@ -204,6 +206,9 @@ func (p *parser) alias() *Node {
 	n.Alias = p.anchors[n.Value]
 	if n.Alias == nil {
 		failf("unknown anchor '%s' referenced", n.Value)
+	}
+	if p.clash != nil {
+		p.clash.aliases++
 	}
 	p.expect(yaml_ALIAS_EVENT)
 	return n
@@ -256,6 +261,7 @@ func (p *parser) sequence() *Node {
 }
 
 func (p *parser) mapping() *Node {
+	root := p.clashRoot()
 	n := p.node(MappingNode, mapTag, string(p.event.tag), "")
 	block := true
 	if p.event.mapping_style()&yaml_FLOW_MAPPING_STYLE != 0 {
@@ -272,7 +278,7 @@ func (p *parser) mapping() *Node {
 				k.FootComment = ""
 			}
 		}
-		v := p.parseChild(n)
+		v := p.clashChild(n, k, root)
 		if k.FootComment == "" && v.FootComment != "" {
 			k.FootComment = v.FootComment
 			v.FootComment = ""
@@ -456,6 +462,9 @@ func (d *decoder) unmarshal(n *Node, out reflect.Value) (good bool) {
 	}
 	if d.aliasCount > 100 && d.decodeCount > 1000 && float64(d.aliasCount)/float64(d.decodeCount) > allowedAliasRatio(d.decodeCount) {
 		failf("document contains excessive aliasing")
+	}
+	if n.clash != nil {
+		return d.clashStreamed(n, out)
 	}
 	if out.Type() == nodeType {
 		out.Set(reflect.ValueOf(n).Elem())
