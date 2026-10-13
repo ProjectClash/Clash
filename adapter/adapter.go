@@ -14,7 +14,6 @@ import (
 	"github.com/ProjectClash/Clash/common/atomic"
 	"github.com/ProjectClash/Clash/common/queue"
 	"github.com/ProjectClash/Clash/common/utils"
-	"github.com/ProjectClash/Clash/common/xsync"
 	"github.com/ProjectClash/Clash/component/ca"
 	C "github.com/ProjectClash/Clash/constant"
 	"github.com/ProjectClash/Clash/log"
@@ -31,15 +30,17 @@ const (
 type internalProxyState struct {
 	alive   atomic.Bool
 	history *queue.Queue[C.DelayHistory]
+	asked   string
 }
 
 type Proxy struct {
 	C.ProxyAdapter
 	alive   atomic.Bool
-	history *queue.Queue[C.DelayHistory]
-	extra   xsync.Map[string, *internalProxyState]
+	history nodeHistory
+	extra   proxyStates
 	now func() time.Time
 	urlTests urlTestFlights
+	clashRecorded func(url string, record C.DelayHistory, alive bool, urlRecord C.DelayHistory, urlAlive bool, asked string)
 }
 
 type URLTestOutcome struct {
@@ -148,6 +149,9 @@ func (p *Proxy) LastDelayForTestUrl(url string) (delay uint16) {
 
 // MarshalJSON implements C.ProxyAdapter
 func (p *Proxy) MarshalJSON() ([]byte, error) {
+	if b, ok, err := p.clashAppendJSON(nil); ok {
+		return b, err
+	}
 	inner, err := p.ProxyAdapter.MarshalJSON()
 	if err != nil {
 		return inner, err
@@ -194,12 +198,26 @@ func (p *Proxy) clock() time.Time {
 	return time.Now()
 }
 
-var urlTestAdmission = atomic.NewTypedValue[func(ctx context.Context) error](nil)
+var urlTestAdmission = atomic.NewTypedValue[func(ctx context.Context) (func(), error)](nil)
 
 var ErrURLTestDeferred = errors.New("url test deferred: memory admission")
 
 func SetURLTestAdmission(f func(ctx context.Context) error) {
+	if f == nil {
+		urlTestAdmission.Store(nil)
+		return
+	}
+	urlTestAdmission.Store(func(ctx context.Context) (func(), error) { return nil, f(ctx) })
+}
+
+func SetURLTestGate(f func(ctx context.Context) (func(), error)) {
 	urlTestAdmission.Store(f)
+}
+
+var urlTestFinished = atomic.NewTypedValue[func(ctx context.Context, proxy *Proxy)](nil)
+
+func SetURLTestFinished(f func(ctx context.Context, proxy *Proxy)) {
+	urlTestFinished.Store(f)
 }
 
 type backgroundProbeKey struct{}
@@ -213,16 +231,22 @@ func IsBackgroundProbe(ctx context.Context) bool {
 	return v
 }
 
+type urlTestTimeoutKey struct{}
+
+func WithURLTestTimeout(ctx context.Context, timeout time.Duration) context.Context {
+	return context.WithValue(ctx, urlTestTimeoutKey{}, timeout)
+}
+
+func urlTestTimeoutOf(ctx context.Context) (time.Duration, bool) {
+	timeout, ok := ctx.Value(urlTestTimeoutKey{}).(time.Duration)
+	return timeout, ok
+}
+
 func (p *Proxy) urlTest(ctx context.Context, url string, expectedStatus utils.IntRanges[uint16]) (t uint16, satisfied bool, status int, err error) {
 	return p.urlTestShared(ctx, url, expectedStatus)
 }
 
 func (p *Proxy) urlTestOnce(ctx context.Context, url string, expectedStatus utils.IntRanges[uint16]) (t uint16, satisfied bool, status int, err error) {
-	if admit := urlTestAdmission.Load(); admit != nil {
-		if admitErr := admit(ctx); admitErr != nil {
-			return 0, false, 0, admitErr
-		}
-	}
 	defer func() {
 		alive := err == nil
 		record := C.DelayHistory{Time: time.Now()}
@@ -231,6 +255,7 @@ func (p *Proxy) urlTestOnce(ctx context.Context, url string, expectedStatus util
 		}
 
 		p.alive.Store(alive)
+		historyRecord, historyAlive := record, alive
 		p.history.Put(record)
 		if p.history.Len() > defaultHistoriesNum {
 			p.history.Pop()
@@ -254,6 +279,9 @@ func (p *Proxy) urlTestOnce(ctx context.Context, url string, expectedStatus util
 			state.history.Pop()
 		}
 
+		if p.clashRecorded != nil {
+			p.clashRecorded(url, historyRecord, historyAlive, record, alive, expectedStatus.String())
+		}
 	}()
 
 	unifiedDelay := UnifiedDelay.Load()
@@ -345,7 +373,6 @@ func (p *Proxy) urlTestOnce(ctx context.Context, url string, expectedStatus util
 func NewProxy(adapter C.ProxyAdapter) *Proxy {
 	return &Proxy{
 		ProxyAdapter: adapter,
-		history:      queue.New[C.DelayHistory](defaultHistoriesNum),
 		alive:        atomic.NewBool(true),
 	}
 }

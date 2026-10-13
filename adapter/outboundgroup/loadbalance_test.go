@@ -51,9 +51,9 @@ func TestLoadBalanceHashKeyInUserSurvivesADestinationChange(t *testing.T) {
 	hosts := []string{"a.example.com", "b.example.org", "c.example.net", "d.example.io"}
 
 	byUser := strategyConsistentHashing(testUrl, getKeyWithInUser(getKey))
-	pinned := indexOf(t, proxies, byUser(proxies, request("job-1", hosts[0]), false))
+	pinned := indexOf(t, proxies, byUser(C.ProxySlice(proxies), request("job-1", hosts[0]), false))
 	for _, host := range hosts {
-		selected := byUser(proxies, request("job-1", host), false)
+		selected := byUser(C.ProxySlice(proxies), request("job-1", host), false)
 		require.Equal(t, pinned, indexOf(t, proxies, selected),
 			"hash-key: user must ignore the destination")
 	}
@@ -61,7 +61,7 @@ func TestLoadBalanceHashKeyInUserSurvivesADestinationChange(t *testing.T) {
 	byDestination := strategyConsistentHashing(testUrl, getKey)
 	seen := map[int]bool{}
 	for _, host := range hosts {
-		seen[indexOf(t, proxies, byDestination(proxies, request("job-1", host), false))] = true
+		seen[indexOf(t, proxies, byDestination(C.ProxySlice(proxies), request("job-1", host), false))] = true
 	}
 	require.Greater(t, len(seen), 1,
 		"the default key is expected to move with the destination")
@@ -74,7 +74,7 @@ func TestLoadBalanceHashKeyInUserSpreadsUsers(t *testing.T) {
 
 	seen := map[int]bool{}
 	for _, user := range []string{"job-1", "job-2", "job-3", "job-4", "job-5", "job-6"} {
-		selected := strategy(proxies, request(user, "a.example.com"), false)
+		selected := strategy(C.ProxySlice(proxies), request(user, "a.example.com"), false)
 		seen[indexOf(t, proxies, selected)] = true
 	}
 	require.Greater(t, len(seen), 1)
@@ -86,14 +86,14 @@ func TestLoadBalanceHashKeyInUserSeparatesJobsSharingASourceAddress(t *testing.T
 	proxies := balancedProxies(8)
 	strategy := strategyStickySessions(testUrl, getKeyWithInUser(getKeyWithSrcAndDst))
 
-	first := indexOf(t, proxies, strategy(proxies, request("job-1", "a.example.com"), false))
+	first := indexOf(t, proxies, strategy(C.ProxySlice(proxies), request("job-1", "a.example.com"), false))
 	require.Equal(t, first,
-		indexOf(t, proxies, strategy(proxies, request("job-1", "b.example.org"), false)))
+		indexOf(t, proxies, strategy(C.ProxySlice(proxies), request("job-1", "b.example.org"), false)))
 
 	shared := strategyStickySessions(testUrl, getKeyWithSrcAndDst)
 	require.Equal(t,
-		indexOf(t, proxies, shared(proxies, request("job-1", "a.example.com"), false)),
-		indexOf(t, proxies, shared(proxies, request("job-2", "a.example.com"), false)),
+		indexOf(t, proxies, shared(C.ProxySlice(proxies), request("job-1", "a.example.com"), false)),
+		indexOf(t, proxies, shared(C.ProxySlice(proxies), request("job-2", "a.example.com"), false)),
 		"without a supplied key the two jobs are one session")
 }
 

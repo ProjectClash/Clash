@@ -31,5 +31,9 @@ func (hc *HealthCheck) checkScheduled() {
 }
 
 func (hc *HealthCheck) scheduledRound(began time.Time) {
-	hc.round(hc.scheduledDo, began)
+	began, ok := scheduledRoundBegan(hc.ctx, began)
+	if !ok {
+		return
+	}
+	hc.round(hc.scheduledDo, began, true)
 }

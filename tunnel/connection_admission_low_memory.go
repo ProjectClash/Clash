@@ -9,13 +9,21 @@ const lowMemoryTCPConnectionAdmissionLimit int64 = 416
 var (
 	activeTCPConnectionSlots   atomic.Int64
 	rejectedTCPConnectionTotal atomic.Uint64
+	evictedTCPConnectionTotal  atomic.Uint64
 )
 
 func acquireTCPConnectionSlot() bool {
+	if tryAcquireTCPConnectionSlot() {
+		return true
+	}
+	noteTCPConnectionRejected()
+	return false
+}
+
+func tryAcquireTCPConnectionSlot() bool {
 	for {
 		active := activeTCPConnectionSlots.Load()
 		if active >= lowMemoryTCPConnectionAdmissionLimit {
-			rejectedTCPConnectionTotal.Add(1)
 			return false
 		}
 		if activeTCPConnectionSlots.CompareAndSwap(active, active+1) {
@@ -23,6 +31,10 @@ func acquireTCPConnectionSlot() bool {
 		}
 	}
 }
+
+func noteTCPConnectionRejected() { rejectedTCPConnectionTotal.Add(1) }
+
+func noteTCPConnectionEvicted() { evictedTCPConnectionTotal.Add(1) }
 
 func releaseTCPConnectionSlot() {
 	activeTCPConnectionSlots.Add(-1)
@@ -33,5 +45,6 @@ func TCPConnectionAdmissionSnapshot() TCPConnectionAdmission {
 		Limit:    lowMemoryTCPConnectionAdmissionLimit,
 		Active:   activeTCPConnectionSlots.Load(),
 		Rejected: rejectedTCPConnectionTotal.Load(),
+		Evicted:  evictedTCPConnectionTotal.Load(),
 	}
 }

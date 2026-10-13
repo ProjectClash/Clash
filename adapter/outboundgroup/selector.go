@@ -16,7 +16,7 @@ type SelectorOption struct {
 type Selector struct {
 	*GroupBase
 	disableUDP bool
-	selected   string
+	selected   groupSelection
 	testUrl    string
 }
 
@@ -55,8 +55,9 @@ func (s *Selector) IsL3Protocol(metadata *C.Metadata) bool {
 // MarshalJSON implements C.ProxyAdapter
 func (s *Selector) MarshalJSON() ([]byte, error) {
 	all := []string{}
-	for _, proxy := range s.GetProxies(false) {
-		all = append(all, proxy.Name())
+	members := s.Members(false)
+	for i := 0; i < members.Len(); i++ {
+		all = append(all, members.At(i).Name())
 	}
 	// When testurl is the default value
 	// do not append a value to ensure that the web dashboard follows the settings of the dashboard
@@ -81,18 +82,16 @@ func (s *Selector) Now() string {
 }
 
 func (s *Selector) Set(name string) error {
-	for _, proxy := range s.GetProxies(false) {
-		if proxy.Name() == name {
-			s.selected = name
-			return nil
-		}
+	if _, _, ok := s.memberNamed(false, name); ok {
+		s.selected.Store(name)
+		return nil
 	}
 
 	return errors.New("proxy not exist")
 }
 
 func (s *Selector) ForceSet(name string) {
-	s.selected = name
+	s.selected.Store(name)
 }
 
 // Unwrap implements C.ProxyAdapter
@@ -101,14 +100,12 @@ func (s *Selector) Unwrap(metadata *C.Metadata, touch bool) C.Proxy {
 }
 
 func (s *Selector) selectedProxy(touch bool) C.Proxy {
-	proxies := s.GetProxies(touch)
-	for _, proxy := range proxies {
-		if proxy.Name() == s.selected {
-			return proxy
-		}
+	proxy, proxies, ok := s.memberNamed(touch, s.selected.Load())
+	if ok {
+		return proxy
 	}
 
-	return proxies[0]
+	return proxies.At(0)
 }
 
 func (s *Selector) Providers() []P.ProxyProvider {
@@ -120,7 +117,7 @@ func (s *Selector) Proxies() []C.Proxy {
 }
 
 func NewSelector(option GroupCommonOption, selectorOption SelectorOption, emptyFallback C.Proxy, providers []P.ProxyProvider) (*Selector, error) {
-	return &Selector{
+	s := &Selector{
 		GroupBase: NewGroupBase(GroupBaseOption{
 			Name:           option.Name,
 			Type:           C.Selector,
@@ -134,8 +131,9 @@ func NewSelector(option GroupCommonOption, selectorOption SelectorOption, emptyF
 			EmptyFallback:  emptyFallback,
 			Providers:      providers,
 		}),
-		selected:   selectorOption.DefaultSelected,
 		disableUDP: option.DisableUDP,
 		testUrl:    option.URL,
-	}, nil
+	}
+	s.selected.Store(selectorOption.DefaultSelected)
+	return s, nil
 }

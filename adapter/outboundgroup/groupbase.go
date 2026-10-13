@@ -30,6 +30,7 @@ type GroupBase struct {
 	excludeTypeArray  []string
 	providers         []P.ProxyProvider
 	failedTestMux     sync.Mutex
+	failedMembers     failedMembers
 	failedTimes       int
 	failedTime        time.Time
 	failedTesting     atomic.Bool
@@ -38,9 +39,11 @@ type GroupBase struct {
 	emptyFallback     C.Proxy
 
 	// for GetProxies
-	getProxiesMutex  sync.Mutex
-	providerVersions []uint32
-	providerProxies  []C.Proxy
+	getProxiesMutex   sync.Mutex
+	providerVersions  []uint32
+	providerProxies   C.ProxyList
+	membersGeneration uint64
+	named             *namedMember
 }
 
 type GroupBaseOption struct {
@@ -122,6 +125,15 @@ func (gb *GroupBase) Touch() {
 }
 
 func (gb *GroupBase) GetProxies(touch bool) []C.Proxy {
+	return C.ProxiesOf(gb.Members(touch))
+}
+
+func (gb *GroupBase) Members(touch bool) C.ProxyList {
+	members, _ := gb.membersAndGeneration(touch)
+	return members
+}
+
+func (gb *GroupBase) membersAndGeneration(touch bool) (C.ProxyList, uint64) {
 	providerVersions := make([]uint32, len(gb.providers))
 	for i, pd := range gb.providers {
 		if touch { // touch first
@@ -135,85 +147,91 @@ func (gb *GroupBase) GetProxies(touch bool) []C.Proxy {
 	defer gb.getProxiesMutex.Unlock()
 
 	// return the cached proxies if version not changed
-	if slices.Equal(providerVersions, gb.providerVersions) {
-		return gb.providerProxies
+	if gb.providerProxies != nil && slices.Equal(providerVersions, gb.providerVersions) {
+		return gb.providerProxies, gb.membersGeneration
 	}
 
-	var proxies []C.Proxy
+	var proxies C.ProxyList
 	if len(gb.filterRegs) == 0 {
+		lists := make([]C.ProxyList, 0, len(gb.providers))
 		for _, pd := range gb.providers {
-			proxies = append(proxies, pd.Proxies()...)
+			lists = append(lists, pd.ProxyList())
 		}
+		proxies = C.ConcatProxyLists(lists...)
 	} else {
+		lists := make([]C.ProxyList, 0, len(gb.providers))
 		for _, pd := range gb.providers {
 			if pd.VehicleType() == P.Compatible { // compatible provider unneeded filter
-				proxies = append(proxies, pd.Proxies()...)
+				lists = append(lists, pd.ProxyList())
 				continue
 			}
 
-			var newProxies []C.Proxy
+			list := pd.ProxyList()
+			var kept []uint32
 			proxiesSet := map[string]struct{}{}
 			for _, filterReg := range gb.filterRegs {
-				for _, p := range pd.Proxies() {
-					name := p.Name()
+				for i := 0; i < list.Len(); i++ {
+					name := list.At(i).Name()
 					if mat, _ := filterReg.MatchString(name); mat {
 						if _, ok := proxiesSet[name]; !ok {
 							proxiesSet[name] = struct{}{}
-							newProxies = append(newProxies, p)
+							kept = append(kept, uint32(i))
 						}
 					}
 				}
 			}
-			proxies = append(proxies, newProxies...)
+			lists = append(lists, C.IndexedProxyList(list, kept))
 		}
+		proxies = C.ConcatProxyLists(lists...)
 	}
 
 	// Multiple filers means that proxies are sorted in the order in which the filers appear.
 	// Although the filter has been performed once in the previous process,
 	// when there are multiple providers, the array needs to be reordered as a whole.
 	if len(gb.providers) > 1 && len(gb.filterRegs) > 1 {
-		var newProxies []C.Proxy
+		var kept []uint32
 		proxiesSet := map[string]struct{}{}
 		for _, filterReg := range gb.filterRegs {
-			for _, p := range proxies {
-				name := p.Name()
+			for i := 0; i < proxies.Len(); i++ {
+				name := proxies.At(i).Name()
 				if mat, _ := filterReg.MatchString(name); mat {
 					if _, ok := proxiesSet[name]; !ok {
 						proxiesSet[name] = struct{}{}
-						newProxies = append(newProxies, p)
+						kept = append(kept, uint32(i))
 					}
 				}
 			}
 		}
-		for _, p := range proxies { // add not matched proxies at the end
-			name := p.Name()
+		for i := 0; i < proxies.Len(); i++ { // add not matched proxies at the end
+			name := proxies.At(i).Name()
 			if _, ok := proxiesSet[name]; !ok {
 				proxiesSet[name] = struct{}{}
-				newProxies = append(newProxies, p)
+				kept = append(kept, uint32(i))
 			}
 		}
-		proxies = newProxies
+		proxies = C.IndexedProxyList(proxies, kept)
 	}
 
 	if len(gb.excludeFilterRegs) > 0 {
-		var newProxies []C.Proxy
+		var kept []uint32
 	LOOP1:
-		for _, p := range proxies {
-			name := p.Name()
+		for i := 0; i < proxies.Len(); i++ {
+			name := proxies.At(i).Name()
 			for _, excludeFilterReg := range gb.excludeFilterRegs {
 				if mat, _ := excludeFilterReg.MatchString(name); mat {
 					continue LOOP1
 				}
 			}
-			newProxies = append(newProxies, p)
+			kept = append(kept, uint32(i))
 		}
-		proxies = newProxies
+		proxies = C.IndexedProxyList(proxies, kept)
 	}
 
 	if gb.excludeTypeArray != nil {
-		var newProxies []C.Proxy
+		var kept []uint32
 	LOOP2:
-		for _, p := range proxies {
+		for i := 0; i < proxies.Len(); i++ {
+			p := proxies.At(i)
 			mType := p.Type().String()
 			declared := ""
 			if placeholder, ok := p.Adapter().(interface{ ClashDeclaredType() C.AdapterType }); ok {
@@ -224,31 +242,66 @@ func (gb *GroupBase) GetProxies(touch bool) []C.Proxy {
 					continue LOOP2
 				}
 			}
-			newProxies = append(newProxies, p)
+			kept = append(kept, uint32(i))
 		}
-		proxies = newProxies
+		proxies = C.IndexedProxyList(proxies, kept)
 	}
 
-	if len(proxies) == 0 {
-		return []C.Proxy{gb.EmptyFallback()}
+	if proxies.Len() == 0 {
+		gb.membersGeneration++
+		gb.named = nil
+		return C.ProxySlice{gb.EmptyFallback()}, gb.membersGeneration
 	}
 
 	// only cache when proxies not empty
 	gb.providerVersions = providerVersions
 	gb.providerProxies = proxies
+	gb.membersGeneration++
 
-	return proxies
+	return proxies, gb.membersGeneration
+}
+
+func (gb *GroupBase) memberNamed(touch bool, name string) (C.Proxy, C.ProxyList, bool) {
+	members, generation := gb.membersAndGeneration(touch)
+	gb.getProxiesMutex.Lock()
+	if found := gb.named; found != nil && found.generation == generation && found.name == name {
+		gb.getProxiesMutex.Unlock()
+		return found.proxy, members, found.proxy != nil
+	}
+	gb.getProxiesMutex.Unlock()
+	var proxy C.Proxy
+	for i := 0; i < members.Len(); i++ {
+		if member := members.At(i); member.Name() == name {
+			proxy = member
+			break
+		}
+	}
+	gb.getProxiesMutex.Lock()
+	if gb.membersGeneration == generation {
+		gb.named = &namedMember{generation: generation, name: name, proxy: proxy}
+	}
+	gb.getProxiesMutex.Unlock()
+	return proxy, members, proxy != nil
+}
+
+type namedMember struct {
+	generation uint64
+	name       string
+	proxy      C.Proxy
 }
 
 func (gb *GroupBase) URLTest(ctx context.Context, url string, expectedStatus utils.IntRanges[uint16]) (map[string]uint16, error) {
 	var wg sync.WaitGroup
 	var lock sync.Mutex
 	mp := map[string]uint16{}
-	proxies := gb.GetProxies(false)
-	for _, proxy := range proxies {
-		proxy := proxy
+	proxies := gb.Members(false)
+	running := make(chan struct{}, groupTestConcurrency)
+	for i := 0; i < proxies.Len(); i++ {
+		proxy := proxies.At(i)
 		wg.Add(1)
+		running <- struct{}{}
 		go func() {
+			defer func() { <-running }()
 			var delay uint16
 			var err error
 			satisfied := true
@@ -277,7 +330,8 @@ func (gb *GroupBase) URLTest(ctx context.Context, url string, expectedStatus uti
 	}
 }
 
-func (gb *GroupBase) onDialFailed(adapterType C.AdapterType, err error, fn func()) {
+func (gb *GroupBase) onDialFailed(proxy C.Proxy, err error, fn func()) {
+	adapterType := proxy.Type()
 	if adapterType == C.Direct || adapterType == C.Compatible || adapterType == C.Reject || adapterType == C.Pass || adapterType == C.RejectDrop {
 		return
 	}
@@ -286,6 +340,7 @@ func (gb *GroupBase) onDialFailed(adapterType C.AdapterType, err error, fn func(
 		return
 	}
 
+	gb.failedMembers.note(proxy.Name())
 	go func() {
 		if strings.Contains(err.Error(), "connection refused") {
 			fn()
@@ -324,13 +379,14 @@ func (gb *GroupBase) healthCheck() {
 	}
 
 	gb.failedTesting.Store(true)
+	failed := gb.failedMembers.take()
 	wg := sync.WaitGroup{}
 	for _, proxyProvider := range gb.providers {
 		wg.Add(1)
 		proxyProvider := proxyProvider
 		go func() {
 			defer wg.Done()
-			proxyProvider.HealthCheck()
+			healthCheckAfterDialFailures(proxyProvider, failed)
 		}()
 	}
 
@@ -344,3 +400,5 @@ func (gb *GroupBase) onDialSuccess() {
 		gb.failedTimes = 0
 	}
 }
+
+const groupTestConcurrency = 64

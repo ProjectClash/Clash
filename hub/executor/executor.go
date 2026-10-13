@@ -112,7 +112,7 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	applyProbe("experimental")
 	updateUsers(cfg.Users)
 	applyProbe("users")
-	tunnel.UpdateProxiesAndRules(cfg.Proxies, cfg.Providers, cfg.Rules, cfg.SubRules, cfg.RuleProviders)
+	tunnel.UpdateProxiesAndRules(cfg.Proxies, cfg.Providers, cfg.Rules, cfg.SubRules, cfg.RuleProviders, cfg.ProxyLibrary)
 	applyProbe("proxies")
 	applyProbe("rules")
 	updateSniffer(cfg.Sniffer)

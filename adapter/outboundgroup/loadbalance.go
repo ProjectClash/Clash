@@ -32,7 +32,7 @@ type LoadBalance struct {
 	expectedStatus string
 }
 
-type strategyFn = func(proxies []C.Proxy, metadata *C.Metadata, touch bool) C.Proxy
+type strategyFn = func(proxies C.ProxyList, metadata *C.Metadata, touch bool) C.Proxy
 
 var errStrategy = errors.New("unsupported strategy")
 var errHashKey = errors.New("unsupported hash-key")
@@ -126,7 +126,7 @@ func (lb *LoadBalance) DialContext(ctx context.Context, metadata *C.Metadata) (c
 	if err == nil {
 		c.AppendToChains(lb)
 	} else {
-		lb.onDialFailed(proxy.Type(), err, lb.healthCheck)
+		lb.onDialFailed(proxy, err, lb.healthCheck)
 	}
 
 	if N.NeedHandshake(c) {
@@ -134,7 +134,7 @@ func (lb *LoadBalance) DialContext(ctx context.Context, metadata *C.Metadata) (c
 			if err == nil {
 				lb.onDialSuccess()
 			} else {
-				lb.onDialFailed(proxy.Type(), err, lb.healthCheck)
+				lb.onDialFailed(proxy, err, lb.healthCheck)
 			}
 		})
 	}
@@ -167,12 +167,12 @@ func (lb *LoadBalance) IsL3Protocol(metadata *C.Metadata) bool {
 func strategyRoundRobin(url string) strategyFn {
 	idx := 0
 	idxMutex := sync.Mutex{}
-	return func(proxies []C.Proxy, metadata *C.Metadata, touch bool) C.Proxy {
+	return func(proxies C.ProxyList, metadata *C.Metadata, touch bool) C.Proxy {
 		idxMutex.Lock()
 		defer idxMutex.Unlock()
 
 		i := 0
-		length := len(proxies)
+		length := proxies.Len()
 
 		if touch {
 			defer func() {
@@ -182,38 +182,38 @@ func strategyRoundRobin(url string) strategyFn {
 
 		for ; i < length; i++ {
 			id := (idx + i) % length
-			proxy := proxies[id]
+			proxy := proxies.At(id)
 			if proxy.AliveForTestUrl(url) {
 				i++
 				return proxy
 			}
 		}
 
-		return proxies[0]
+		return proxies.At(0)
 	}
 }
 
 func strategyConsistentHashing(url string, keyOf keyFn) strategyFn {
 	maxRetry := 5
-	return func(proxies []C.Proxy, metadata *C.Metadata, touch bool) C.Proxy {
+	return func(proxies C.ProxyList, metadata *C.Metadata, touch bool) C.Proxy {
 		key := utils.MapHash(keyOf(metadata))
-		buckets := int32(len(proxies))
+		buckets := int32(proxies.Len())
 		for i := 0; i < maxRetry; i, key = i+1, key+1 {
 			idx := jumpHash(key, buckets)
-			proxy := proxies[idx]
+			proxy := proxies.At(int(idx))
 			if proxy.AliveForTestUrl(url) {
 				return proxy
 			}
 		}
 
 		// when availability is poor, traverse the entire list to get the available nodes
-		for _, proxy := range proxies {
-			if proxy.AliveForTestUrl(url) {
+		for i := 0; i < proxies.Len(); i++ {
+			if proxy := proxies.At(i); proxy.AliveForTestUrl(url) {
 				return proxy
 			}
 		}
 
-		return proxies[0]
+		return proxies.At(0)
 	}
 }
 
@@ -223,9 +223,9 @@ func strategyStickySessions(url string, keyOf keyFn) strategyFn {
 	lruCache := lru.New[uint64, int](
 		lru.WithAge[uint64, int](int64(ttl.Seconds())),
 		lru.WithSize[uint64, int](1000))
-	return func(proxies []C.Proxy, metadata *C.Metadata, touch bool) C.Proxy {
+	return func(proxies C.ProxyList, metadata *C.Metadata, touch bool) C.Proxy {
 		key := utils.MapHash(keyOf(metadata))
-		length := len(proxies)
+		length := proxies.Len()
 		idx, has := lruCache.Get(key)
 		if !has || idx >= length {
 			idx = int(jumpHash(key+uint64(time.Now().UnixNano()), int32(length)))
@@ -233,7 +233,7 @@ func strategyStickySessions(url string, keyOf keyFn) strategyFn {
 
 		nowIdx := idx
 		for i := 1; i < maxRetry; i++ {
-			proxy := proxies[nowIdx]
+			proxy := proxies.At(nowIdx)
 			if proxy.AliveForTestUrl(url) {
 				if !has || nowIdx != idx {
 					lruCache.Set(key, nowIdx)
@@ -246,21 +246,22 @@ func strategyStickySessions(url string, keyOf keyFn) strategyFn {
 		}
 
 		lruCache.Set(key, 0)
-		return proxies[0]
+		return proxies.At(0)
 	}
 }
 
 // Unwrap implements C.ProxyAdapter
 func (lb *LoadBalance) Unwrap(metadata *C.Metadata, touch bool) C.Proxy {
-	proxies := lb.GetProxies(touch)
+	proxies := lb.Members(touch)
 	return lb.strategyFn(proxies, metadata, touch)
 }
 
 // MarshalJSON implements C.ProxyAdapter
 func (lb *LoadBalance) MarshalJSON() ([]byte, error) {
 	var all []string
-	for _, proxy := range lb.GetProxies(false) {
-		all = append(all, proxy.Name())
+	members := lb.Members(false)
+	for i := 0; i < members.Len(); i++ {
+		all = append(all, members.At(i).Name())
 	}
 	return json.Marshal(map[string]any{
 		"type":           lb.Type().String(),

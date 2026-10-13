@@ -45,7 +45,81 @@ type GroupCommonOption struct {
 	Icon                string   `group:"icon,omitempty"`
 }
 
-func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, providersMap map[string]P.ProxyProvider, AllProxies []string, AllProviders []string) (ProxyGroup, error) {
+type GroupNodes struct {
+	Lookup func(name string) (C.Proxy, bool)
+	All    C.ProxyList
+	Library C.ProxyList
+	Group func(name string) ([]uint32, bool)
+}
+
+const clashMemberGroupField = "x-clash-member-group"
+
+const clashMembersField = "x-clash-members"
+
+func clashMembers(config map[string]any, lookup func(string) (C.Proxy, bool), library C.ProxyList) (C.ProxyList, bool, error) {
+	raw, present := config[clashMembersField]
+	if !present {
+		return nil, false, nil
+	}
+	entries, isList := raw.([]any)
+	if !isList {
+		return nil, true, fmt.Errorf("%s: not a list", clashMembersField)
+	}
+	var lists []C.ProxyList
+	var names []string
+	flush := func() error {
+		if len(names) == 0 {
+			return nil
+		}
+		named, err := getProxiesFrom(lookup, names)
+		if err != nil {
+			return err
+		}
+		lists, names = append(lists, C.ProxySlice(named)), nil
+		return nil
+	}
+	for _, entry := range entries {
+		switch entry := entry.(type) {
+		case string:
+			names = append(names, entry)
+		case map[string]any:
+			from, fromOK := entry["from"].(int)
+			to, toOK := entry["to"].(int)
+			if !fromOK || !toOK || library == nil || from < 0 || to <= from || to > library.Len() {
+				return nil, true, fmt.Errorf("%s: a run out of the library", clashMembersField)
+			}
+			if err := flush(); err != nil {
+				return nil, true, err
+			}
+			lists = append(lists, C.SubProxyList(library, from, to))
+		default:
+			return nil, true, fmt.Errorf("%s: an entry that is neither a name nor a run", clashMembersField)
+		}
+	}
+	if err := flush(); err != nil {
+		return nil, true, err
+	}
+	return C.ConcatProxyLists(lists...), true, nil
+}
+
+func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, providersMap map[string]P.ProxyProvider, AllProxies []string, AllProviders []string, nodes ...GroupNodes) (ProxyGroup, error) {
+	lookup := func(name string) (C.Proxy, bool) {
+		if p, ok := proxyMap[name]; ok {
+			return p, true
+		}
+		for _, n := range nodes {
+			if p, ok := n.Lookup(name); ok {
+				return p, true
+			}
+		}
+		return nil, false
+	}
+	var allNodes, libraryNodes C.ProxyList
+	var computedGroup func(string) ([]uint32, bool)
+	for _, n := range nodes {
+		allNodes, libraryNodes, computedGroup = n.All, n.Library, n.Group
+	}
+	var libraryMembers C.ProxyList = C.ProxySlice(nil)
 	decoder := structure.NewDecoder(structure.Option{TagName: "group", WeaklyTypedInput: true})
 
 	groupOption := GroupCommonOption{
@@ -71,10 +145,33 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 
 	groupName := groupOption.Name
 
+	members, compacted, err := clashMembers(config, lookup, libraryNodes)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", groupName, err)
+	}
+	if !compacted {
+		members = C.ProxySlice(nil)
+	}
+	if name, ok := config[clashMemberGroupField].(string); ok {
+		indexes, found := []uint32(nil), false
+		if computedGroup != nil && allNodes != nil {
+			indexes, found = computedGroup(name)
+		}
+		if !found {
+			return nil, fmt.Errorf("%s: %s names no members the library holds", groupName, clashMemberGroupField)
+		}
+		for _, at := range indexes {
+			if int(at) >= allNodes.Len() {
+				return nil, fmt.Errorf("%s: %s: a member outside the nodes", groupName, clashMemberGroupField)
+			}
+		}
+		libraryMembers = C.IndexedProxyList(allNodes, indexes)
+	}
+
 	if groupOption.EmptyFallback == "" {
 		groupOption.EmptyFallback = "COMPATIBLE"
 	}
-	emptyFallback, ok := proxyMap[groupOption.EmptyFallback]
+	emptyFallback, ok := lookup(groupOption.EmptyFallback)
 	if !ok {
 		return nil, fmt.Errorf("%s: empty fallback proxy '%s' not found", groupName, groupOption.EmptyFallback)
 	}
@@ -92,7 +189,29 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 	if groupOption.IncludeAllProviders {
 		groupOption.Use = AllProviders
 	}
-	if groupOption.IncludeAllProxies {
+	if groupOption.IncludeAllProxies && allNodes != nil {
+		if groupOption.Filter != "" {
+			var filterRegs []*regexp2.Regexp
+			for _, filter := range strings.Split(groupOption.Filter, "`") {
+				filterRegs = append(filterRegs, regexp2.MustCompile(filter, regexp2.None))
+			}
+			var kept []uint32
+			for i := 0; i < allNodes.Len(); i++ {
+				name := allNodes.At(i).Name()
+				for _, filterReg := range filterRegs {
+					if mat, _ := filterReg.MatchString(name); mat {
+						kept = append(kept, uint32(i))
+					}
+				}
+			}
+			libraryMembers = C.IndexedProxyList(allNodes, kept)
+		} else {
+			libraryMembers = allNodes
+		}
+		if len(groupOption.Proxies) == 0 && members.Len() == 0 && libraryMembers.Len() == 0 && len(groupOption.Use) == 0 {
+			groupOption.Proxies = []string{groupOption.EmptyFallback}
+		}
+	} else if groupOption.IncludeAllProxies {
 		if groupOption.Filter != "" {
 			var filterRegs []*regexp2.Regexp
 			for _, filter := range strings.Split(groupOption.Filter, "`") {
@@ -114,7 +233,7 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 		}
 	}
 
-	if len(groupOption.Proxies) == 0 && len(groupOption.Use) == 0 {
+	if len(groupOption.Proxies) == 0 && members.Len() == 0 && libraryMembers.Len() == 0 && len(groupOption.Use) == 0 {
 		return nil, fmt.Errorf("%s: %w", groupName, errMissProxy)
 	}
 
@@ -152,11 +271,12 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 		providers = append(providers, PDs...)
 	}
 
-	if len(groupOption.Proxies) != 0 {
-		ps, err := getProxies(proxyMap, groupOption.Proxies)
+	if len(groupOption.Proxies) != 0 || members.Len() != 0 || libraryMembers.Len() != 0 {
+		named, err := getProxiesFrom(lookup, groupOption.Proxies)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", groupName, err)
 		}
+		ps := C.ConcatProxyLists(members, C.ProxySlice(named), libraryMembers)
 
 		if _, ok := providersMap[groupName]; ok {
 			return nil, fmt.Errorf("%s: %w", groupName, errDuplicateProvider)
@@ -173,9 +293,9 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 			}
 		}
 
-		hc := provider.NewHealthCheck(ps, groupOption.URL, uint(groupOption.TestTimeout), uint(groupOption.Interval), groupOption.Lazy, expectedStatus)
+		hc := provider.NewHealthCheckList(ps, groupOption.URL, uint(groupOption.TestTimeout), uint(groupOption.Interval), groupOption.Lazy, expectedStatus)
 
-		pd, err := provider.NewCompatibleProvider(groupName, ps, hc)
+		pd, err := provider.NewCompatibleProviderList(groupName, ps, hc)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", groupName, err)
 		}
@@ -221,9 +341,13 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 }
 
 func getProxies(mapping map[string]C.Proxy, list []string) ([]C.Proxy, error) {
+	return getProxiesFrom(func(name string) (C.Proxy, bool) { p, ok := mapping[name]; return p, ok }, list)
+}
+
+func getProxiesFrom(lookup func(string) (C.Proxy, bool), list []string) ([]C.Proxy, error) {
 	var ps []C.Proxy
 	for _, name := range list {
-		p, ok := mapping[name]
+		p, ok := lookup(name)
 		if !ok {
 			return nil, fmt.Errorf("'%s' not found", name)
 		}

@@ -20,7 +20,7 @@ type URLTestOption struct {
 
 type URLTest struct {
 	*GroupBase
-	selected       string
+	selected       groupSelection
 	testUrl        string
 	expectedStatus string
 	tolerance      uint16
@@ -49,7 +49,7 @@ func (u *URLTest) Set(name string) error {
 }
 
 func (u *URLTest) ForceSet(name string) {
-	u.selected = name
+	u.selected.Store(name)
 	u.fastSingle.Reset()
 }
 
@@ -60,7 +60,7 @@ func (u *URLTest) DialContext(ctx context.Context, metadata *C.Metadata) (c C.Co
 	if err == nil {
 		c.AppendToChains(u)
 	} else {
-		u.onDialFailed(proxy.Type(), err, u.healthCheck)
+		u.onDialFailed(proxy, err, u.healthCheck)
 	}
 
 	if N.NeedHandshake(c) {
@@ -68,7 +68,7 @@ func (u *URLTest) DialContext(ctx context.Context, metadata *C.Metadata) (c C.Co
 			if err == nil {
 				u.onDialSuccess()
 			} else {
-				u.onDialFailed(proxy.Type(), err, u.healthCheck)
+				u.onDialFailed(proxy, err, u.healthCheck)
 			}
 		})
 	}
@@ -83,7 +83,7 @@ func (u *URLTest) ListenPacketContext(ctx context.Context, metadata *C.Metadata)
 	if err == nil {
 		pc.AppendToChains(u)
 	} else {
-		u.onDialFailed(proxy.Type(), err, u.healthCheck)
+		u.onDialFailed(proxy, err, u.healthCheck)
 	}
 
 	return pc, err
@@ -102,24 +102,26 @@ func (u *URLTest) healthCheck() {
 
 func (u *URLTest) fast(touch bool) C.Proxy {
 	elm, _, shared := u.fastSingle.Do(func() (C.Proxy, error) {
-		proxies := u.GetProxies(touch)
-		if u.selected != "" {
-			for _, proxy := range proxies {
+		proxies := u.Members(touch)
+		if selected := u.selected.Load(); selected != "" {
+			for i := 0; i < proxies.Len(); i++ {
+				proxy := proxies.At(i)
 				if !proxy.AliveForTestUrl(u.testUrl) {
 					continue
 				}
-				if proxy.Name() == u.selected {
+				if proxy.Name() == selected {
 					u.fastNode = proxy
 					return proxy, nil
 				}
 			}
 		}
 
-		fast := proxies[0]
+		fast := proxies.At(0)
 		minDelay := fast.LastDelayForTestUrl(u.testUrl)
 		fastNotExist := true
 
-		for _, proxy := range proxies[1:] {
+		for i := 1; i < proxies.Len(); i++ {
+			proxy := proxies.At(i)
 			if u.fastNode != nil && proxy.Name() == u.fastNode.Name() {
 				fastNotExist = false
 			}
@@ -134,6 +136,10 @@ func (u *URLTest) fast(touch bool) C.Proxy {
 				minDelay = delay
 			}
 
+		}
+		if kept, ok := keptChoiceWhenAllDown(u.fastNode, fast, proxies, u.testUrl); ok {
+			u.fastNode = kept
+			return kept, nil
 		}
 		// tolerance
 		if u.fastNode == nil || fastNotExist || !u.fastNode.AliveForTestUrl(u.testUrl) || u.fastNode.LastDelayForTestUrl(u.testUrl) > fast.LastDelayForTestUrl(u.testUrl)+u.tolerance {
@@ -164,8 +170,9 @@ func (u *URLTest) IsL3Protocol(metadata *C.Metadata) bool {
 // MarshalJSON implements C.ProxyAdapter
 func (u *URLTest) MarshalJSON() ([]byte, error) {
 	all := []string{}
-	for _, proxy := range u.GetProxies(false) {
-		all = append(all, proxy.Name())
+	members := u.Members(false)
+	for i := 0; i < members.Len(); i++ {
+		all = append(all, members.At(i).Name())
 	}
 	return json.Marshal(map[string]any{
 		"type":           u.Type().String(),
@@ -173,7 +180,7 @@ func (u *URLTest) MarshalJSON() ([]byte, error) {
 		"all":            all,
 		"testUrl":        u.testUrl,
 		"expectedStatus": u.expectedStatus,
-		"fixed":          u.selected,
+		"fixed":          u.selected.Load(),
 		"hidden":         u.Hidden(),
 		"icon":           u.Icon(),
 		"emptyFallback":  u.EmptyFallback().Name(),

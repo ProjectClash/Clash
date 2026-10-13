@@ -39,6 +39,9 @@ func proxyProviderProxyRouter() http.Handler {
 
 func getProviders(w http.ResponseWriter, r *http.Request) {
 	providers := tunnel.Providers()
+	if clashStreamProviders(w, r, providers) {
+		return
+	}
 	render.JSON(w, r, render.M{
 		"providers": providers,
 	})
@@ -46,11 +49,17 @@ func getProviders(w http.ResponseWriter, r *http.Request) {
 
 func getProvider(w http.ResponseWriter, r *http.Request) {
 	provider := r.Context().Value(CtxKeyProvider).(P.ProxyProvider)
+	if clashStreamProvider(w, r, provider) {
+		return
+	}
 	render.JSON(w, r, provider)
 }
 
 func updateProvider(w http.ResponseWriter, r *http.Request) {
 	provider := r.Context().Value(CtxKeyProvider).(P.ProxyProvider)
+	if clashUpdateProvider(w, r, "proxy", provider.Name()) {
+		return
+	}
 	if err := provider.Update(); err != nil {
 		render.Status(r, http.StatusServiceUnavailable)
 		render.JSON(w, r, newError(err.Error()))
@@ -129,6 +138,9 @@ func getRuleProviders(w http.ResponseWriter, r *http.Request) {
 
 func updateRuleProvider(w http.ResponseWriter, r *http.Request) {
 	provider := r.Context().Value(CtxKeyProvider).(P.RuleProvider)
+	if clashUpdateProvider(w, r, "rule", provider.Name()) {
+		return
+	}
 	if err := provider.Update(); err != nil {
 		render.Status(r, http.StatusServiceUnavailable)
 		render.JSON(w, r, newError(err.Error()))

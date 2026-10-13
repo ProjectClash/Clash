@@ -46,7 +46,7 @@ type providerForApi struct {
 type baseProvider struct {
 	mutex       sync.RWMutex
 	name        string
-	proxies     []C.Proxy
+	list        C.ProxyList
 	healthCheck *HealthCheck
 	version     uint32
 }
@@ -77,15 +77,20 @@ func (bp *baseProvider) Type() P.ProviderType {
 }
 
 func (bp *baseProvider) Proxies() []C.Proxy {
+	return C.ProxiesOf(bp.ProxyList())
+}
+
+func (bp *baseProvider) ProxyList() C.ProxyList {
 	bp.mutex.RLock()
 	defer bp.mutex.RUnlock()
-	return bp.proxies
+	if bp.list == nil {
+		return C.ProxySlice(nil)
+	}
+	return bp.list
 }
 
 func (bp *baseProvider) Count() int {
-	bp.mutex.RLock()
-	defer bp.mutex.RUnlock()
-	return len(bp.proxies)
+	return bp.ProxyList().Len()
 }
 
 func (bp *baseProvider) Touch() {
@@ -101,13 +106,17 @@ func (bp *baseProvider) RegisterHealthCheckTask(url string, expectedStatus utils
 }
 
 func (bp *baseProvider) setProxies(proxies []C.Proxy) {
+	bp.setProxyList(C.ProxySlice(proxies))
+}
+
+func (bp *baseProvider) setProxyList(proxies C.ProxyList) {
 	bp.mutex.Lock()
 	defer bp.mutex.Unlock()
-	bp.proxies = proxies
+	bp.list = proxies
 	bp.version += 1
-	bp.healthCheck.setProxies(proxies)
+	bp.healthCheck.setProxyList(proxies)
 	if bp.healthCheck.auto() {
-		go bp.healthCheck.check()
+		go bp.healthCheck.checkLoaded()
 	}
 }
 
@@ -123,8 +132,8 @@ type ProxySetProvider struct {
 
 type proxySetProvider struct {
 	baseProvider
-	*resource.Fetcher[[]C.Proxy]
-	subscriptionInfo *SubscriptionInfo
+	*resource.Fetcher[C.ProxyList]
+	subscriptionInfo               *SubscriptionInfo
 }
 
 func (pp *proxySetProvider) MarshalJSON() ([]byte, error) {
@@ -186,11 +195,11 @@ func (pp *proxySetProvider) Close() error {
 	return pp.Fetcher.Close()
 }
 
-func NewProxySetProvider(name string, interval time.Duration, payload []map[string]any, parser resource.Parser[[]C.Proxy], vehicle P.Vehicle, hc *HealthCheck) (*ProxySetProvider, error) {
+func NewProxySetProvider(name string, interval time.Duration, payload []map[string]any, parser resource.Parser[C.ProxyList], vehicle P.Vehicle, hc *HealthCheck) (*ProxySetProvider, error) {
 	pd := &proxySetProvider{
 		baseProvider: baseProvider{
 			name:        name,
-			proxies:     []C.Proxy{},
+			list:        C.ProxySlice{},
 			healthCheck: hc,
 		},
 	}
@@ -205,12 +214,12 @@ func NewProxySetProvider(name string, interval time.Duration, payload []map[stri
 		if err != nil {
 			return nil, err
 		}
-		pd.proxies = proxies
+		pd.list = proxies
 		// direct call setProxies on hc to avoid starting a health check process immediately, it should be done by Initial()
-		hc.setProxies(proxies)
+		hc.setProxyList(proxies)
 	}
 
-	fetcher := resource.NewFetcher[[]C.Proxy](name, interval, vehicle, nil, parser, pd.setProxies)
+	fetcher := resource.NewFetcher[C.ProxyList](name, interval, vehicle, nil, parser, pd.setProxyList)
 	pd.Fetcher = fetcher
 	if httpVehicle, ok := vehicle.(*resource.HTTPVehicle); ok {
 		httpVehicle.SetInRead(func(resp *http.Response) {
@@ -279,7 +288,7 @@ func NewInlineProvider(name string, payload []map[string]any, parser resource.Pa
 	ip := &inlineProvider{
 		baseProvider: baseProvider{
 			name:        name,
-			proxies:     proxies,
+			list:        C.ProxySlice(proxies),
 			healthCheck: hc,
 		},
 		updateAt: time.Now(),
@@ -323,14 +332,18 @@ func (cp *compatibleProvider) VehicleType() P.VehicleType {
 }
 
 func NewCompatibleProvider(name string, proxies []C.Proxy, hc *HealthCheck) (*CompatibleProvider, error) {
-	if len(proxies) == 0 {
+	return NewCompatibleProviderList(name, C.ProxySlice(proxies), hc)
+}
+
+func NewCompatibleProviderList(name string, proxies C.ProxyList, hc *HealthCheck) (*CompatibleProvider, error) {
+	if proxies.Len() == 0 {
 		return nil, errors.New("provider need one proxy at least")
 	}
 
 	pd := &compatibleProvider{
 		baseProvider: baseProvider{
 			name:        name,
-			proxies:     proxies,
+			list:        proxies,
 			healthCheck: hc,
 		},
 	}
@@ -346,6 +359,32 @@ func (cp *CompatibleProvider) Close() error {
 }
 
 func NewProxiesParser(pdName string, tunnel C.Tunnel, filter string, excludeFilter string, excludeType string, dialerProxy string, override overrideSchema, ageSecretKey string) (resource.Parser[[]C.Proxy], error) {
+	selectProxies, err := newProxiesSelector(filter, excludeFilter, excludeType, dialerProxy, override, ageSecretKey)
+	if err != nil {
+		return nil, err
+	}
+	return func(buf []byte) ([]C.Proxy, error) {
+		proxies := []C.Proxy{}
+		clashNodes := adapter.NewNodeCatalogSession()
+		err := selectProxies(buf, func(mapping map[string]any) error {
+			proxy, err := adapter.ParseProxy(mapping, adapter.WithTunnelForAPI(tunnel), adapter.WithProviderName(pdName), adapter.WithNodeCatalogSession(clashNodes))
+			if err != nil {
+				return err
+			}
+			proxies = append(proxies, proxy)
+			return nil
+		})
+		_ = clashNodes.Seal()
+		if err != nil {
+			return nil, err
+		}
+		return proxies, nil
+	}, nil
+}
+
+type proxiesSelector func(buf []byte, each func(mapping map[string]any) error) error
+
+func newProxiesSelector(filter string, excludeFilter string, excludeType string, dialerProxy string, override overrideSchema, ageSecretKey string) (proxiesSelector, error) {
 	var excludeTypeArray []string
 	if excludeType != "" {
 		excludeTypeArray = strings.Split(excludeType, "|")
@@ -377,28 +416,27 @@ func NewProxiesParser(pdName string, tunnel C.Tunnel, filter string, excludeFilt
 		}
 	}
 
-	return func(buf []byte) ([]C.Proxy, error) {
+	return func(buf []byte, each func(mapping map[string]any) error) error {
 		schema := &ProxySchema{}
 
 		// decrypt config
 		buf, err := age.DecryptBytes(buf, ageSecretKey)
 		if err != nil {
-			return nil, fmt.Errorf("decrypt config error: %w", err)
+			return fmt.Errorf("decrypt config error: %w", err)
 		}
 
-		if err := yaml.Unmarshal(buf, schema); err != nil {
+		if err := clashUnmarshalProxySchema(buf, schema); err != nil {
 			proxies, err1 := convert.ConvertsV2Ray(buf)
 			if err1 != nil {
-				return nil, fmt.Errorf("%w, %w", err, err1)
+				return fmt.Errorf("%w, %w", err, err1)
 			}
 			schema.Proxies = proxies
 		}
 
 		if schema.Proxies == nil {
-			return nil, errors.New("file must have a `proxies` field")
+			return errors.New("file must have a `proxies` field")
 		}
 
-		proxies := []C.Proxy{}
 		proxiesSet := map[string]struct{}{}
 		for _, filterReg := range filterRegs {
 		LOOP1:
@@ -448,26 +486,23 @@ func NewProxiesParser(pdName string, tunnel C.Tunnel, filter string, excludeFilt
 
 				err := override.Apply(mapping)
 				if err != nil {
-					return nil, fmt.Errorf("proxy %d override error: %w", idx, err)
+					return fmt.Errorf("proxy %d override error: %w", idx, err)
 				}
 
-				proxy, err := adapter.ParseProxy(mapping, adapter.WithTunnelForAPI(tunnel), adapter.WithProviderName(pdName))
-				if err != nil {
-					return nil, fmt.Errorf("proxy %d error: %w", idx, err)
+				if err := each(mapping); err != nil {
+					return fmt.Errorf("proxy %d error: %w", idx, err)
 				}
 
 				proxiesSet[name] = struct{}{}
-				proxies = append(proxies, proxy)
 			}
 		}
 
-		if len(proxies) == 0 {
+		if len(proxiesSet) == 0 {
 			if len(filter) > 0 {
-				return nil, errors.New("doesn't match any proxy, please check your filter")
+				return errors.New("doesn't match any proxy, please check your filter")
 			}
-			return nil, errors.New("file doesn't have any proxy")
+			return errors.New("file doesn't have any proxy")
 		}
-
-		return proxies, nil
+		return nil
 	}, nil
 }

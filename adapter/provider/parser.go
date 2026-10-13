@@ -100,5 +100,5 @@ func ParseProxyProvider(name string, mapping map[string]any, tunnel C.Tunnel) (P
 
 	interval := time.Duration(uint(schema.Interval)) * time.Second
 
-	return NewProxySetProvider(name, interval, schema.Payload, parser, vehicle, hc)
+	return NewProxySetProvider(name, interval, schema.Payload, clashProviderListParser(vehicle, tunnel, parser), vehicle, hc)
 }

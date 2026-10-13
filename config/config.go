@@ -17,7 +17,6 @@ import (
 	"github.com/ProjectClash/Clash/adapter/provider"
 	"github.com/ProjectClash/Clash/common/orderedmap"
 	"github.com/ProjectClash/Clash/common/utils"
-	"github.com/ProjectClash/Clash/common/yaml"
 	"github.com/ProjectClash/Clash/component/age"
 	"github.com/ProjectClash/Clash/component/auth"
 	"github.com/ProjectClash/Clash/component/cidr"
@@ -209,6 +208,7 @@ type Config struct {
 	SubRules      map[string][]C.Rule
 	Users         []auth.AuthUser
 	Proxies       map[string]C.Proxy
+	ProxyLibrary  C.ProxyLibrary
 	Listeners     map[string]C.InboundListener
 	Providers     map[string]P.ProxyProvider
 	RuleProviders map[string]P.RuleProvider
@@ -456,24 +456,25 @@ type RawConfig struct {
 	NetworkType                   []string                `yaml:"network-type" json:"network-type"`
 	FallbackNetworkType           []string                `yaml:"fallback-network-type" json:"fallback-network-type"`
 
-	ProxyProvider map[string]map[string]any `yaml:"proxy-providers" json:"proxy-providers"`
-	RuleProvider  map[string]map[string]any `yaml:"rule-providers" json:"rule-providers"`
-	Proxy         []map[string]any          `yaml:"proxies" json:"proxies"`
-	ProxyGroup    []map[string]any          `yaml:"proxy-groups" json:"proxy-groups"`
-	Rule          []string                  `yaml:"rules" json:"rule"`
-	SubRules      map[string][]string       `yaml:"sub-rules" json:"sub-rules"`
-	Listeners     []map[string]any          `yaml:"listeners" json:"listeners"`
-	Hosts         map[string]any            `yaml:"hosts" json:"hosts"`
-	DNS           RawDNS                    `yaml:"dns" json:"dns"`
-	NTP           RawNTP                    `yaml:"ntp" json:"ntp"`
-	Tun           RawTun                    `yaml:"tun" json:"tun"`
-	TuicServer    RawTuicServer             `yaml:"tuic-server" json:"tuic-server"`
-	IPTables      RawIPTables               `yaml:"iptables" json:"iptables"`
-	Experimental  RawExperimental           `yaml:"experimental" json:"experimental"`
-	Profile       RawProfile                `yaml:"profile" json:"profile"`
-	GeoXUrl       RawGeoXUrl                `yaml:"geox-url" json:"geox-url"`
-	Sniffer       RawSniffer                `yaml:"sniffer" json:"sniffer"`
-	TLS           RawTLS                    `yaml:"tls" json:"tls"`
+	ProxyProvider    map[string]map[string]any `yaml:"proxy-providers" json:"proxy-providers"`
+	RuleProvider     map[string]map[string]any `yaml:"rule-providers" json:"rule-providers"`
+	Proxy            []map[string]any          `yaml:"proxies" json:"proxies"`
+	ClashNodeLibrary ClashNodeLibraryRef       `yaml:"x-clash-node-library" json:"x-clash-node-library"`
+	ProxyGroup       []map[string]any          `yaml:"proxy-groups" json:"proxy-groups"`
+	Rule             []string                  `yaml:"rules" json:"rule"`
+	SubRules         map[string][]string       `yaml:"sub-rules" json:"sub-rules"`
+	Listeners        []map[string]any          `yaml:"listeners" json:"listeners"`
+	Hosts            map[string]any            `yaml:"hosts" json:"hosts"`
+	DNS              RawDNS                    `yaml:"dns" json:"dns"`
+	NTP              RawNTP                    `yaml:"ntp" json:"ntp"`
+	Tun              RawTun                    `yaml:"tun" json:"tun"`
+	TuicServer       RawTuicServer             `yaml:"tuic-server" json:"tuic-server"`
+	IPTables         RawIPTables               `yaml:"iptables" json:"iptables"`
+	Experimental     RawExperimental           `yaml:"experimental" json:"experimental"`
+	Profile          RawProfile                `yaml:"profile" json:"profile"`
+	GeoXUrl          RawGeoXUrl                `yaml:"geox-url" json:"geox-url"`
+	Sniffer          RawSniffer                `yaml:"sniffer" json:"sniffer"`
+	TLS              RawTLS                    `yaml:"tls" json:"tls"`
 
 	ClashForAndroid RawClashForAndroid `yaml:"clash-for-android" json:"clash-for-android"`
 }
@@ -622,7 +623,7 @@ func UnmarshalRawConfig(buf []byte) (*RawConfig, error) {
 		return nil, fmt.Errorf("decrypt config error: %w", err)
 	}
 
-	if err := yaml.Unmarshal(buf, rawCfg); err != nil {
+	if err := clashUnmarshal(buf, rawCfg, nil); err != nil {
 		return nil, err
 	}
 
@@ -700,11 +701,12 @@ func ParseRawConfig(rawCfg *RawConfig) (*Config, error) {
 	if StartupProbe != nil {
 		StartupProbe(fmt.Sprintf("proxies-begin:%d", len(rawCfg.Proxy)))
 	}
-	proxies, providers, err := parseProxies(rawCfg)
+	proxies, providers, library, err := parseProxies(rawCfg)
 	if err != nil {
 		return nil, err
 	}
 	config.Proxies = proxies
+	config.ProxyLibrary = library
 	config.Providers = providers
 	probe("proxies")
 
@@ -724,14 +726,14 @@ func ParseRawConfig(rawCfg *RawConfig) (*Config, error) {
 	config.RuleProviders = ruleProviders
 	probe("rule-providers")
 
-	subRules, err := parseSubRules(rawCfg, proxies, ruleProviders)
+	subRules, err := parseSubRules(rawCfg, proxies, library, ruleProviders)
 	if err != nil {
 		return nil, err
 	}
 	config.SubRules = subRules
 	probe("sub-rules")
 
-	rules, err := parseRules(rawCfg.Rule, proxies, ruleProviders, subRules, "rules")
+	rules, err := parseRules(rawCfg.Rule, proxies, library, ruleProviders, subRules, "rules")
 	if err != nil {
 		return nil, err
 	}
@@ -771,7 +773,7 @@ func ParseRawConfig(rawCfg *RawConfig) (*Config, error) {
 	// verify tunnels
 	for _, t := range config.Tunnels {
 		if len(t.Proxy) > 0 {
-			if _, ok := config.Proxies[t.Proxy]; !ok {
+			if !hasProxy(config.Proxies, config.ProxyLibrary, t.Proxy) {
 				return nil, fmt.Errorf("tunnel proxy %s not found", t.Proxy)
 			}
 		}
@@ -937,7 +939,7 @@ func parseTLS(cfg *RawConfig) (*TLS, error) {
 	}, nil
 }
 
-func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[string]P.ProxyProvider, err error) {
+func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[string]P.ProxyProvider, library C.ProxyLibrary, err error) {
 	proxies = make(map[string]C.Proxy)
 	providersMap = make(map[string]P.ProxyProvider)
 	proxiesConfig := cfg.Proxy
@@ -959,25 +961,43 @@ func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[
 	proxyList = append(proxyList, "DIRECT", "REJECT")
 
 	// parse proxy
+	clashNodes := adapter.NewNodeCatalogSession()
+	inlineProxies := make([]C.Proxy, 0, len(proxiesConfig))
 	for idx, mapping := range proxiesConfig {
-		proxy, err := adapter.ParseProxy(mapping, adapter.WithTunnelForAPI(T.Tunnel))
+		proxy, err := adapter.ParseProxy(mapping, adapter.WithTunnelForAPI(T.Tunnel), adapter.WithNodeCatalogSession(clashNodes))
 		if err != nil {
-			return nil, nil, fmt.Errorf("proxy %d: %w", idx, err)
+			return nil, nil, nil, fmt.Errorf("proxy %d: %w", idx, err)
 		}
-
-		if _, exist := proxies[proxy.Name()]; exist {
-			return nil, nil, fmt.Errorf("proxy %s is the duplicate name", proxy.Name())
+		inlineProxies = append(inlineProxies, proxy)
+	}
+	_ = clashNodes.Seal()
+	libraryNodes, err := clashLibraryNodes(cfg)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	var nodes *clashNodeViews
+	if libraryNodes != nil {
+		if nodes, err = newClashNodes(cfg.ClashNodeLibrary, inlineProxies, libraryNodes); err != nil {
+			return nil, nil, nil, err
+		}
+		library = libraryNodes
+	}
+	for _, proxy := range inlineProxies {
+		if hasProxy(proxies, library, proxy.Name()) {
+			return nil, nil, nil, fmt.Errorf("proxy %s is the duplicate name", proxy.Name())
 		}
 		proxies[proxy.Name()] = proxy
-		proxyList = append(proxyList, proxy.Name())
-		AllProxies = append(AllProxies, proxy.Name())
+		if nodes == nil {
+			proxyList = append(proxyList, proxy.Name())
+			AllProxies = append(AllProxies, proxy.Name())
+		}
 	}
 
 	// keep the original order of ProxyGroups in config file
 	for idx, mapping := range groupsConfig {
 		groupName, existName := mapping["name"].(string)
 		if !existName {
-			return nil, nil, fmt.Errorf("proxy group %d: missing name", idx)
+			return nil, nil, nil, fmt.Errorf("proxy group %d: missing name", idx)
 		}
 		if groupName == "GLOBAL" {
 			hasGlobal = true
@@ -987,19 +1007,19 @@ func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[
 
 	// check if any loop exists and sort the ProxyGroups
 	if err := proxyGroupsDagSort(groupsConfig); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	var AllProviders []string
 	// parse and initial providers
 	for name, mapping := range providersConfig {
 		if name == provider.ReservedName {
-			return nil, nil, fmt.Errorf("can not defined a provider called `%s`", provider.ReservedName)
+			return nil, nil, nil, fmt.Errorf("can not defined a provider called `%s`", provider.ReservedName)
 		}
 
 		pd, err := provider.ParseProxyProvider(name, mapping, T.Tunnel)
 		if err != nil {
-			return nil, nil, fmt.Errorf("parse proxy provider %s error: %w", name, err)
+			return nil, nil, nil, fmt.Errorf("parse proxy provider %s error: %w", name, err)
 		}
 
 		providersMap[name] = pd
@@ -1010,15 +1030,19 @@ func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[
 	slices.Sort(AllProviders)
 
 	// parse proxy group
+	var groupNodes []outboundgroup.GroupNodes
+	if nodes != nil {
+		groupNodes = append(groupNodes, outboundgroup.GroupNodes{Lookup: nodes.library.Lookup, All: nodes.sorted, Library: nodes.library, Group: nodes.library.Group})
+	}
 	for idx, mapping := range groupsConfig {
-		group, err := outboundgroup.ParseProxyGroup(mapping, proxies, providersMap, AllProxies, AllProviders)
+		group, err := outboundgroup.ParseProxyGroup(mapping, proxies, providersMap, AllProxies, AllProviders, groupNodes...)
 		if err != nil {
-			return nil, nil, fmt.Errorf("proxy group[%d]: %w", idx, err)
+			return nil, nil, nil, fmt.Errorf("proxy group[%d]: %w", idx, err)
 		}
 
 		groupName := group.Name()
-		if _, exist := proxies[groupName]; exist {
-			return nil, nil, fmt.Errorf("proxy group %s: the duplicate name", groupName)
+		if hasProxy(proxies, library, groupName) {
+			return nil, nil, nil, fmt.Errorf("proxy group %s: the duplicate name", groupName)
 		}
 
 		proxies[groupName] = adapter.NewProxy(group)
@@ -1031,8 +1055,12 @@ func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[
 		}
 		ps = append(ps, proxies[v])
 	}
-	hc := provider.NewHealthCheck(ps, "", 5000, 0, true, nil)
-	pd, _ := provider.NewCompatibleProvider(provider.ReservedName, ps, hc)
+	var all C.ProxyList = C.ProxySlice(ps)
+	if nodes != nil {
+		all = C.ConcatProxyLists(C.ProxySlice(ps[:2]), nodes.written, C.ProxySlice(ps[2:]))
+	}
+	hc := provider.NewHealthCheckList(all, "", 5000, 0, true, nil)
+	pd, _ := provider.NewCompatibleProviderList(provider.ReservedName, all, hc)
 	providersMap[provider.ReservedName] = pd
 
 	if !hasGlobal {
@@ -1045,17 +1073,17 @@ func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[
 			[]P.ProxyProvider{pd},
 		)
 		if err != nil {
-			return nil, nil, fmt.Errorf("new GLOBAL proxy group error: %w", err)
+			return nil, nil, nil, fmt.Errorf("new GLOBAL proxy group error: %w", err)
 		}
 		proxies["GLOBAL"] = adapter.NewProxy(global)
 	}
 
 	// validate dialer-proxy references
-	if err := validateDialerProxies(proxies); err != nil {
-		return nil, nil, err
+	if err := validateDialerProxies(proxies, library); err != nil {
+		return nil, nil, nil, err
 	}
 
-	return proxies, providersMap, nil
+	return proxies, providersMap, library, nil
 }
 
 func parseListeners(cfg *RawConfig) (listeners map[string]C.InboundListener, err error) {
@@ -1092,7 +1120,7 @@ func parseRuleProviders(cfg *RawConfig) (ruleProviders map[string]P.RuleProvider
 	return
 }
 
-func parseSubRules(cfg *RawConfig, proxies map[string]C.Proxy, ruleProviders map[string]P.RuleProvider) (subRules map[string][]C.Rule, err error) {
+func parseSubRules(cfg *RawConfig, proxies map[string]C.Proxy, library C.ProxyLibrary, ruleProviders map[string]P.RuleProvider) (subRules map[string][]C.Rule, err error) {
 	subRules = map[string][]C.Rule{}
 	for name := range cfg.SubRules {
 		subRules[name] = make([]C.Rule, 0)
@@ -1102,7 +1130,7 @@ func parseSubRules(cfg *RawConfig, proxies map[string]C.Proxy, ruleProviders map
 			return nil, fmt.Errorf("sub-rule name is empty")
 		}
 		var rules []C.Rule
-		rules, err = parseRules(rawRules, proxies, ruleProviders, subRules, fmt.Sprintf("sub-rules[%s]", name))
+		rules, err = parseRules(rawRules, proxies, library, ruleProviders, subRules, fmt.Sprintf("sub-rules[%s]", name))
 		if err != nil {
 			return nil, err
 		}
@@ -1155,7 +1183,7 @@ func verifySubRuleCircularReferences(n string, subRules map[string][]C.Rule, arr
 	return nil
 }
 
-func parseRules(rulesConfig []string, proxies map[string]C.Proxy, ruleProviders map[string]P.RuleProvider, subRules map[string][]C.Rule, format string) ([]C.Rule, error) {
+func parseRules(rulesConfig []string, proxies map[string]C.Proxy, library C.ProxyLibrary, ruleProviders map[string]P.RuleProvider, subRules map[string][]C.Rule, format string) ([]C.Rule, error) {
 	var rules []C.Rule
 
 	// parse rules
@@ -1165,10 +1193,10 @@ func parseRules(rulesConfig []string, proxies map[string]C.Proxy, ruleProviders 
 			return nil, fmt.Errorf("%s[%d] [%s] error: format invalid", format, idx, line)
 		}
 
-		if _, ok := proxies[target]; !ok {
+		if !hasProxy(proxies, library, target) {
 			if tp != "SUB-RULE" {
 				return nil, fmt.Errorf("%s[%d] [%s] error: proxy [%s] not found", format, idx, line, target)
-			} else if _, ok = subRules[target]; !ok {
+			} else if _, ok := subRules[target]; !ok {
 				return nil, fmt.Errorf("%s[%d] [%s] error: sub-rule [%s] not found", format, idx, line, target)
 			}
 		}

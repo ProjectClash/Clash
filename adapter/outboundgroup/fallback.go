@@ -19,7 +19,7 @@ type Fallback struct {
 	*GroupBase
 	disableUDP     bool
 	testUrl        string
-	selected       string
+	selected       groupSelection
 	expectedStatus string
 }
 
@@ -35,7 +35,7 @@ func (f *Fallback) DialContext(ctx context.Context, metadata *C.Metadata) (C.Con
 	if err == nil {
 		c.AppendToChains(f)
 	} else {
-		f.onDialFailed(proxy.Type(), err, f.healthCheck)
+		f.onDialFailed(proxy, err, f.healthCheck)
 	}
 
 	if N.NeedHandshake(c) {
@@ -43,7 +43,7 @@ func (f *Fallback) DialContext(ctx context.Context, metadata *C.Metadata) (C.Con
 			if err == nil {
 				f.onDialSuccess()
 			} else {
-				f.onDialFailed(proxy.Type(), err, f.healthCheck)
+				f.onDialFailed(proxy, err, f.healthCheck)
 			}
 		})
 	}
@@ -80,8 +80,9 @@ func (f *Fallback) IsL3Protocol(metadata *C.Metadata) bool {
 // MarshalJSON implements C.ProxyAdapter
 func (f *Fallback) MarshalJSON() ([]byte, error) {
 	all := []string{}
-	for _, proxy := range f.GetProxies(false) {
-		all = append(all, proxy.Name())
+	members := f.Members(false)
+	for i := 0; i < members.Len(); i++ {
+		all = append(all, members.At(i).Name())
 	}
 	return json.Marshal(map[string]any{
 		"type":           f.Type().String(),
@@ -89,7 +90,7 @@ func (f *Fallback) MarshalJSON() ([]byte, error) {
 		"all":            all,
 		"testUrl":        f.testUrl,
 		"expectedStatus": f.expectedStatus,
-		"fixed":          f.selected,
+		"fixed":          f.selected.Load(),
 		"hidden":         f.Hidden(),
 		"icon":           f.Icon(),
 		"emptyFallback":  f.EmptyFallback().Name(),
@@ -103,40 +104,37 @@ func (f *Fallback) Unwrap(metadata *C.Metadata, touch bool) C.Proxy {
 }
 
 func (f *Fallback) findAliveProxy(touch bool) C.Proxy {
-	proxies := f.GetProxies(touch)
-	for _, proxy := range proxies {
-		if len(f.selected) == 0 {
+	proxies := f.Members(touch)
+	selected := f.selected.Load()
+	for i := 0; i < proxies.Len(); i++ {
+		proxy := proxies.At(i)
+		if len(selected) == 0 {
 			if proxy.AliveForTestUrl(f.testUrl) {
 				return proxy
 			}
 		} else {
-			if proxy.Name() == f.selected {
+			if proxy.Name() == selected {
 				if proxy.AliveForTestUrl(f.testUrl) {
 					return proxy
 				} else {
-					f.selected = ""
+					f.selected.Store("")
+					selected = ""
 				}
 			}
 		}
 	}
 
-	return proxies[0]
+	return proxies.At(0)
 }
 
 func (f *Fallback) Set(name string) error {
-	var p C.Proxy
-	for _, proxy := range f.GetProxies(false) {
-		if proxy.Name() == name {
-			p = proxy
-			break
-		}
-	}
+	p, _, _ := f.memberNamed(false, name)
 
 	if p == nil {
 		return errors.New("proxy not exist")
 	}
 
-	f.selected = name
+	f.selected.Store(name)
 	if !p.AliveForTestUrl(f.testUrl) {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*time.Duration(5000))
 		defer cancel()
@@ -148,7 +146,7 @@ func (f *Fallback) Set(name string) error {
 }
 
 func (f *Fallback) ForceSet(name string) {
-	f.selected = name
+	f.selected.Store(name)
 }
 
 func (f *Fallback) Providers() []P.ProxyProvider {

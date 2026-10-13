@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ProjectClash/Clash/adapter"
+	"github.com/ProjectClash/Clash/adapter/outbound"
 	"github.com/ProjectClash/Clash/component/pause"
 	C "github.com/ProjectClash/Clash/constant"
 )
@@ -19,7 +21,7 @@ func TestAFailureStormStartsNoHealthCheckWhileTheNetworkIsPaused(t *testing.T) {
 	pause.NetworkPause()
 	t.Cleanup(pause.NetworkWake)
 	for i := 0; i < 6; i++ {
-		gb.onDialFailed(C.Vmess, timeout, check)
+		gb.onDialFailed(vmessMember, timeout, check)
 	}
 	time.Sleep(200 * time.Millisecond)
 	if got := checks.Load(); got != 0 {
@@ -28,7 +30,7 @@ func TestAFailureStormStartsNoHealthCheckWhileTheNetworkIsPaused(t *testing.T) {
 
 	pause.NetworkWake()
 	for i := 0; i < 6; i++ {
-		gb.onDialFailed(C.Vmess, timeout, check)
+		gb.onDialFailed(vmessMember, timeout, check)
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for checks.Load() == 0 && time.Now().Before(deadline) {
@@ -45,10 +47,19 @@ func TestAFailureStormStartsNoHealthCheckWhileTheDeviceSleeps(t *testing.T) {
 	pause.DevicePause()
 	t.Cleanup(pause.DeviceWake)
 	for i := 0; i < 6; i++ {
-		gb.onDialFailed(C.Vmess, errors.New("connect error: context deadline exceeded"), func() { checks.Add(1) })
+		gb.onDialFailed(vmessMember, errors.New("connect error: context deadline exceeded"), func() { checks.Add(1) })
 	}
 	time.Sleep(200 * time.Millisecond)
 	if got := checks.Load(); got != 0 {
 		t.Fatalf("%d health checks while the device sleeps, want none", got)
 	}
 }
+
+var vmessMember C.Proxy = typedMember{Proxy: adapter.NewProxy(outbound.NewDirect()), tp: C.Vmess}
+
+type typedMember struct {
+	C.Proxy
+	tp C.AdapterType
+}
+
+func (m typedMember) Type() C.AdapterType { return m.tp }

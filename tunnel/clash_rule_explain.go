@@ -115,7 +115,7 @@ func ExplainRule(input RuleExplainInput) RuleExplanation {
 			}
 		},
 		CheckPassRule: func(adapterName string) bool {
-			adapter, ok := version.proxies[adapterName]
+			adapter, ok := version.lookup(adapterName)
 			if !ok {
 				return false
 			}
@@ -177,7 +177,7 @@ func explainMatch(metadata *C.Metadata, helper C.RuleMatchHelper, version *runti
 			if !matched {
 				continue
 			}
-			adapter, ok := version.proxies[ada]
+			adapter, ok := version.lookup(ada)
 			if !ok || adapter == nil {
 				continue
 			}

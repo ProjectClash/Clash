@@ -16,6 +16,10 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 	}
 
 	opt := applyProxyOptions(options...)
+	if count := clashBuilds.Load(); count != nil {
+		(*count)()
+	}
+	clashConfig, clashCataloged := clashCatalogConfig(mapping, proxyType, opt)
 	basicOption := outbound.BasicOption{
 		DialerForAPI: opt.DialerForAPI,
 		TunnelForAPI: opt.TunnelForAPI,
@@ -248,6 +252,11 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 		}
 	}
 
+	if opt.clashBuilt != nil {
+		*opt.clashBuilt = proxy
+		return nil, nil
+	}
+	proxy = clashCatalogNode(proxy, clashConfig, clashCataloged, opt)
 	proxy = outbound.NewAutoCloseProxyAdapter(proxy)
 	reportParsedProxy(proxy)
 	return NewProxy(proxy), nil
@@ -257,6 +266,8 @@ type proxyOption struct {
 	DialerForAPI C.Dialer
 	TunnelForAPI C.Tunnel
 	ProviderName string
+	clashBuilt   *outbound.ProxyAdapter
+	clashSession *NodeCatalogSession
 }
 
 func applyProxyOptions(options ...ProxyOption) proxyOption {

@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"github.com/ProjectClash/Clash/adapter"
 	"strings"
 	"sync"
@@ -34,7 +35,7 @@ type HealthCheck struct {
 	url            string
 	extra          map[string]*extraOption
 	mu             sync.Mutex
-	proxies        []C.Proxy
+	proxies        C.ProxyList
 	interval       time.Duration
 	lazy           bool
 	expectedStatus utils.IntRanges[uint16]
@@ -42,6 +43,11 @@ type HealthCheck struct {
 	singleDo       *singledo.Single[struct{}]
 	scheduledDo    *singledo.Single[struct{}]
 	timeout        time.Duration
+	networkRounds  networkChangeRounds
+	windowMu       sync.Mutex
+	windowNext     map[string]int
+	failedFirst    failedNames
+	forcedDo       *singledo.Single[struct{}]
 }
 
 func (hc *HealthCheck) process() {
@@ -81,14 +87,21 @@ func (hc *HealthCheck) process() {
 }
 
 func (hc *HealthCheck) setProxies(proxies []C.Proxy) {
+	hc.setProxyList(C.ProxySlice(proxies))
+}
+
+func (hc *HealthCheck) setProxyList(proxies C.ProxyList) {
 	hc.mu.Lock()
 	hc.proxies = proxies
 	hc.mu.Unlock()
 }
 
-func (hc *HealthCheck) snapshotProxies() []C.Proxy {
+func (hc *HealthCheck) snapshotProxies() C.ProxyList {
 	hc.mu.Lock()
 	defer hc.mu.Unlock()
+	if hc.proxies == nil {
+		return C.ProxySlice(nil)
+	}
 	return hc.proxies
 }
 
@@ -148,29 +161,33 @@ func (hc *HealthCheck) touch() {
 }
 
 func (hc *HealthCheck) check() {
-	hc.round(hc.singleDo, time.Time{})
+	hc.round(hc.singleDo, time.Time{}, false)
 }
 
-func (hc *HealthCheck) round(single *singledo.Single[struct{}], scheduledSince time.Time) {
-	if len(hc.snapshotProxies()) == 0 {
+func (hc *HealthCheck) round(single *singledo.Single[struct{}], scheduledSince time.Time, background bool) {
+	if hc.snapshotProxies().Len() == 0 {
 		return
 	}
 
 	_, _, _ = single.Do(func() (struct{}, error) {
-		proxies := hc.snapshotProxies()
+		proxies := chosenFirst(hc.snapshotProxies(), hc.failedFirst.take()...)
+		listFor := func(string) C.ProxyList { return proxies }
+		if background {
+			listFor = hc.windows(proxies)
+		}
 		id := utils.NewUUIDV4().String()
 		log.Debugln("Start New Health Checking {%s}", id)
 		b := new(errgroup.Group)
-		b.SetLimit(10)
+		b.SetLimit(roundConcurrency())
 
 		// execute default health check
 		option := &extraOption{filters: nil, expectedStatus: hc.expectedStatus}
-		hc.execute(b, proxies, hc.url, id, option, scheduledSince)
+		hc.execute(b, listFor(hc.url), hc.url, id, option, scheduledSince)
 
 		// execute extra health check
 		if len(hc.extra) != 0 {
 			for url, option := range hc.extra {
-				hc.execute(b, proxies, url, id, option, scheduledSince)
+				hc.execute(b, listFor(url), url, id, option, scheduledSince)
 			}
 		}
 		_ = b.Wait()
@@ -179,7 +196,7 @@ func (hc *HealthCheck) round(single *singledo.Single[struct{}], scheduledSince t
 	})
 }
 
-func (hc *HealthCheck) execute(b *errgroup.Group, proxies []C.Proxy, url, uid string, option *extraOption, scheduledSince time.Time) {
+func (hc *HealthCheck) execute(b *errgroup.Group, proxies C.ProxyList, url, uid string, option *extraOption, scheduledSince time.Time) {
 	url = strings.TrimSpace(url)
 	if len(url) == 0 {
 		log.Debugln("Health Check has been skipped due to testUrl is empty, {%s}", uid)
@@ -200,7 +217,8 @@ func (hc *HealthCheck) execute(b *errgroup.Group, proxies []C.Proxy, url, uid st
 		}
 	}
 
-	for _, proxy := range proxies {
+	for i := 0; i < proxies.Len(); i++ {
+		proxy := proxies.At(i)
 		// skip proxies that do not require health check
 		if filterReg != nil {
 			if match, _ := filterReg.MatchString(proxy.Name()); !match {
@@ -213,10 +231,12 @@ func (hc *HealthCheck) execute(b *errgroup.Group, proxies []C.Proxy, url, uid st
 			if !scheduledSince.IsZero() && measuredAliveSince(p, url, expectedStatus.String(), hc.timeout, scheduledSince) {
 				return nil
 			}
-			ctx, cancel := context.WithTimeout(adapter.WithBackgroundProbe(hc.ctx), hc.timeout)
-			defer cancel()
+			ctx := adapter.WithURLTestTimeout(adapter.WithBackgroundProbe(hc.ctx), hc.timeout)
 			log.Debugln("Health Checking, proxy: %s, url: %s, id: {%s}", p.Name(), url, uid)
-			_, _ = p.URLTest(ctx, url, expectedStatus)
+			if _, err := p.URLTest(ctx, url, expectedStatus); errors.Is(err, adapter.ErrURLTestDeferred) {
+				log.Debugln("Health Check deferred, proxy: %s, url: %s, not measured uid: {%s}", p.Name(), url, uid)
+				return nil
+			}
 			log.Debugln("Health Checked, proxy: %s, url: %s, alive: %t, delay: %d ms uid: {%s}", p.Name(), url, p.AliveForTestUrl(url), p.LastDelayForTestUrl(url), uid)
 			return nil
 		})
@@ -228,6 +248,10 @@ func (hc *HealthCheck) close() {
 }
 
 func NewHealthCheck(proxies []C.Proxy, url string, timeout uint, interval uint, lazy bool, expectedStatus utils.IntRanges[uint16]) *HealthCheck {
+	return NewHealthCheckList(C.ProxySlice(proxies), url, timeout, interval, lazy, expectedStatus)
+}
+
+func NewHealthCheckList(proxies C.ProxyList, url string, timeout uint, interval uint, lazy bool, expectedStatus utils.IntRanges[uint16]) *HealthCheck {
 	if url == "" {
 		expectedStatus = nil
 		interval = 0
@@ -249,5 +273,6 @@ func NewHealthCheck(proxies []C.Proxy, url string, timeout uint, interval uint, 
 		expectedStatus: expectedStatus,
 		singleDo:       singledo.NewSingle[struct{}](time.Second),
 		scheduledDo:    singledo.NewSingle[struct{}](time.Second),
+		forcedDo:       singledo.NewSingle[struct{}](time.Second),
 	}
 }

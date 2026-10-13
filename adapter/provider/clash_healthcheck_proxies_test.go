@@ -20,7 +20,7 @@ func TestReplacingProxiesWhileRoundsReadThemIsSynchronised(t *testing.T) {
 	go func() {
 		defer close(replaced)
 		for i := 0; i < 64; i++ {
-			healthCheck.setProxies(proxies[:i%len(proxies)+1])
+			healthCheck.setProxies(C.ProxySlice(proxies[:i%len(proxies)+1]))
 		}
 	}()
 	scheduled := make(chan struct{})

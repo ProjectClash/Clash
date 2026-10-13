@@ -37,6 +37,13 @@ func proxyGroupsDagSort(groupsConfig []map[string]any) error {
 		if err := decoder.Decode(mapping, option); err != nil {
 			return fmt.Errorf("ProxyGroup %s: %s", option.Name, err.Error())
 		}
+		if members, ok := mapping["x-clash-members"].([]any); ok {
+			for _, member := range members {
+				if name, ok := member.(string); ok {
+					option.Proxies = append(option.Proxies, name)
+				}
+			}
+		}
 
 		groupName := option.Name
 		if node, ok := graph[groupName]; ok {
@@ -145,61 +152,61 @@ func proxyGroupsDagSort(groupsConfig []map[string]any) error {
 }
 
 // validateDialerProxies checks if all dialer-proxy references are valid
-func validateDialerProxies(proxies map[string]C.Proxy) error {
+func validateDialerProxies(proxies map[string]C.Proxy, library ...C.ProxyLibrary) error {
 	graph := make(map[string]string) // proxy name -> dialer-proxy name
 
-	// collect all proxies with dialer-proxy configured
-	for name, proxy := range proxies {
+	var nodes C.ProxyLibrary
+	for _, l := range library {
+		nodes = l
+	}
+	chain := func(name string, proxy C.Proxy) error {
 		dialerProxy := proxy.ProxyInfo().DialerProxy
 		if dialerProxy != "" {
 			// validate each dialer-proxy reference
-			_, exist := proxies[dialerProxy]
-			if !exist {
+			if !hasProxy(proxies, nodes, dialerProxy) {
 				return fmt.Errorf("proxy [%s] dialer-proxy [%s] not found", name, dialerProxy)
 			}
 
 			// build dependency graph
 			graph[name] = dialerProxy
 		}
+		return nil
 	}
 
-	// perform depth-first search to detect cycles for each proxy
+	// collect all proxies with dialer-proxy configured
+	for name, proxy := range proxies {
+		if err := chain(name, proxy); err != nil {
+			return err
+		}
+	}
+	if nodes != nil {
+		for i := 0; i < nodes.Len(); i++ {
+			if node := nodes.At(i); true {
+				if err := chain(node.Name(), node); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	const walking, walked = 1, 2
+	state := make(map[string]uint8, len(graph))
+	var walk []string
 	for name := range graph {
-		visited := make(map[string]bool, len(graph))
-		path := make([]string, 0, len(graph))
-		if validateDialerProxiesHasCycle(name, graph, visited, path) {
-			return fmt.Errorf("proxy [%s] has circular dialer-proxy dependency", name)
+		walk = walk[:0]
+		for current, ok := name, true; ok && state[current] != walked; current, ok = graph[current] {
+			if state[current] == walking {
+				return fmt.Errorf("proxy [%s] has circular dialer-proxy dependency", name)
+			}
+			state[current] = walking
+			walk = append(walk, current)
+		}
+		for _, node := range walk {
+			state[node] = walked
 		}
 	}
 
 	return nil
-}
-
-// validateDialerProxiesHasCycle performs DFS to detect if there's a cycle starting from current proxy
-func validateDialerProxiesHasCycle(current string, graph map[string]string, visited map[string]bool, path []string) bool {
-	// check if current is already in path (cycle detected)
-	for _, p := range path {
-		if p == current {
-			return true
-		}
-	}
-
-	// already visited and no cycle
-	if visited[current] {
-		return false
-	}
-
-	visited[current] = true
-	path = append(path, current)
-
-	// check dialer-proxy of current proxy
-	if dialerProxy, exists := graph[current]; exists {
-		if validateDialerProxiesHasCycle(dialerProxy, graph, visited, path) {
-			return true
-		}
-	}
-
-	return false
 }
 
 func verifyIP6() bool {

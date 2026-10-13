@@ -286,3 +286,137 @@ func TestAGroupIsMeasuredThroughWhateverItSelectsNow(t *testing.T) {
 		t.Fatalf("two tests of one group dialed %d times, want 2", got)
 	}
 }
+
+func TestATimeoutCarriedToTheProbeKeepsTheFlightsPatienceRules(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		waiter    time.Duration
+		wantDials int64
+		wantOK    bool
+	}{
+		{"as patient", 150 * time.Millisecond, 1, false},
+		{"more patient", 5 * time.Second, 2, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			url := noContentServer(t)
+			direct := &slowFirstDirect{Direct: outbound.NewDirect()}
+			proxy := NewProxy(direct)
+			background := WithBackgroundProbe(context.Background())
+
+			leaderDone := make(chan struct{})
+			go func() {
+				defer close(leaderDone)
+				_, _ = proxy.URLTest(WithURLTestTimeout(background, 150*time.Millisecond), url, nil)
+			}()
+			deadline := time.Now().Add(2 * time.Second)
+			for direct.dials.Load() < 1 && time.Now().Before(deadline) {
+				time.Sleep(5 * time.Millisecond)
+			}
+
+			delay, err := proxy.URLTest(WithURLTestTimeout(background, c.waiter), url, nil)
+			<-leaderDone
+
+			if ok := err == nil && delay > 0; ok != c.wantOK {
+				t.Fatalf("waiter with %v measured (%d, %v), want ok=%t", c.waiter, delay, err, c.wantOK)
+			}
+			if got := direct.dials.Load(); got != c.wantDials {
+				t.Fatalf("%d dials, want %d", got, c.wantDials)
+			}
+		})
+	}
+}
+
+func TestACoalescedWaiterKeepsItsOwnCarriedTimeout(t *testing.T) {
+	asked := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case asked <- struct{}{}:
+		default:
+		}
+		time.Sleep(400 * time.Millisecond)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	SetURLTestAdmission(nil)
+
+	proxy := NewProxy(outbound.NewDirect())
+	background := WithBackgroundProbe(context.Background())
+	leaderDone := make(chan struct{})
+	go func() {
+		defer close(leaderDone)
+		_, _ = proxy.URLTest(WithURLTestTimeout(background, 5*time.Second), server.URL, nil)
+	}()
+	<-asked
+
+	start := time.Now()
+	delay, err := proxy.URLTest(WithURLTestTimeout(background, 50*time.Millisecond), server.URL, nil)
+	elapsed := time.Since(start)
+	<-leaderDone
+	if err == nil {
+		t.Fatalf("a waiter with a 50ms timeout reported a %dms answer after %v", delay, elapsed)
+	}
+	if elapsed > 300*time.Millisecond {
+		t.Fatalf("a waiter with a 50ms timeout was held %v", elapsed)
+	}
+}
+
+func TestACoalescedWaitersTimeoutStartsWhenItsLeaderIsAdmitted(t *testing.T) {
+	url := noContentServer(t)
+	SetURLTestAdmission(func(context.Context) error {
+		time.Sleep(300 * time.Millisecond)
+		return nil
+	})
+	defer SetURLTestAdmission(nil)
+
+	direct := &countingDirect{Direct: outbound.NewDirect(), hold: make(chan struct{})}
+	close(direct.hold)
+	proxy := NewProxy(direct)
+	background := WithBackgroundProbe(context.Background())
+	leaderDone := make(chan struct{})
+	go func() {
+		defer close(leaderDone)
+		_, _ = proxy.URLTest(WithURLTestTimeout(background, 5*time.Second), url, nil)
+	}()
+	time.Sleep(50 * time.Millisecond)
+
+	delay, err := proxy.URLTest(WithURLTestTimeout(background, 100*time.Millisecond), url, nil)
+	<-leaderDone
+	if err != nil || delay == 0 {
+		t.Fatalf("a waiter with a 100ms timeout behind a 300ms queue measured (%d, %v): the queue was charged to it", delay, err)
+	}
+	if got := direct.dials.Load(); got != 1 {
+		t.Fatalf("%d dials, want 1 shared", got)
+	}
+}
+
+func TestAWaitersCarriedTimeoutIsOneBudgetAcrossRetries(t *testing.T) {
+	url := noContentServer(t)
+	SetURLTestAdmission(nil)
+	direct := &countingDirect{Direct: outbound.NewDirect(), hold: make(chan struct{})}
+	proxy := NewProxy(direct)
+	background := WithBackgroundProbe(context.Background())
+
+	leaderDone := make(chan struct{})
+	go func() {
+		defer close(leaderDone)
+		_, _ = proxy.URLTest(WithURLTestTimeout(background, 300*time.Millisecond), url, nil)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for direct.dials.Load() < 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+
+	start := time.Now()
+	_, err := proxy.URLTest(WithURLTestTimeout(background, 600*time.Millisecond), url, nil)
+	elapsed := time.Since(start)
+	<-leaderDone
+	if err == nil {
+		t.Fatal("a node that never answers passed")
+	}
+	if elapsed > 800*time.Millisecond {
+		t.Fatalf("a 600ms waiter took %v: its retry started a fresh timeout", elapsed)
+	}
+	if got := direct.dials.Load(); got != 2 {
+		t.Fatalf("%d dials, want 2: the leader's and the more patient waiter's own", got)
+	}
+}

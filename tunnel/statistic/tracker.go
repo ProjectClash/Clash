@@ -41,6 +41,8 @@ type tcpTracker struct {
 	bucket        OutboundBucket
 
 	pushToManager bool `json:"-"`
+
+	activity trackerActivity
 }
 
 func (tt *tcpTracker) ID() string {
@@ -58,6 +60,7 @@ func (tt *tcpTracker) Read(b []byte) (int, error) {
 		tt.manager.pushDownloaded(tt.bucket, download)
 	}
 	tt.DownloadTotal.Add(download)
+	tt.activity.downloaded(download)
 	return n, err
 }
 
@@ -68,6 +71,7 @@ func (tt *tcpTracker) ReadBuffer(buffer *buf.Buffer) (err error) {
 		tt.manager.pushDownloaded(tt.bucket, download)
 	}
 	tt.DownloadTotal.Add(download)
+	tt.activity.downloaded(download)
 	return
 }
 
@@ -77,6 +81,7 @@ func (tt *tcpTracker) UnwrapReader() (io.Reader, []N.CountFunc) {
 			tt.manager.pushDownloaded(tt.bucket, download)
 		}
 		tt.DownloadTotal.Add(download)
+		tt.activity.downloaded(download)
 	}}
 }
 
@@ -87,6 +92,7 @@ func (tt *tcpTracker) Write(b []byte) (int, error) {
 		tt.manager.pushUploaded(tt.bucket, upload)
 	}
 	tt.UploadTotal.Add(upload)
+	tt.activity.uploaded(upload)
 	return n, err
 }
 
@@ -97,6 +103,7 @@ func (tt *tcpTracker) WriteBuffer(buffer *buf.Buffer) (err error) {
 		tt.manager.pushUploaded(tt.bucket, upload)
 	}
 	tt.UploadTotal.Add(upload)
+	tt.activity.uploaded(upload)
 	return
 }
 
@@ -106,6 +113,7 @@ func (tt *tcpTracker) UnwrapWriter() (io.Writer, []N.CountFunc) {
 			tt.manager.pushUploaded(tt.bucket, upload)
 		}
 		tt.UploadTotal.Add(upload)
+		tt.activity.uploaded(upload)
 	}}
 }
 
@@ -139,6 +147,7 @@ func NewTCPTracker(conn C.Conn, manager *Manager, metadata *C.Metadata, rule C.R
 		},
 		pushToManager: pushToManager,
 	}
+	t.activity.start()
 
 	if pushToManager {
 		if uploadTotal > 0 {
@@ -167,6 +176,8 @@ type udpTracker struct {
 	bucket        OutboundBucket
 
 	pushToManager bool `json:"-"`
+
+	activity trackerActivity
 }
 
 func (ut *udpTracker) ID() string {
@@ -184,6 +195,7 @@ func (ut *udpTracker) ReadFrom(b []byte) (int, net.Addr, error) {
 		ut.manager.pushDownloaded(ut.bucket, download)
 	}
 	ut.DownloadTotal.Add(download)
+	ut.activity.downloaded(download)
 	return n, addr, err
 }
 
@@ -194,6 +206,7 @@ func (ut *udpTracker) WaitReadFrom() (data []byte, put func(), addr net.Addr, er
 		ut.manager.pushDownloaded(ut.bucket, download)
 	}
 	ut.DownloadTotal.Add(download)
+	ut.activity.downloaded(download)
 	return
 }
 
@@ -204,6 +217,7 @@ func (ut *udpTracker) WriteTo(b []byte, addr net.Addr) (int, error) {
 		ut.manager.pushUploaded(ut.bucket, upload)
 	}
 	ut.UploadTotal.Add(upload)
+	ut.activity.uploaded(upload)
 	return n, err
 }
 
@@ -237,6 +251,7 @@ func NewUDPTracker(conn C.PacketConn, manager *Manager, metadata *C.Metadata, ru
 		},
 		pushToManager: pushToManager,
 	}
+	ut.activity.start()
 
 	if pushToManager {
 		if uploadTotal > 0 {

@@ -48,8 +48,7 @@ func parseProxyName(next http.Handler) http.Handler {
 func findProxyByName(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		name := r.Context().Value(CtxKeyProxyName).(string)
-		proxies := tunnel.Proxies()
-		proxy, exist := proxies[name]
+		proxy, exist := tunnel.LookupProxy(name)
 		if !exist {
 			render.Status(r, http.StatusNotFound)
 			render.JSON(w, r, ErrNotFound)
@@ -63,6 +62,13 @@ func findProxyByName(next http.Handler) http.Handler {
 
 func getProxies(w http.ResponseWriter, r *http.Request) {
 	proxies := tunnel.Proxies()
+	if library := tunnel.ProxyLibrary(); library != nil {
+		clashStreamProxies(w, r, proxies, library)
+		return
+	}
+	if clashWriteProxies(w, r, proxies) {
+		return
+	}
 	render.JSON(w, r, render.M{
 		"proxies": proxies,
 	})
@@ -136,7 +142,7 @@ func getProxyDelay(w http.ResponseWriter, r *http.Request) {
 	} else {
 		delay, err = proxy.URLTest(ctx, url, expectedStatus)
 	}
-	if ctx.Err() != nil {
+	if ctx.Err() != nil && !errors.Is(err, adapter.ErrURLTestDeferred) {
 		render.Status(r, http.StatusGatewayTimeout)
 		render.JSON(w, r, ErrRequestTimeout)
 		return

@@ -24,8 +24,7 @@ func (d byNameProxyDialer) DialContext(ctx context.Context, network, address str
 	if tunnel == nil {
 		return nil, fmt.Errorf("tunnel is invalid, must be proxydialer.Tunnel, but got: %T", d.tunnel)
 	}
-	proxies := tunnel.Proxies()
-	proxy, ok := proxies[d.proxyName]
+	proxy, ok := lookupByName(tunnel, d.proxyName)
 	if !ok {
 		return nil, fmt.Errorf("proxyName[%s] not found", d.proxyName)
 	}
@@ -37,12 +36,19 @@ func (d byNameProxyDialer) ListenPacket(ctx context.Context, network, address st
 	if tunnel == nil {
 		return nil, fmt.Errorf("tunnel is invalid, must be proxydialer.Tunnel, but got: %T", d.tunnel)
 	}
-	proxies := tunnel.Proxies()
-	proxy, ok := proxies[d.proxyName]
+	proxy, ok := lookupByName(tunnel, d.proxyName)
 	if !ok {
 		return nil, fmt.Errorf("proxyName[%s] not found", d.proxyName)
 	}
 	return New(proxy, true).ListenPacket(ctx, network, address, rAddrPort)
+}
+
+func lookupByName(tunnel Tunnel, name string) (C.Proxy, bool) {
+	if lookup, ok := tunnel.(interface{ LookupProxy(string) (C.Proxy, bool) }); ok {
+		return lookup.LookupProxy(name)
+	}
+	proxy, ok := tunnel.Proxies()[name]
+	return proxy, ok
 }
 
 func NewByName(proxyName string, tunnel C.Tunnel) C.Dialer {

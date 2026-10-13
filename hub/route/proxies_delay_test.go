@@ -139,3 +139,27 @@ func TestDelayRouteClassifiesAnUnexpectedStatus(t *testing.T) {
 		t.Errorf("httpStatus = %d, want 403", body.HTTPStatus)
 	}
 }
+
+func TestDelayRouteAnswersDeferredWhenTheGateHeldItPastItsTimeout(t *testing.T) {
+	adapter.SetURLTestAdmission(func(ctx context.Context) error {
+		<-ctx.Done()
+		return adapter.ErrURLTestDeferred
+	})
+	defer adapter.SetURLTestAdmission(nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/proxies/x/delay?timeout=50&url=http://127.0.0.1:1/", nil)
+	req = req.WithContext(context.WithValue(req.Context(), CtxKeyProxy, adapter.NewProxy(outbound.NewDirect())))
+	rec := httptest.NewRecorder()
+	getProxyDelay(rec, req)
+
+	var body struct {
+		Deferred bool `json:"deferred"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("body is not json: %v\n%s", err, rec.Body.String())
+	}
+	if rec.Code != http.StatusServiceUnavailable || !body.Deferred {
+		t.Fatalf("a probe the gate held past its timeout answered %d %s, want 503 with deferred:true",
+			rec.Code, rec.Body.String())
+	}
+}

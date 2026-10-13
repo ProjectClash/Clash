@@ -122,6 +122,10 @@ func (t tunnel) Proxies() map[string]C.Proxy {
 	return loadProxies()
 }
 
+func (t tunnel) LookupProxy(name string) (C.Proxy, bool) {
+	return LookupProxy(name)
+}
+
 func (t tunnel) Providers() map[string]P.ProxyProvider {
 	return loadProviders()
 }
@@ -229,6 +233,43 @@ type runtimeVersion struct {
 	subRules      map[string][]C.Rule
 	ruleProviders map[string]P.RuleProvider
 	listeners     map[string]C.InboundListener
+	proxyTable uint64
+	library C.ProxyLibrary
+}
+
+func (v *runtimeVersion) lookup(name string) (C.Proxy, bool) {
+	if proxy, ok := v.proxies[name]; ok {
+		return proxy, true
+	}
+	if v.library != nil {
+		return v.library.Lookup(name)
+	}
+	return nil, false
+}
+
+func LookupProxy(name string) (C.Proxy, bool) {
+	return loadVersion().lookup(name)
+}
+
+func ProxyLibrary() C.ProxyLibrary {
+	return loadVersion().library
+}
+
+func RangeProxies(f func(name string, proxy C.Proxy) bool) {
+	v := loadVersion()
+	for name, proxy := range v.proxies {
+		if !f(name, proxy) {
+			return
+		}
+	}
+	if v.library != nil {
+		for i := 0; i < v.library.Len(); i++ {
+			node := v.library.At(i)
+			if !f(node.Name(), node) {
+				return
+			}
+		}
+	}
 }
 
 var initialVersion = runtimeVersion{mode: Rule, proxies: map[string]C.Proxy{}, listeners: map[string]C.InboundListener{}}
@@ -248,6 +289,11 @@ func publish(change func(*runtimeVersion)) {
 	published.Store(&next)
 }
 
+func ProxyTable() (map[string]C.Proxy, map[string]P.ProxyProvider, uint64) {
+	v := loadVersion()
+	return v.proxies, v.providers, v.proxyTable
+}
+
 func loadProxies() map[string]C.Proxy              { return loadVersion().proxies }
 func loadProviders() map[string]P.ProxyProvider    { return loadVersion().providers }
 func loadRules() []C.Rule                          { return loadVersion().rules }
@@ -255,7 +301,7 @@ func loadRuleProviders() map[string]P.RuleProvider { return loadVersion().rulePr
 func loadListeners() map[string]C.InboundListener  { return loadVersion().listeners }
 
 func (v *runtimeVersion) proxy(name string) (C.Proxy, error) {
-	if proxy := v.proxies[name]; proxy != nil {
+	if proxy, _ := v.lookup(name); proxy != nil {
 		return proxy, nil
 	}
 	return nil, fmt.Errorf("proxy %s not found", name)
@@ -267,13 +313,24 @@ func RuleProviders() map[string]P.RuleProvider {
 }
 
 // UpdateProxies handle update proxies
-func UpdateProxies(newProxies map[string]C.Proxy, newProviders map[string]P.ProxyProvider) {
-	publish(func(v *runtimeVersion) { v.proxies, v.providers = newProxies, newProviders })
+func UpdateProxies(newProxies map[string]C.Proxy, newProviders map[string]P.ProxyProvider, library ...C.ProxyLibrary) {
+	publish(func(v *runtimeVersion) {
+		v.proxies, v.providers, v.proxyTable = newProxies, newProviders, v.proxyTable+1
+		v.library = lastLibrary(library)
+	})
 }
 
-func UpdateProxiesAndRules(newProxies map[string]C.Proxy, newProviders map[string]P.ProxyProvider, newRules []C.Rule, newSubRule map[string][]C.Rule, rp map[string]P.RuleProvider) {
+func lastLibrary(library []C.ProxyLibrary) C.ProxyLibrary {
+	if len(library) == 0 {
+		return nil
+	}
+	return library[len(library)-1]
+}
+
+func UpdateProxiesAndRules(newProxies map[string]C.Proxy, newProviders map[string]P.ProxyProvider, newRules []C.Rule, newSubRule map[string][]C.Rule, rp map[string]P.RuleProvider, library ...C.ProxyLibrary) {
 	publish(func(v *runtimeVersion) {
-		v.proxies, v.providers = newProxies, newProviders
+		v.proxies, v.providers, v.proxyTable = newProxies, newProviders, v.proxyTable+1
+		v.library = lastLibrary(library)
 		v.rules, v.subRules, v.ruleProviders = newRules, newSubRule, rp
 	})
 }
@@ -488,7 +545,7 @@ func resolveMetadataInVersion(parent context.Context, metadata *C.Metadata, vers
 		},
 		CheckPassRule: func(adapterName string) bool {
 			metadata := flow.metadata
-			adapter, ok := flow.version.proxies[adapterName]
+			adapter, ok := flow.version.lookup(adapterName)
 			if !ok {
 				return false
 			}
@@ -550,13 +607,13 @@ func handleUDPConn(packet C.PacketAdapter) {
 	}
 
 	key := packet.Key()
-	sender, loaded := natTable.GetOrCreate(key, func() C.PacketSender {
+	sender, loaded := natTable.GetOrCreate(key, withUDPQuota(func() C.PacketSender {
 		sender := newPacketSender()
 		if dispatcher := snifferDispatcher.Load(); sniffingEnable.Load() && dispatcher.Enable() {
 			return dispatcher.UDPSniff(packet, sender)
 		}
 		return sender
-	})
+	}))
 	if !loaded {
 		dial := func() (C.PacketConn, C.WriteBackProxy, error) {
 			originMetadata := metadata  // save origin metadata
@@ -608,6 +665,12 @@ func handleUDPConn(packet C.PacketAdapter) {
 		}
 
 		go func() {
+			if !admitUDPSession(context.Background(), sender) {
+				reportUDPUnreachable(packet, metadata, "the UDP session quota is full")
+				sender.Close()
+				natTable.Delete(key)
+				return
+			}
 			pc, proxy, err := dial()
 			if err != nil {
 				reportUDPUnreachable(packet, metadata, "the outbound could not be opened")
@@ -630,7 +693,8 @@ func handleTCPConnContext(parent context.Context, connCtx C.ConnContext) {
 		_ = connCtx.Conn().Close()
 		return
 	}
-	if !acquireTCPConnectionSlot() {
+	waitNewSessionGate(parent, C.TCP)
+	if !admitTCPConnection() {
 		_ = connCtx.Conn().Close()
 		return
 	}
@@ -803,6 +867,7 @@ func handleTCPConnContext(parent context.Context, connCtx C.ConnContext) {
 
 	remoteConn = statistic.NewTCPTracker(remoteConn, statistic.DefaultManager, metadata, rule, int64(peekLen), 0, true)
 	tracked = true
+	trackInbound(remoteConn, conn)
 	defer func(remoteConn C.Conn) {
 		_ = remoteConn.Close()
 	}(remoteConn)
@@ -881,7 +946,7 @@ func match(metadata *C.Metadata, helper C.RuleMatchHelper, version *runtimeVersi
 	GetRules:
 		for _, rule := range getRules(metadata, version) {
 			if matched, ada := rule.Match(metadata, helper); matched {
-				adapter, ok := version.proxies[ada]
+				adapter, ok := version.lookup(ada)
 				if !ok || adapter == nil {
 					continue
 				}
