@@ -171,6 +171,12 @@ func NewRuleSetProvider(name string, behavior P.RuleBehavior, format P.RuleForma
 		if classical, ok := strategy.(*classicalStrategy); ok {
 			classical.indexDirectory = clashClassicalIndexDirectory(vehicle)
 		}
+		switch s := strategy.(type) {
+		case *domainStrategy:
+			s.stubDirectory = clashClassicalIndexDirectory(vehicle)
+		case *ipcidrStrategy:
+			s.stubDirectory = clashClassicalIndexDirectory(vehicle)
+		}
 		return rulesParse(bytes, strategy, format)
 	}, onUpdate)
 

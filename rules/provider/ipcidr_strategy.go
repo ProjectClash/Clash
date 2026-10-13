@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"net/netip"
+	"runtime"
 
 	"github.com/ProjectClash/Clash/component/cidr"
 	C "github.com/ProjectClash/Clash/constant"
@@ -17,6 +18,9 @@ type ipcidrStrategy struct {
 	count   int
 	cidrSet *cidr.IpCidrSet
 	//trie    *trie.IpCidrTrie
+	stubDirectory string
+	stubbed       bool
+	mapped        *mappedIPSet
 }
 
 func (i *ipcidrStrategy) Behavior() P.RuleBehavior {
@@ -26,6 +30,11 @@ func (i *ipcidrStrategy) Behavior() P.RuleBehavior {
 func (i *ipcidrStrategy) Match(metadata *C.Metadata, helper C.RuleMatchHelper) bool {
 	if helper.ResolveIP != nil {
 		helper.ResolveIP()
+	}
+	if m := i.mapped; m != nil {
+		has := metadata.DstIP.IsValid() && m.set.MatchIp(metadata.DstIP)
+		runtime.KeepAlive(m)
+		return has
 	}
 	// return i.trie != nil && i.trie.IsContain(metadata.DstIP.AsSlice())
 	return i.cidrSet != nil && i.cidrSet.IsContain(metadata.DstIP)
@@ -39,9 +48,25 @@ func (i *ipcidrStrategy) Reset() {
 	// i.trie = trie.NewIpCidrTrie()
 	i.cidrSet = cidr.NewIpCidrSet()
 	i.count = 0
+	i.stubbed, i.mapped = false, nil
 }
 
 func (i *ipcidrStrategy) Insert(rule string) {
+	if i.stubbed {
+		log.Warnln("IP rule [%s] follows a compiled set; ignored", rule)
+		return
+	}
+	if i.count == 0 && loadMappedSetStub(rule, ClashIPCidrSetStubType, i.stubDirectory, func(path string, sum [32]byte) error {
+		i.stubbed = true
+		m, err := openMappedIPSet(path, sum)
+		if err == nil {
+			_, _, i.count, _ = parseMappedSetStub(rule, ClashIPCidrSetStubType, i.stubDirectory)
+			i.mapped = m
+		}
+		return err
+	}) {
+		return
+	}
 	//err := i.trie.AddIpCidrForString(rule)
 	err := i.cidrSet.AddIpCidrForString(rule)
 	if err != nil {
@@ -52,6 +77,9 @@ func (i *ipcidrStrategy) Insert(rule string) {
 }
 
 func (i *ipcidrStrategy) FinishInsert() {
+	if i.stubbed {
+		return
+	}
 	i.cidrSet.Merge()
 }
 
@@ -81,6 +109,11 @@ func (i *ipcidrStrategy) DumpMrs(f func(key string) bool) {
 }
 
 func (i *ipcidrStrategy) ToIpCidr() *netipx.IPSet {
+	if m := i.mapped; m != nil {
+		set := m.set.ToIPSet()
+		runtime.KeepAlive(m)
+		return set
+	}
 	return i.cidrSet.ToIPSet()
 }
 

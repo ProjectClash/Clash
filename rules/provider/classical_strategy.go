@@ -6,6 +6,8 @@ import (
 	"hash/maphash"
 	"net/netip"
 	"os"
+	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/ProjectClash/Clash/component/cidr"
@@ -30,6 +32,9 @@ type classicalStrategy struct {
 	domains  classicalNameTable
 	suffixes classicalNameTable
 	steps    []classicalStep
+
+	keywords, regexes, children int
+	heavy                       error
 }
 
 type classicalNameTable struct {
@@ -103,6 +108,7 @@ type classicalStep struct {
 	cidrs   *cidr.IpCidrSet
 	source  bool
 	resolve bool
+	mapped *cidr.MappedIpCidrSet
 }
 
 func (c *classicalStrategy) Behavior() P.RuleBehavior {
@@ -149,7 +155,7 @@ func (c *classicalStrategy) Match(metadata *C.Metadata, helper C.RuleMatchHelper
 		if step.source {
 			ip = metadata.SrcIP
 		}
-		if ip.IsValid() && step.cidrs.IsContain(ip) {
+		if ip.IsValid() && ((step.cidrs != nil && step.cidrs.IsContain(ip)) || (step.mapped != nil && step.mapped.MatchIp(ip))) {
 			return true
 		}
 	}
@@ -203,11 +209,15 @@ func (c *classicalStrategy) Count() int {
 func (c *classicalStrategy) Reset() {
 	c.names, c.others, c.mapped = nil, nil, nil
 	c.count = 0
+	c.keywords, c.regexes, c.children, c.heavy = 0, 0, 0, nil
 	c.indexed = false
 	c.domains, c.suffixes, c.steps = classicalNameTable{}, classicalNameTable{}, nil
 }
 
 func (c *classicalStrategy) Insert(rule string) {
+	if c.heavy != nil {
+		return
+	}
 	if c.mapped != nil {
 		log.Warnln("classical rule [%s] follows a compiled index; ignored", rule)
 		return
@@ -219,6 +229,11 @@ func (c *classicalStrategy) Insert(rule string) {
 		}
 	}
 	tp, payload, target, params := common.ParseRulePayload(rule, false)
+	if c.heavy = c.countHeavy(tp, payload); c.heavy != nil {
+		log.Errorln("[Rule] %v", c.heavy)
+		c.names, c.others, c.count = nil, nil, 0
+		return
+	}
 	if (tp == "DOMAIN" || tp == "DOMAIN-SUFFIX") && payload != "" && !c.indexed {
 		c.names = append(c.names, classicalName{name: strings.ToLower(payload), line: int32(c.count), suffix: tp == "DOMAIN-SUFFIX"})
 		c.count++
@@ -289,6 +304,9 @@ func buildClassicalSteps(others []classicalRule) ([]classicalStep, bool) {
 		}
 		steps = append(steps, classicalStep{line: position, rule: rule})
 	}
+	if len(steps) < cap(steps) {
+		steps = append(make([]classicalStep, 0, len(steps)), steps...)
+	}
 	for i := range steps {
 		if steps[i].cidrs != nil {
 			if err := steps[i].cidrs.Merge(); err != nil {
@@ -301,11 +319,23 @@ func buildClassicalSteps(others []classicalRule) ([]classicalStep, bool) {
 }
 
 func (c *classicalStrategy) loadCompiled(index string, checksum uint32, source string, format P.RuleFormat) {
-	m, names, others, err := loadClassicalIndex(index, checksum)
+	m, names, others, ipSteps, err := loadClassicalIndex(index, checksum)
+	if err == nil && len(others) > ClashClassicalOthersLimit {
+		err = fmt.Errorf("%d lines parsed at load, more than %d", len(others), ClashClassicalOthersLimit)
+	}
 	if err == nil {
 		rulesOf := make([]classicalRule, 0, len(others))
 		for _, other := range others {
 			tp, payload, target, params := common.ParseRulePayload(other.text, false)
+			heavy := c.countHeavy(tp, payload)
+			if heavy == nil && len(others)+c.children > ClashClassicalOthersLimit {
+				heavy = fmt.Errorf("%w: more than %d rules parsed at load, counting the rules inside logic rules, so it loads no rules", ErrClassicalTooHeavy, ClashClassicalOthersLimit)
+			}
+			if heavy != nil {
+				log.Errorln("[Rule] %v", heavy)
+				c.names, c.others, c.count, c.keywords, c.regexes, c.children = nil, nil, 0, 0, 0, 0
+				return
+			}
 			r, parseErr := c.payloadToRule(tp, payload, target, params)
 			if parseErr != nil {
 				log.Warnln("parse classical rule [%s] error: %s", other.text, parseErr.Error())
@@ -314,12 +344,22 @@ func (c *classicalStrategy) loadCompiled(index string, checksum uint32, source s
 			rulesOf = append(rulesOf, classicalRule{rule: r, line: other.line})
 		}
 		if steps, ok := buildClassicalSteps(rulesOf); ok {
-			c.mapped, c.count, c.steps, c.indexed = m, names+len(rulesOf), steps, true
+			ipRules := 0
+			for _, step := range ipSteps {
+				ipRules += step.rules
+				steps = append(steps, classicalStep{line: step.line, mapped: step.set, source: step.source, resolve: step.resolve})
+			}
+			sort.SliceStable(steps, func(i, j int) bool { return steps[i].line < steps[j].line })
+			c.mapped, c.count, c.steps, c.indexed = m, names+len(rulesOf)+ipRules, steps, true
 			return
 		}
 		err = errors.New("its IP lines do not merge")
 	}
 	log.Warnln("[Rule] compiled classical index %s unusable (%v); reading its source", index, err)
+	if info, statErr := os.Lstat(source); statErr == nil && info.Size() > ClashClassicalSourceFallbackLimit {
+		log.Errorln("[Rule] classical source %s: %d bytes, past the %d read without an index; publish the configuration again", source, info.Size(), ClashClassicalSourceFallbackLimit)
+		return
+	}
 	payload, readErr := readRegularFile(source)
 	if readErr != nil {
 		log.Errorln("[Rule] classical source %s: %v", source, readErr)
@@ -337,6 +377,8 @@ func (c *classicalStrategy) loadCompiled(index string, checksum uint32, source s
 	}
 }
 
+var ClashClassicalSourceFallbackLimit int64 = 1 << 20
+
 func readRegularFile(path string) ([]byte, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -346,4 +388,47 @@ func readRegularFile(path string) ([]byte, error) {
 		return nil, errors.New("not a regular file")
 	}
 	return os.ReadFile(path)
+}
+
+const (
+	ClashClassicalKeywordLimit = 20000
+	ClashClassicalRegexLimit   = 1000
+)
+
+const (
+	ClashClassicalOthersLimit = 20000
+	ClashClassicalIPRunLimit  = 20000
+)
+
+var clashLogicChildType = regexp.MustCompile(`\(\s*([^,()\s]+)\s*,`)
+
+var ErrClassicalTooHeavy = errors.New("rule set too heavy for iOS")
+
+func (c *classicalStrategy) countHeavy(tp, payload string) error {
+	switch strings.ToUpper(strings.TrimSpace(tp)) {
+	case "AND", "OR", "NOT":
+		for _, match := range clashLogicChildType.FindAllStringSubmatch(payload, -1) {
+			c.children++
+			if c.children > ClashClassicalOthersLimit {
+				return fmt.Errorf("%w: more than %d rules inside logic rules in one set, so it loads no rules", ErrClassicalTooHeavy, ClashClassicalOthersLimit)
+			}
+			if err := c.countHeavy(strings.ToUpper(match[1]), ""); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	switch tp {
+	case "DOMAIN-KEYWORD":
+		c.keywords++
+		if c.keywords > ClashClassicalKeywordLimit {
+			return fmt.Errorf("%w: more than %d DOMAIN-KEYWORD rules in one set, so it loads no rules", ErrClassicalTooHeavy, ClashClassicalKeywordLimit)
+		}
+	case "DOMAIN-REGEX", "PROCESS-NAME-REGEX", "PROCESS-PATH-REGEX":
+		c.regexes++
+		if c.regexes > ClashClassicalRegexLimit {
+			return fmt.Errorf("%w: more than %d regular-expression rules in one set, so it loads no rules", ErrClassicalTooHeavy, ClashClassicalRegexLimit)
+		}
+	}
+	return nil
 }

@@ -19,3 +19,16 @@ func UseTestTunnel(t *testing.T) {
 	SetTunnel(publicationTunnel{utils.NewCallback[P.RuleProvider]()})
 	t.Cleanup(func() { SetTunnel(old) })
 }
+
+func NewDomainStrategyInStubDirectory(directory string) *domainStrategy {
+	s := NewDomainStrategy()
+	s.stubDirectory = directory
+	return s
+}
+
+func NewIPCidrStrategyInStubDirectory(directory string) *ipcidrStrategy {
+	s := NewIPCidrStrategy()
+	s.Reset()
+	s.stubDirectory = directory
+	return s
+}

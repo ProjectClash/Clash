@@ -2,6 +2,8 @@ package provider_test
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"math/rand"
 	"net/netip"
 	"os"
@@ -197,7 +199,7 @@ func TestCompiledClassicalIndexFallsBackToItsSource(t *testing.T) {
 			_ = os.WriteFile(path, data, 0o644)
 		},
 		"a name changed": func(path string) { flip(path, "spoilme.zzq", 0) },
-		"a rule changed": func(path string) { flip(path, "198.18.7.0/24", 7) },
+		"a rule changed": func(path string) { flip(path, "CIP1", 40) },
 	} {
 		for _, format := range []P.RuleFormat{P.TextRule, P.YamlRule} {
 			indexPath, sourcePath := stageCompiled(t, t.TempDir(), lines, format)
@@ -377,5 +379,99 @@ func TestCompiledClassicalIndexChecksumReadsAsAsked(t *testing.T) {
 	}
 	if _, ok := RP.ClashClassicalIndexChecksumOf(link, false); ok {
 		t.Error("an index was read through a link")
+	}
+}
+
+func TestAClassicalSourcePastTheLimitIsNotReadInTheIndexsPlace(t *testing.T) {
+	lines := []string{"DOMAIN,a.example", "IP-CIDR,10.0.0.0/8,no-resolve"}
+	indexPath, sourcePath := stageCompiled(t, t.TempDir(), lines, P.TextRule)
+	_ = os.Remove(indexPath)
+	if matcher := loadStaged(indexPath, sourcePath, P.TextRule); matcher.Count() != 2 {
+		t.Fatalf("a source within the limit is read: count %d", matcher.Count())
+	}
+	previous := RP.ClashClassicalSourceFallbackLimit
+	RP.ClashClassicalSourceFallbackLimit = 8
+	t.Cleanup(func() { RP.ClashClassicalSourceFallbackLimit = previous })
+	if matcher := loadStaged(indexPath, sourcePath, P.TextRule); matcher.Count() != 0 {
+		t.Fatalf("a source past the limit was read: count %d", matcher.Count())
+	}
+}
+
+func TestAClassicalIndexRefusesWhatWouldStayOnTheHeap(t *testing.T) {
+	var alternating, others, grouped []string
+	alternating = append(alternating, "DOMAIN,example.org")
+	for i := 0; i <= RP.ClashClassicalIPRunLimit; i++ {
+		line := fmt.Sprintf("IP-CIDR,10.%d.%d.0/24", (i>>8)&255, i&255)
+		if i%2 == 1 {
+			line += ",no-resolve"
+		}
+		alternating = append(alternating, line)
+	}
+	for i := 0; i <= RP.ClashClassicalOthersLimit; i++ {
+		others = append(others, fmt.Sprintf("DST-PORT,%d", 1+i%60000))
+	}
+	for i := 0; i < 50000; i++ {
+		grouped = append(grouped, fmt.Sprintf("IP-CIDR,11.%d.%d.0/24,no-resolve", (i>>8)&255, i&255))
+	}
+	for name, lines := range map[string][]string{"alternating IP kinds": alternating, "lines parsed at load": others} {
+		if _, err := RP.ClashCompileClassicalIndex(lines, rules.ParseRule); !errors.Is(err, RP.ErrClassicalTooHeavy) {
+			t.Fatalf("%s: compiled (%v)", name, err)
+		}
+	}
+	index, err := RP.ClashCompileClassicalIndex(grouped, rules.ParseRule)
+	if err != nil || index.IPRules != 50000 || index.Names != 0 {
+		t.Fatalf("grouped IP ranges: %+v (%v)", index.Rules, err)
+	}
+}
+
+func TestRulesInsideLogicRulesCountAgainstTheLimits(t *testing.T) {
+	lines := []string{"DOMAIN,example.org"}
+	for i := 0; i <= RP.ClashClassicalRegexLimit; i++ {
+		lines = append(lines, fmt.Sprintf("AND,((DOMAIN-REGEX,^n%d\\.example$),(NETWORK,tcp))", i))
+	}
+	if _, err := RP.ClashCompileClassicalIndex(lines, rules.ParseRule); !errors.Is(err, RP.ErrClassicalTooHeavy) {
+		t.Fatalf("1,001 wrapped expressions compiled (%v)", err)
+	}
+	if index, err := RP.ClashCompileClassicalIndex(lines[:RP.ClashClassicalRegexLimit], rules.ParseRule); err != nil || index.Rules != RP.ClashClassicalRegexLimit {
+		t.Fatalf("999 wrapped expressions: %v", err)
+	}
+	for name, shape := range map[string]string{
+		"lower case": "AND,((domain-regex,^n%d\\.example$),(NETWORK,tcp))",
+		"spaces":     "AND,(( DOMAIN-REGEX ,^n%d\\.example$),(NETWORK,tcp))",
+		"mixed case": "AND,((Domain-Regex,^n%d\\.example$),(NETWORK,tcp))",
+		"dotless i":  "AND,((domaın-regex,^n%d\\.example$),(NETWORK,tcp))",
+		"nested":     "OR,((AND,((DOMAIN-REGEX,^n%d\\.example$),(NETWORK,tcp))),(NETWORK,udp))",
+	} {
+		lines := []string{"DOMAIN,example.org"}
+		for i := 0; i <= RP.ClashClassicalRegexLimit; i++ {
+			lines = append(lines, fmt.Sprintf(shape, i))
+		}
+		if loadUpstreamClassical(lines[:2]).Count() != 2 {
+			t.Fatalf("%s: upstream does not parse %q", name, lines[1])
+		}
+		if _, err := RP.ClashCompileClassicalIndex(lines, rules.ParseRule); !errors.Is(err, RP.ErrClassicalTooHeavy) {
+			t.Fatalf("%s: 1,001 wrapped expressions compiled (%v)", name, err)
+		}
+		s := RP.NewClassicalStrategy(rules.ParseRule)
+		for _, line := range lines {
+			s.Insert(line)
+		}
+		s.FinishInsert()
+		if s.Count() != 0 {
+			t.Fatalf("%s: the text load holds %d rules", name, s.Count())
+		}
+	}
+}
+
+func TestRulesInsideLogicRulesCountAgainstTheParsedLines(t *testing.T) {
+	lines := []string{"DOMAIN,example.org"}
+	for i := 0; i <= RP.ClashClassicalOthersLimit/3; i++ {
+		lines = append(lines, fmt.Sprintf("AND,((NETWORK,tcp),(DST-PORT,%d))", 1+i%60000))
+	}
+	if _, err := RP.ClashCompileClassicalIndex(lines, rules.ParseRule); !errors.Is(err, RP.ErrClassicalTooHeavy) {
+		t.Fatalf("%d lines holding %d rules compiled (%v)", len(lines)-1, 2*(len(lines)-1), err)
+	}
+	if index, err := RP.ClashCompileClassicalIndex(lines[:len(lines)-1], rules.ParseRule); err != nil || index.Rules != len(lines)-1 {
+		t.Fatalf("%d lines holding %d rules: %v", len(lines)-2, 2*(len(lines)-2), err)
 	}
 }

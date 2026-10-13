@@ -3,6 +3,7 @@ package provider
 import (
 	"errors"
 	"io"
+	"runtime"
 	"strings"
 
 	"github.com/ProjectClash/Clash/component/trie"
@@ -17,6 +18,9 @@ type domainStrategy struct {
 	count            int
 	domainSetBuilder trie.DomainSetBuilder
 	domainSet        *trie.DomainSet
+	stubDirectory string
+	stubbed       bool
+	mapped        *mappedDomainSet
 }
 
 func (d *domainStrategy) Behavior() P.RuleBehavior {
@@ -24,6 +28,11 @@ func (d *domainStrategy) Behavior() P.RuleBehavior {
 }
 
 func (d *domainStrategy) Match(metadata *C.Metadata, helper C.RuleMatchHelper) bool {
+	if m := d.mapped; m != nil {
+		has := m.set != nil && m.set.Has(metadata.RuleHost())
+		runtime.KeepAlive(m)
+		return has
+	}
 	return d.domainSet != nil && d.domainSet.Has(metadata.RuleHost())
 }
 
@@ -35,9 +44,25 @@ func (d *domainStrategy) Reset() {
 	d.domainSetBuilder.Reset()
 	d.domainSet = nil
 	d.count = 0
+	d.stubbed, d.mapped = false, nil
 }
 
 func (d *domainStrategy) Insert(rule string) {
+	if d.stubbed {
+		log.Warnln("domain rule [%s] follows a compiled set; ignored", rule)
+		return
+	}
+	if d.count == 0 && loadMappedSetStub(rule, ClashDomainSetStubType, d.stubDirectory, func(path string, sum [32]byte) error {
+		d.stubbed = true
+		m, err := openMappedDomainSet(path, sum)
+		if err == nil {
+			_, _, d.count, _ = parseMappedSetStub(rule, ClashDomainSetStubType, d.stubDirectory)
+			d.mapped = m
+		}
+		return err
+	}) {
+		return
+	}
 	if strings.ContainsRune(rule, '/') {
 		log.Warnln("skip invalid domain from rule provider: invalid domain %q: slash is not allowed", rule)
 		return
@@ -51,6 +76,9 @@ func (d *domainStrategy) Insert(rule string) {
 }
 
 func (d *domainStrategy) FinishInsert() {
+	if d.stubbed {
+		return
+	}
 	d.domainSet = d.domainSetBuilder.Build()
 }
 

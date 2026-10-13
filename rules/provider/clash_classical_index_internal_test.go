@@ -26,7 +26,7 @@ func TestAClassicalIndexWithAFullTableIsRefusedAndCannotHang(t *testing.T) {
 		le.PutUint32(data[slotsAt+4*i:], 1)
 	}
 	le.PutUint32(data[clashClassicalIndexChecksumAt:], clashClassicalIndexChecksum(data))
-	if _, _, _, err := readClassicalIndex(data); err == nil {
+	if _, _, _, _, err := readClassicalIndex(data); err == nil {
 		t.Fatal("a full table was accepted")
 	}
 	m := &classicalMapped{names: data[clashClassicalIndexHeader:slotsAt], domains: data[slotsAt : slotsAt+4*domainSlots],
@@ -42,7 +42,7 @@ func TestAClassicalIndexChangedAfterItsCheckReadsNothingOutside(t *testing.T) {
 		t.Fatal(err)
 	}
 	data := append([]byte(nil), index.Bytes...)
-	m, _, _, err := readClassicalIndex(data)
+	m, _, _, _, err := readClassicalIndex(data)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestAClassicalIndexCountsNoMoreLinesThanItsBytesHold(t *testing.T) {
 	runtime.GC()
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
-	_, _, _, err = readClassicalIndex(data)
+	_, _, _, _, err = readClassicalIndex(data)
 	runtime.ReadMemStats(&after)
 	if err == nil {
 		t.Fatal("an index counting more other lines than it holds was read")
@@ -92,7 +92,7 @@ func TestAClassicalIndexHeaderIsUnderItsChecksum(t *testing.T) {
 		t.Fatal(err)
 	}
 	data := append([]byte(nil), index.Bytes...)
-	if _, _, _, err := readClassicalIndex(data); err != nil {
+	if _, _, _, _, err := readClassicalIndex(data); err != nil {
 		t.Fatal(err)
 	}
 	le := binary.LittleEndian
@@ -101,7 +101,7 @@ func TestAClassicalIndexHeaderIsUnderItsChecksum(t *testing.T) {
 		t.Fatalf("fixture: count %d leaves no room below %d", count, names+others)
 	}
 	le.PutUint32(data[8+4*1:], names+others)
-	if _, _, _, err := readClassicalIndex(data); err == nil {
+	if _, _, _, _, err := readClassicalIndex(data); err == nil {
 		t.Fatal("a changed header was read")
 	}
 }
