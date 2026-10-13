@@ -17,6 +17,7 @@ import (
 	"github.com/ProjectClash/Clash/common/xsync"
 	C "github.com/ProjectClash/Clash/constant"
 	"github.com/ProjectClash/Clash/log"
+	"github.com/ProjectClash/Clash/transport/tuic/common"
 	"github.com/ProjectClash/Clash/transport/tuic/types"
 
 	"github.com/metacubex/quic-go"
@@ -288,9 +289,9 @@ func (t *clientImpl) DialContext(ctx context.Context, metadata *C.Metadata) (net
 			quicConn.LocalAddr(),
 			quicConn.RemoteAddr(),
 			func() {
-				time.AfterFunc(C.DefaultTCPTimeout, func() {
+				common.AfterGrace(C.DefaultTCPTimeout, quicConn, func(quicConn *quic.Conn) {
 					openStreams := t.openStreams.Add(-1)
-					if openStreams == 0 && t.closed.Load() {
+					if openStreams == 0 && t.closed.Load() && quicConn != nil {
 						t.forceClose(quicConn, types.ClientClosed)
 					}
 				})
@@ -363,9 +364,9 @@ func (t *clientImpl) ListenPacket(ctx context.Context, metadata *C.Metadata) (ne
 		deferQuicConnFn:       t.deferQuicConn,
 		closeDeferFn: func() {
 			t.udpInputMap.Delete(connId)
-			time.AfterFunc(C.DefaultUDPTimeout, func() {
+			common.AfterGrace(C.DefaultUDPTimeout, quicConn, func(quicConn *quic.Conn) {
 				openStreams := t.openStreams.Add(-1)
-				if openStreams == 0 && t.closed.Load() {
+				if openStreams == 0 && t.closed.Load() && quicConn != nil {
 					t.forceClose(quicConn, types.ClientClosed)
 				}
 			})

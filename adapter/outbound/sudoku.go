@@ -24,6 +24,8 @@ type Sudoku struct {
 	httpMaskMu     sync.Mutex
 	httpMaskClient *httpmask.TunnelClient
 	httpMaskKey    string
+
+	clashTables clashSudokuTables
 }
 
 type SudokuOption struct {
@@ -135,6 +137,9 @@ func (s *Sudoku) buildConfig(metadata *C.Metadata) (*sudoku.ProtocolConfig, erro
 	}
 
 	cfg := s.baseConf
+	if err := s.clashTables.fill(&cfg); err != nil {
+		return nil, err
+	}
 	cfg.TargetAddress = metadata.RemoteAddress()
 
 	if err := cfg.ValidateClient(); err != nil {
@@ -211,19 +216,14 @@ func NewSudoku(option SudokuOption) (*Sudoku, error) {
 		HTTPMaskPathRoot:        pathRoot,
 		Multiplex:               multiplex,
 	}
-	tables, err := sudoku.NewClientTablesWithCustomPatterns(sudoku.ClientAEADSeed(option.Key), tableType, option.CustomTable, option.CustomTables)
+	tables, err := newClashSudokuTableSpec(sudoku.ClientAEADSeed(option.Key), tableType, option.CustomTable, option.CustomTables)
 	if err != nil {
 		return nil, fmt.Errorf("build table(s) failed: %w", err)
-	}
-	if len(tables) == 1 {
-		baseConf.Table = tables[0]
-	} else {
-		baseConf.Tables = tables
 	}
 	if option.AEADMethod != "" {
 		baseConf.AEADMethod = option.AEADMethod
 	}
-	if err := baseConf.Validate(); err != nil {
+	if err := tables.validate(baseConf); err != nil {
 		return nil, err
 	}
 
@@ -243,10 +243,14 @@ func NewSudoku(option SudokuOption) (*Sudoku, error) {
 		option:   &option,
 		baseConf: baseConf,
 	}
+	outbound.clashTables.spec = tables
 	outbound.dialer = option.NewDialer(outbound.DialOptions())
 	if baseConf.SessionMuxEnabled() {
 		outbound.muxDialer, err = sudoku.NewMultiplexDialer(func(ctx context.Context) (net.Conn, error) {
 			cfg := outbound.baseConf
+			if err := outbound.clashTables.fill(&cfg); err != nil {
+				return nil, err
+			}
 			return outbound.dialAndHandshake(ctx, &cfg)
 		})
 		if err != nil {

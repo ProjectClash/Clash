@@ -315,7 +315,6 @@ func NewZeroTier(option ZeroTierOption) (*ZeroTier, error) {
 		dns:                nameServers,
 		ctx:                ctx,
 		cancel:             cancel,
-		frameCh:            make(chan zeroTierInboundFrame, zeroTierFrameQueueSize),
 		configCh:           make(chan struct{}, 1),
 		stateCh:            make(chan struct{}),
 	}
@@ -483,6 +482,7 @@ func (z *ZeroTier) startLocked() error {
 	if err != nil {
 		return err
 	}
+	z.clashMakeFrameQueue()
 	runtime := &zeroTierRuntime{}
 	var frameDrops struct {
 		sync.Mutex

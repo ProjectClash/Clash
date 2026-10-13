@@ -48,6 +48,8 @@ type Masque struct {
 	runDevice atomic.Bool
 
 	option MasqueOption
+
+	clashStack clashMasqueStack
 }
 
 type MasqueOption struct {
@@ -236,9 +238,12 @@ func NewMasque(option MasqueOption) (*Masque, error) {
 		if len(prefixes) == 0 {
 			return nil, errors.New("missing local address")
 		}
-		outbound.tunDevice, err = newIPStack(option.IPStack, prefixes, uint32(mtu))
-		if err != nil {
-			return nil, fmt.Errorf("create device: %w", err)
+		outbound.clashStack.prefixes, outbound.clashStack.mtu = prefixes, uint32(mtu)
+		outbound.tunDevice = outbound.clashStack.tunHandle()
+		if clashIPStackMayRefuse(prefixes, uint32(mtu)) {
+			if _, err = outbound.clashBuildStack(); err != nil {
+				return nil, err
+			}
 		}
 
 		for _, address := range prefixes {
@@ -255,7 +260,7 @@ func NewMasque(option MasqueOption) (*Masque, error) {
 			return nil, err
 		}
 		for i := range nss {
-			nss[i].ProxyAdapter = outbound
+			nss[i].ProxyAdapter = clashMasqueResolverDialer{outbound}
 		}
 		outbound.resolver = dns.NewResolver(dns.Config{
 			Main: nss,
@@ -331,6 +336,10 @@ func (w *Masque) run(ctx context.Context) error {
 }
 
 func (w *Masque) startLocked(ctx context.Context) error {
+	runStack, buildErr := w.clashBuildStack()
+	if buildErr != nil {
+		return buildErr
+	}
 	if !w.runDevice.Load() {
 		err := w.tunDevice.Start()
 		if err != nil {
@@ -360,11 +369,13 @@ func (w *Masque) startLocked(ctx context.Context) error {
 			_ = pc.Close()
 			return err
 		}
+		w.clashRunConn(quicConn)
 	}
 
 	w.running.Store(true)
 
 	runCtx, runCancel := context.WithCancel(w.runCtx)
+	w.clashRunStarted(runCancel)
 	contextutils.AfterFunc(runCtx, func() {
 		w.running.Store(false)
 		_ = ipConn.Close()
@@ -381,7 +392,7 @@ func (w *Masque) startLocked(ctx context.Context) error {
 		bufs := [][]byte{buf}
 		sizes := []int{0}
 		for runCtx.Err() == nil {
-			_, err := w.tunDevice.Read(bufs, sizes, 0)
+			_, err := runStack.Read(bufs, sizes, 0)
 			if err != nil {
 				log.Errorln("[Masque](%s) error reading from TUN device: %v", w.name, err)
 				return
@@ -397,7 +408,7 @@ func (w *Masque) startLocked(ctx context.Context) error {
 			}
 
 			if len(icmp) > 0 {
-				if _, err := w.tunDevice.Write([][]byte{icmp}, 0); err != nil {
+				if _, err := runStack.Write([][]byte{icmp}, 0); err != nil {
 					log.Warnln("[Masque](%s) error writing ICMP to TUN device: %v, continuing...", w.name, err)
 				}
 			}
@@ -416,7 +427,7 @@ func (w *Masque) startLocked(ctx context.Context) error {
 				log.Warnln("[Masque](%s) error reading from IP connection: %v, continuing...", w.name, err)
 				continue
 			}
-			if _, err := w.tunDevice.Write([][]byte{buf}, 0); err != nil {
+			if _, err := runStack.Write([][]byte{buf}, 0); err != nil {
 				log.Errorln("[Masque](%s) error writing to TUN device: %v", w.name, err)
 				return
 			}

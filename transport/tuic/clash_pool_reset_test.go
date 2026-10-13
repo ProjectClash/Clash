@@ -25,3 +25,22 @@ func TestAPoolResetClosesEveryPooledConnection(t *testing.T) {
 		t.Fatalf("closed=%d tcp=%d udp=%d, want every connection closed and the pool empty", closed, p.tcpClients.Len(), p.udpClients.Len())
 	}
 }
+
+type releaseProbeClient struct {
+	resetProbeClient
+	forced *int
+}
+
+func (c releaseProbeClient) OpenStreams() int64 { return 1 }
+func (c releaseProbeClient) ForceClose()        { *c.forced++ }
+
+func TestAPoolReleaseClosesItsConnectionsNow(t *testing.T) {
+	closed, forced := 0, 0
+	p := &PoolClient{}
+	p.tcpClients.PushBack(releaseProbeClient{resetProbeClient{closed: &closed}, &forced})
+	p.udpClients.PushBack(releaseProbeClient{resetProbeClient{closed: &closed}, &forced})
+	p.Release()
+	if forced != 2 || p.tcpClients.Len() != 0 || p.udpClients.Len() != 0 {
+		t.Fatalf("forced=%d tcp=%d udp=%d, want every connection closed now and the pool empty", forced, p.tcpClients.Len(), p.udpClients.Len())
+	}
+}

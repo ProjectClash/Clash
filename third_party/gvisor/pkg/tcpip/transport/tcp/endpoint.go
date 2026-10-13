@@ -1543,6 +1543,12 @@ func (e *Endpoint) GetSockOptInt(opt tcpip.SockOptInt) (int, tcpip.Error) {
 	case tcpip.ReceiveQueueSizeOption:
 		return e.readyReceiveSize()
 
+	case tcpip.SendQueueSizeOption:
+		e.sndQueueInfo.sndQueueMu.Lock()
+		v := e.sndQueueInfo.SndBufUsed
+		e.sndQueueInfo.sndQueueMu.Unlock()
+		return v, nil
+
 	case tcpip.IPv4TTLOption:
 		e.LockUser()
 		v := int(e.ipv4TTL)

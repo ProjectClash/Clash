@@ -1,12 +1,30 @@
 package outbound
 
-import "errors"
+import (
+	"errors"
+
+	C "github.com/ProjectClash/Clash/constant"
+)
 
 type NetworkResetter interface {
 	ResetNetwork()
 }
 
 var errNetworkChanged = errors.New("network changed")
+
+func AsNetworkResetter(a C.ProxyAdapter) (NetworkResetter, bool) {
+	if wrapped, ok := a.(*autoCloseProxyAdapter); ok {
+		a = wrapped.ProxyAdapter
+	}
+	if node, ok := a.(*catalogNode); ok {
+		if node.traits&catalogResetter == 0 {
+			return nil, false
+		}
+		return node, true
+	}
+	resetter, ok := a.(NetworkResetter)
+	return resetter, ok
+}
 
 func (h *Hysteria2) ResetNetwork() {
 	h.clientMu.Lock()
@@ -27,6 +45,14 @@ func (t *Tuic) ResetNetwork() {
 	}
 }
 
+func (t *Tuic) ReleaseSessions() bool {
+	if t.client != nil {
+		t.client.Release()
+	}
+	t.clashReleaseConfigs()
+	return true
+}
+
 func (s *SingMux) ResetNetwork() {
 	if s.client != nil {
 		s.client.Reset()
@@ -34,4 +60,16 @@ func (s *SingMux) ResetNetwork() {
 	if inner, ok := s.ProxyAdapter.(NetworkResetter); ok {
 		inner.ResetNetwork()
 	}
+}
+
+func (s *SingMux) ReleaseSessions() bool {
+	if s.client != nil {
+		s.client.Reset()
+	}
+	if inner, ok := s.ProxyAdapter.(SessionReleaser); ok {
+		return inner.ReleaseSessions()
+	} else if inner, ok := s.ProxyAdapter.(NetworkResetter); ok {
+		inner.ResetNetwork()
+	}
+	return true
 }

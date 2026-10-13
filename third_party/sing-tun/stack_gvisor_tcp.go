@@ -126,7 +126,7 @@ func (f *TCPForwarder) Forward(r *tcp.ForwarderRequest) {
 		var metadata M.Metadata
 		metadata.Source = M.SocksaddrFromNet(lAddr)
 		metadata.Destination = M.SocksaddrFromNet(rAddr)
-		hErr := f.handler.NewConnection(f.ctx, tcpConn, metadata)
+		hErr := f.handler.NewConnection(f.ctx, &gvisorTCPConn{TCPConn: tcpConn, endpoint: endpoint}, metadata)
 		if hErr != nil {
 			endpoint.Abort()
 		}

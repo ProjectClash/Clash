@@ -374,9 +374,11 @@ type autoCloseProxyAdapter struct {
 	ProxyAdapter
 	closeOnce sync.Once
 	closeErr  error
+	use       *sessionUse
 }
 
 func (p *autoCloseProxyAdapter) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn, err error) {
+	defer p.dialing(ctx)()
 	c, err := p.ProxyAdapter.DialContext(ctx, metadata)
 	if err != nil {
 		return nil, err
@@ -384,10 +386,12 @@ func (p *autoCloseProxyAdapter) DialContext(ctx context.Context, metadata *C.Met
 	if c, ok := c.(AddRef); ok {
 		c.AddRef(p)
 	}
+	p.use.opened(c)
 	return c, nil
 }
 
 func (p *autoCloseProxyAdapter) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (_ C.PacketConn, err error) {
+	defer p.dialing(ctx)()
 	pc, err := p.ProxyAdapter.ListenPacketContext(ctx, metadata)
 	if err != nil {
 		return nil, err
@@ -395,6 +399,7 @@ func (p *autoCloseProxyAdapter) ListenPacketContext(ctx context.Context, metadat
 	if pc, ok := pc.(AddRef); ok {
 		pc.AddRef(p)
 	}
+	p.use.opened(pc)
 	return pc, nil
 }
 
@@ -410,6 +415,7 @@ func (p *autoCloseProxyAdapter) Close() error {
 func NewAutoCloseProxyAdapter(adapter ProxyAdapter) ProxyAdapter {
 	proxy := &autoCloseProxyAdapter{
 		ProxyAdapter: adapter,
+		use:          sessionUseFor(adapter),
 	}
 	// auto close ProxyAdapter
 	runtime.SetFinalizer(proxy, (*autoCloseProxyAdapter).Close)

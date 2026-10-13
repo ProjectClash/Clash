@@ -26,9 +26,9 @@ type Tuic struct {
 	option *TuicOption
 	client *tuic.PoolClient
 
-	quicConfig *quic.Config
-	tlsConfig  *tls.Config
-	echConfig  *ech.Config
+	echConfig *ech.Config
+
+	clashConfigs clashTuicConfigs
 }
 
 type TuicOption struct {
@@ -111,7 +111,11 @@ func (t *Tuic) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (_
 }
 
 func (t *Tuic) dial(ctx context.Context) (quicConn *quic.Conn, err error) {
-	_, quicConn, err = common.DialQuic(ctx, t.addr, t.DialOptions(), t.dialer, t.tlsConfig, t.quicConfig, common.DialQuicOption{Early: t.option.ReduceRtt})
+	tlsConfig, quicConfig, err := t.clashDialConfigs()
+	if err != nil {
+		return nil, err
+	}
+	_, quicConn, err = common.DialQuic(ctx, t.addr, t.DialOptions(), t.dialer, tlsConfig, quicConfig, common.DialQuicOption{Early: t.option.ReduceRtt})
 	if err != nil {
 		return nil, err
 	}
@@ -126,8 +130,7 @@ func (t *Tuic) ProxyInfo() C.ProxyInfo {
 	return info
 }
 
-func NewTuic(option TuicOption) (*Tuic, error) {
-	addr := net.JoinHostPort(option.Server, strconv.Itoa(option.Port))
+func newTuicTLSConfig(option *TuicOption) (*tls.Config, error) {
 	serverName := option.Server
 	if option.SNI != "" {
 		serverName = option.SNI
@@ -152,6 +155,48 @@ func NewTuic(option TuicOption) (*Tuic, error) {
 		tlsConfig.NextProtos = option.ALPN
 	} else {
 		tlsConfig.NextProtos = []string{"h3"}
+	}
+
+	if option.DisableSni {
+		tlsConfig.ServerName = ""
+		tlsConfig.InsecureSkipVerify = true // tls: either ServerName or InsecureSkipVerify must be specified in the tls.Config
+	}
+	return tlsConfig, nil
+}
+
+func newTuicQUICConfig(option *TuicOption) *quic.Config {
+	// ensure server's incoming stream can handle correctly, increase to 1.1x
+	quicMaxOpenStreams := int64(option.MaxOpenStreams)
+	quicMaxOpenStreams = quicMaxOpenStreams + int64(math.Ceil(float64(quicMaxOpenStreams)/10.0))
+	quicConfig := &quic.Config{
+		InitialStreamReceiveWindow:     uint64(option.ReceiveWindowConn),
+		MaxStreamReceiveWindow:         uint64(option.ReceiveWindowConn),
+		InitialConnectionReceiveWindow: uint64(option.ReceiveWindow),
+		MaxConnectionReceiveWindow:     uint64(option.ReceiveWindow),
+		MaxIncomingStreams:             quicMaxOpenStreams,
+		MaxIncomingUniStreams:          quicMaxOpenStreams,
+		KeepAlivePeriod:                time.Duration(option.HeartbeatInterval) * time.Millisecond,
+		DisablePathMTUDiscovery:        option.DisableMTUDiscovery,
+		MaxDatagramFrameSize:           int64(option.MaxDatagramFrameSize),
+		EnableDatagrams:                true,
+	}
+	if option.ReceiveWindowConn == 0 {
+		quicConfig.InitialStreamReceiveWindow = tuic.DefaultStreamReceiveWindow / 10
+		quicConfig.MaxStreamReceiveWindow = tuic.DefaultStreamReceiveWindow
+	}
+	if option.ReceiveWindow == 0 {
+		quicConfig.InitialConnectionReceiveWindow = tuic.DefaultConnectionReceiveWindow / 10
+		quicConfig.MaxConnectionReceiveWindow = tuic.DefaultConnectionReceiveWindow
+	}
+	return quicConfig
+}
+
+func NewTuic(option TuicOption) (*Tuic, error) {
+	addr := net.JoinHostPort(option.Server, strconv.Itoa(option.Port))
+
+	parsedTLSConfig, err := newTuicTLSConfig(&option)
+	if err != nil {
+		return nil, err
 	}
 
 	if option.RequestTimeout == 0 {
@@ -193,36 +238,8 @@ func NewTuic(option TuicOption) (*Tuic, error) {
 	}
 	option.MaxUdpRelayPacketSize = option.MaxDatagramFrameSize - packetOverHead
 
-	// ensure server's incoming stream can handle correctly, increase to 1.1x
-	quicMaxOpenStreams := int64(option.MaxOpenStreams)
-	quicMaxOpenStreams = quicMaxOpenStreams + int64(math.Ceil(float64(quicMaxOpenStreams)/10.0))
-	quicConfig := &quic.Config{
-		InitialStreamReceiveWindow:     uint64(option.ReceiveWindowConn),
-		MaxStreamReceiveWindow:         uint64(option.ReceiveWindowConn),
-		InitialConnectionReceiveWindow: uint64(option.ReceiveWindow),
-		MaxConnectionReceiveWindow:     uint64(option.ReceiveWindow),
-		MaxIncomingStreams:             quicMaxOpenStreams,
-		MaxIncomingUniStreams:          quicMaxOpenStreams,
-		KeepAlivePeriod:                time.Duration(option.HeartbeatInterval) * time.Millisecond,
-		DisablePathMTUDiscovery:        option.DisableMTUDiscovery,
-		MaxDatagramFrameSize:           int64(option.MaxDatagramFrameSize),
-		EnableDatagrams:                true,
-	}
-	if option.ReceiveWindowConn == 0 {
-		quicConfig.InitialStreamReceiveWindow = tuic.DefaultStreamReceiveWindow / 10
-		quicConfig.MaxStreamReceiveWindow = tuic.DefaultStreamReceiveWindow
-	}
-	if option.ReceiveWindow == 0 {
-		quicConfig.InitialConnectionReceiveWindow = tuic.DefaultConnectionReceiveWindow / 10
-		quicConfig.MaxConnectionReceiveWindow = tuic.DefaultConnectionReceiveWindow
-	}
-
 	if len(option.Ip) > 0 {
 		addr = net.JoinHostPort(option.Ip, strconv.Itoa(option.Port))
-	}
-	if option.DisableSni {
-		tlsConfig.ServerName = ""
-		tlsConfig.InsecureSkipVerify = true // tls: either ServerName or InsecureSkipVerify must be specified in the tls.Config
 	}
 
 	echConfig, err := option.ECHOpts.Parse()
@@ -250,12 +267,11 @@ func NewTuic(option TuicOption) (*Tuic, error) {
 			RoutingMark:  option.RoutingMark,
 			Prefer:       option.IPVersion,
 		}),
-		option:     &option,
-		quicConfig: quicConfig,
-		tlsConfig:  tlsConfig,
-		echConfig:  echConfig,
+		option:    &option,
+		echConfig: echConfig,
 	}
 	t.dialer = option.NewDialer(t.DialOptions())
+	t.clashKeepParsedConfigs(parsedTLSConfig)
 
 	clientMaxOpenStreams := int64(option.MaxOpenStreams)
 
