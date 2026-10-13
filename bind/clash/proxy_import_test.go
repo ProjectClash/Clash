@@ -1511,6 +1511,7 @@ func TestTranslatedJSONServerContainersNameUnknownSemanticChildren(t *testing.T)
 }
 
 func TestProxyImportRejectsEmptyOversizedAndUnknownPayloads(t *testing.T) {
+	asTunnelProcess(t)
 	for name, testCase := range map[string]struct {
 		payload []byte
 		want    string

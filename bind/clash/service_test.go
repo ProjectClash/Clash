@@ -94,6 +94,11 @@ func TestRuntimeDiagnosticsLifecycle(t *testing.T) {
 		"tcpConnectionAdmissionLimit",
 		"tcpConnectionAdmissionActive",
 		"tcpConnectionAdmissionRejectedTotal",
+		"tcpConnectionAdmissionEvictedTotal",
+		"udpSessionAdmissionLimit",
+		"udpSessionAdmissionActive",
+		"udpSessionAdmissionRejectedTotal",
+		"udpSessionAdmissionEvictedTotal",
 	} {
 		if _, exists := afterStart[key]; !exists {
 			t.Fatalf("runtime diagnostics missing %s: %#v", key, afterStart)

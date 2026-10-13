@@ -16,7 +16,7 @@ func TestEveryRuleProviderSaysWhatBecameOfIt(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			compileStagingHome(t)
 			source := writeRuleSource(t, "set.yaml",
-				"payload:\n  - DOMAIN-KEYWORD,ads\n  - IP-CIDR,10.0.0.0/8\n")
+				"payload:\n  - DOMAIN-KEYWORD,ads\n  - DST-PORT,8443\n")
 			raw := rawWithRuleProvider(source, "classical", "yaml")
 			logBuffer := capturePublishLog(t)
 
@@ -63,7 +63,7 @@ func TestACompiledRuleProviderIsAccountedForToo(t *testing.T) {
 	}
 	defer runtime.close()
 
-	if logged := logBuffer.String(); !strings.Contains(logged, "compiled to MRS") {
+	if logged := logBuffer.String(); !strings.Contains(logged, "rules mapped from disk") {
 		t.Fatalf("a compiled set produced no disposition:\n%s", logged)
 	}
 }

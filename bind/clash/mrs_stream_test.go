@@ -94,6 +94,7 @@ func TestMRSStreamStillChecksTheWholeCompressedPayload(t *testing.T) {
 }
 
 func TestMRSStreamDecodedLimitIncludesIgnoredTail(t *testing.T) {
+	asTunnelProcess(t)
 	valid := streamMRSCIDRFixture(1)
 	for _, size := range []int{maximumProviderResourceBytes, maximumProviderResourceBytes + 1} {
 		for _, badMagic := range []bool{false, true} {

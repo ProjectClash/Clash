@@ -34,6 +34,7 @@ type refreshFixture struct {
 	options   refreshFixtureOptions
 	seedPath  string
 	service   *BoxService
+	hold      atomic.Pointer[chan struct{}]
 }
 
 type refreshFixtureOptions struct {
@@ -41,6 +42,7 @@ type refreshFixtureOptions struct {
 	published              string
 	served                 string
 	compile                bool
+	mapped                 bool
 	routes                 bool
 	fetchedAgo             time.Duration
 	interval               int
@@ -48,6 +50,11 @@ type refreshFixtureOptions struct {
 
 func newRefreshFixture(t *testing.T, options refreshFixtureOptions) *refreshFixture {
 	t.Helper()
+	if !options.mapped {
+		previous := stagingMapsRuleSets
+		stagingMapsRuleSets = false
+		t.Cleanup(func() { stagingMapsRuleSets = previous })
+	}
 	if options.behavior == "" {
 		options.behavior = "domain"
 	}
@@ -77,6 +84,9 @@ func newRefreshFixture(t *testing.T, options refreshFixtureOptions) *refreshFixt
 	fixture := &refreshFixture{t: t, home: setup.WorkingPath, body: []byte(options.served), status: http.StatusOK, options: options}
 	fixture.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fixture.requests.Add(1)
+		if hold := fixture.hold.Load(); hold != nil {
+			<-*hold
+		}
 		fixture.mu.Lock()
 		defer fixture.mu.Unlock()
 		if fixture.userinfo != "" {
@@ -237,6 +247,16 @@ func (f *refreshFixture) waitForResult(result string) *providerCacheEntry {
 	return entry
 }
 
+func (f *refreshFixture) waitForEntry(label string, want func(*providerCacheEntry) bool) *providerCacheEntry {
+	f.t.Helper()
+	var entry *providerCacheEntry
+	f.waitFor(label, func() bool {
+		_, entry = f.state()
+		return entry != nil && want(entry)
+	})
+	return entry
+}
+
 func liveRuleCount() int {
 	provider, ok := tunnel.RuleProviders()["refreshed"]
 	if !ok {
@@ -286,7 +306,9 @@ func TestTheTunnelRefreshesACompiledSetAndTheNextStartServesItFromItsCache(t *te
 		t.Fatalf("the published seed should run compiled, from the cache: %q", product.Variant)
 	}
 	fixture.waitFor("the refreshed set to go live", func() bool { return liveRuleCount() == 3 })
-	entry := fixture.waitForResult(providerRefreshUpdated)
+	entry := fixture.waitForEntry("the refresh's own result", func(e *providerCacheEntry) bool {
+		return e.Result == providerRefreshUpdated && e.CountAfter == 3
+	})
 	if entry.CountBefore != 1 || entry.CountAfter != 3 || entry.LastCheckedAt == 0 || entry.NextDueAt <= time.Now().Unix() {
 		t.Fatalf("state entry: %+v", entry)
 	}
@@ -420,7 +442,9 @@ func TestANodeSetRefreshesAndRecordsItsSubscriptionUsage(t *testing.T) {
 	fixture.mu.Unlock()
 	fixture.start()
 	fixture.waitFor("the node set to refresh", func() bool { return liveProxyCount() == 2 })
-	entry := fixture.waitForResult(providerRefreshUpdated)
+	entry := fixture.waitForEntry("the refresh's own result", func(e *providerCacheEntry) bool {
+		return e.Result == providerRefreshUpdated && e.CountAfter == 2
+	})
 	if entry.SubscriptionInfo != "upload=1; download=2; total=3; expire=1900000000" {
 		t.Fatalf("the usage the answer carried is not recorded: %+v", entry)
 	}

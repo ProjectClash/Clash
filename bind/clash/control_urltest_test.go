@@ -43,6 +43,7 @@ func (p *stubProxyProvider) Type() P.ProviderType       { return P.Proxy }
 func (p *stubProxyProvider) Initial() error             { return nil }
 func (p *stubProxyProvider) Update() error              { return nil }
 func (p *stubProxyProvider) Proxies() []C.Proxy         { return p.proxies }
+func (p *stubProxyProvider) ProxyList() C.ProxyList     { return C.ProxySlice(p.proxies) }
 func (p *stubProxyProvider) Count() int                 { return len(p.proxies) }
 func (p *stubProxyProvider) Touch()                     {}
 func (p *stubProxyProvider) HealthCheck()               {}

@@ -85,18 +85,20 @@ func judgeReloadMemory(reading reloadMemoryReading, currentLength, candidateLeng
 	return verdict
 }
 
-func (s *BoxService) judgeReloadAgainstTheCeiling(candidate string) reloadMemoryVerdict {
+func (s *BoxService) judgeReloadAgainstTheCeiling(candidate string) (reloadMemoryVerdict, *configDecode) {
 	reading := reloadMemoryReading{
 		AvailableBytes:     readAvailableMemoryForReload(),
 		ZeroMeansExhausted: zeroHeadroomMeansExhausted,
 	}
+	var decoded *configDecode
 	if reading.AvailableBytes > 0 || (reading.AvailableBytes == 0 && reading.ZeroMeansExhausted) {
 		debug.FreeOSMemory()
 		reading.AvailableBytes = readAvailableMemoryForReload()
 		reading.FootprintBytes = readFootprintForReload()
 		reading.BaselineBytes = s.startFootprintBytes
 		reading.CurrentProviderBytes = s.providerBytes
-		reading.CandidateProviderBytes = providerPayloadBytes(candidate)
+		decoded = decodeConfigText(candidate)
+		reading.CandidateProviderBytes = decoded.providerBytes()
 	}
 	s.candidateProviderBytes = -1
 	if reading.AvailableBytes > 0 || (reading.AvailableBytes == 0 && reading.ZeroMeansExhausted) {
@@ -110,7 +112,10 @@ func (s *BoxService) judgeReloadAgainstTheCeiling(candidate string) reloadMemory
 	}
 	verdict := judgeReloadMemory(reading, s.configLength, len(candidate))
 	s.reloadVerdict = verdict
-	return verdict
+	if verdict.Reason == reloadRefusedMemory {
+		return verdict, nil
+	}
+	return verdict, decoded
 }
 
 func reloadMemoryRefusal(verdict reloadMemoryVerdict) error {
@@ -124,7 +129,18 @@ func providerPayloadBytes(configContent string) int64 {
 	if err != nil {
 		return 0
 	}
-	var total int64
+	return providerPayloadSourcesOf(raw).bytes()
+}
+
+type providerPayloadSource struct {
+	kind  string
+	paths []string
+	urls  []string
+}
+
+type providerPayloadSources []providerPayloadSource
+
+func providerPayloadSourcesOf(raw *config.RawConfig) providerPayloadSources {
 	variants := func(provider map[string]any, key string) []string {
 		if value, ok := provider[key].(string); ok {
 			return []string{value}
@@ -139,32 +155,42 @@ func providerPayloadBytes(configContent string) int64 {
 		}
 		return values
 	}
+	var sources providerPayloadSources
+	add := func(kind string, providers map[string]map[string]any) {
+		for _, provider := range providers {
+			source := providerPayloadSource{kind: kind, paths: variants(provider, "path")}
+			if len(source.paths) == 0 {
+				source.urls = variants(provider, "url")
+			}
+			sources = append(sources, source)
+		}
+	}
+	add("proxies", raw.ProxyProvider)
+	add("rules", raw.RuleProvider)
+	return sources
+}
+
+func (sources providerPayloadSources) bytes() int64 {
 	sizeOf := func(path string) int64 {
 		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
 			return info.Size()
 		}
 		return 0
 	}
-	count := func(kind string, providers map[string]map[string]any) {
-		for _, provider := range providers {
-			var largest int64
-			if paths := variants(provider, "path"); len(paths) > 0 {
-				for _, path := range paths {
-					if size := sizeOf(C.Path.Resolve(path)); size > largest {
-						largest = size
-					}
-				}
-			} else {
-				for _, url := range variants(provider, "url") {
-					if size := sizeOf(C.Path.GetPathByHash(kind, url)); size > largest {
-						largest = size
-					}
-				}
+	var total int64
+	for _, source := range sources {
+		var largest int64
+		for _, path := range source.paths {
+			if size := sizeOf(C.Path.Resolve(path)); size > largest {
+				largest = size
 			}
-			total += largest
 		}
+		for _, url := range source.urls {
+			if size := sizeOf(C.Path.GetPathByHash(source.kind, url)); size > largest {
+				largest = size
+			}
+		}
+		total += largest
 	}
-	count("proxies", raw.ProxyProvider)
-	count("rules", raw.RuleProvider)
 	return total
 }

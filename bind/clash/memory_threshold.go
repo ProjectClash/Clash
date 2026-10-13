@@ -60,6 +60,7 @@ type pressureSample struct {
 	usage          uint64
 	available      uint64
 	availableKnown bool
+	connections    int
 }
 
 type pressureThresholds struct {
@@ -133,6 +134,8 @@ type pressureMachine struct {
 	pendingBaseline bool
 	baseline        pressureSample
 	baselineAt      time.Time
+
+	ladder shedLadder
 }
 
 type pressureDecision struct {

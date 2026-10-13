@@ -46,12 +46,18 @@ func DialTargetsJSON() string {
 	for _, proxy := range tunnel.Proxies() {
 		add(proxy, "")
 	}
+	if library := tunnel.ProxyLibrary(); library != nil {
+		for i := 0; i < library.Len(); i++ {
+			add(library.At(i), "")
+		}
+	}
 	for name, provider := range tunnel.Providers() {
 		if provider.VehicleType() == P.Compatible {
 			continue
 		}
-		for _, proxy := range provider.Proxies() {
-			add(proxy, name)
+		list := provider.ProxyList()
+		for i := 0; i < list.Len(); i++ {
+			add(list.At(i), name)
 		}
 	}
 

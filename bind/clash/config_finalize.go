@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"reflect"
 	"strings"
 
 	P "github.com/ProjectClash/Clash/constant/provider"
@@ -22,6 +23,7 @@ type resourceMap struct {
 	ProviderFetchedAt        map[string]int64  `json:"providerFetchedAt"`
 	ProviderETags            map[string]string `json:"providerETags"`
 	ProviderSubscriptionInfo map[string]string `json:"providerSubscriptionInfo"`
+	NodeLibraryDirectory     string            `json:"nodeLibraryDirectory"`
 }
 
 func FinalizeForIOS(mergedYAML string, resourceMapJSON string) (*StringBox, error) {
@@ -57,6 +59,13 @@ func finalizeMergedDocument(mergedYAML string, merged *yaml.Node, resourceMapJSO
 			return finalizedDocument{}, err
 		}
 	}
+	if merged == nil && rm.NodeLibraryDirectory != "" {
+		document, err := yaml.ClashParseDocument([]byte(mergedYAML), yaml.ClashSequence{Key: "proxies", Item: reflect.TypeOf(map[string]any{})})
+		if err != nil {
+			return finalizedDocument{}, err
+		}
+		merged = document
+	}
 	if merged == nil {
 		var document yaml.Node
 		if err := yaml.Unmarshal([]byte(mergedYAML), &document); err != nil {
@@ -88,6 +97,22 @@ func finalizeMergedDocument(mergedYAML string, merged *yaml.Node, resourceMapJSO
 	}
 	annotateProviderRefresh(root, "proxy-providers", "proxy", remoteProxyProviders, rm)
 	annotateProviderRefresh(root, "rule-providers", "rule", remoteRuleProviders, rm)
+	reference, carried := root["x-clash-node-library"]
+	if carried && publishedNodeLibraryHere(reference) != nil && !nodesOnlyInLibrary(root, reference) {
+		carried = false
+	}
+	if carried {
+		if err := publishedNodeLibraryHere(reference); err != nil {
+			return finalizedDocument{}, err
+		}
+	} else if rm.NodeLibraryDirectory != "" {
+		dropWrittenNodeFields(root)
+		if err := writeNodeLibrary(root, rm.NodeLibraryDirectory); err != nil {
+			return finalizedDocument{}, err
+		}
+	} else {
+		dropWrittenNodeFields(root)
+	}
 	readPaths := rm.ProviderReadPaths
 	if len(readPaths) == 0 {
 		readPaths = rm.ProviderPaths
@@ -107,6 +132,11 @@ func finalizeMergedDocument(mergedYAML string, merged *yaml.Node, resourceMapJSO
 	references := make([]*yaml.Node, 0, 2)
 	if orderRoot != nil {
 		references = append(references, orderRoot)
+	} else if orderReference != "" && rm.NodeLibraryDirectory != "" {
+		document, err := yaml.ClashParseDocument([]byte(orderReference), yaml.ClashSequence{Key: "proxies", Item: reflect.TypeOf(struct{}{})})
+		if err == nil {
+			references = append(references, document)
+		}
 	} else if orderReference != "" {
 		var document yaml.Node
 		if err := yaml.Unmarshal([]byte(orderReference), &document); err == nil {

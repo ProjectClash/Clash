@@ -426,7 +426,7 @@ func validateSTUNOutbound(outbound string) error {
 	if outbound == "" {
 		return nil
 	}
-	proxy, exists := tunnel.Proxies()[outbound]
+	proxy, exists := lookupRunningProxy(outbound)
 	if !exists {
 		return errors.New("clash: selected STUN outbound was not found")
 	}
@@ -441,7 +441,8 @@ func dialSTUNThroughCore(ctx context.Context, endpoint, outbound string) (net.Pa
 	if outbound == "" {
 		dialer = tunnel.NewDNSDialer(resolver.DefaultResolver, nil, tunnel.DnsRespectRules)
 	} else {
-		dialer = tunnel.NewDNSDialer(resolver.DefaultResolver, tunnel.Proxies()[outbound], "")
+		proxy, _ := lookupRunningProxy(outbound)
+		dialer = tunnel.NewDNSDialer(resolver.DefaultResolver, proxy, "")
 	}
 	connection, err := dialer.ListenPacket(ctx, "udp", endpoint)
 	if err != nil {

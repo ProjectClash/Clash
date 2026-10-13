@@ -47,6 +47,7 @@ func TestNoNewLogPrefixArrivesUnnoticed(t *testing.T) {
 			"kept in the App's crash report. NOT selected by the app"},
 		"Memory|Warnln": {"Warnln", "developer-facing: pressure and threshold telemetry"},
 		"Memory|Infoln": {"Infoln", "developer-facing: pressure sampling"},
+		"Proxy|Infoln":  {"Infoln", "developer-facing: node catalog housekeeping -- store files a killed tunnel left, swept"},
 		"mem|Infoln":    {"Infoln", "developer-facing: allocator sampling"},
 		"iOS|Warnln": {"Warnln", "developer-facing: provider staging and lifecycle internals. NOT " +
 			"selected by the app -- if a line here ever needs to reach a user, give it an " +

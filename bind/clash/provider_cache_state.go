@@ -54,7 +54,14 @@ type providerCacheProduct struct {
 	Count         int      `json:"count,omitempty"`
 	IndexChecksum uint32   `json:"indexChecksum,omitempty"`
 	Generation    string   `json:"generation"`
+	Stopgap       bool     `json:"stopgap,omitempty"`
+	BuiltHere     bool     `json:"builtHere,omitempty"`
 	SourceForm    string   `json:"sourceForm,omitempty"`
+	Selection     string   `json:"selection,omitempty"`
+}
+
+func productRuns(entry *providerCacheEntry, product *providerCacheProduct) bool {
+	return product != nil && (product.SourceSHA256 == entry.SourceSHA256 || entry.PendingSHA256 != "")
 }
 
 type providerCacheEntry struct {
@@ -92,6 +99,7 @@ type providerCacheRunning struct {
 	ConfigSHA256 string            `json:"configSHA256"`
 	Providers    map[string]string `json:"providers"`
 	Variants     map[string]string `json:"variants,omitempty"`
+	ProductKeys  map[string]string `json:"productKeys,omitempty"`
 }
 
 type providerCacheStateFile struct {
@@ -145,7 +153,11 @@ func (st *providerCacheStore) sourcePath(requestKey string) string {
 }
 
 func (st *providerCacheStore) productDirectory(requestKey, productKey, generation string) string {
-	return filepath.Join(st.requestDirectory(requestKey), "products", productKey, generation)
+	return providerProductDirectory(st.homeDirectory(), requestKey, productKey, generation)
+}
+
+func providerProductDirectory(home, requestKey, productKey, generation string) string {
+	return filepath.Join(home, ProviderRefreshDirectoryName, providerRefreshCacheDirectory, requestKey, "products", productKey, generation)
 }
 
 func (st *providerCacheStore) pendingPath(requestKey string) string {
@@ -237,11 +249,11 @@ func (st *providerCacheStore) get(requestKey string) *providerCacheEntry {
 	return &copied
 }
 
-func (st *providerCacheStore) setRunning(configSHA256 string, providers, variants map[string]string) {
+func (st *providerCacheStore) setRunning(configSHA256 string, providers, variants, productKeys map[string]string) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	st.loadLocked()
-	st.state.Running = providerCacheRunning{ConfigSHA256: configSHA256, Providers: providers, Variants: variants}
+	st.state.Running = providerCacheRunning{ConfigSHA256: configSHA256, Providers: providers, Variants: variants, ProductKeys: productKeys}
 	now := time.Now().Unix()
 	for _, requestKey := range providers {
 		entry := st.state.Entries[requestKey]

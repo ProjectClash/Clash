@@ -15,7 +15,7 @@ import (
 )
 
 func TestNamesOfOneRequestReadTheWinningSeedsCompiledProduct(t *testing.T) {
-	fixture := newRefreshFixture(t, refreshFixtureOptions{kind: "rule", served: "unused.example\n", interval: 86400})
+	fixture := newRefreshFixture(t, refreshFixtureOptions{kind: "rule", served: "unused.example\n", interval: 86400, mapped: true})
 	directory := filepath.Join(fixture.home, "store", "payloads")
 	_ = os.MkdirAll(directory, 0o700)
 	older, newer := filepath.Join(directory, "older"), filepath.Join(directory, "newer")
@@ -66,7 +66,7 @@ rules:
 		return entry != nil && len(entry.Products) == 1
 	})
 	for _, product := range entry.Products {
-		if product.Variant != "compiled" {
+		if product.Variant != "mapped" {
 			t.Fatalf("the product is %s, not the App's compile", product.Variant)
 		}
 	}
@@ -84,7 +84,7 @@ func TestASeedOlderThanAWaitingFirstLoadDoesNotDisplaceIt(t *testing.T) {
 	seedFile := filepath.Join(fixture.home, "seed-older")
 	_ = os.WriteFile(seedFile, body, 0o600)
 	description, _ := json.Marshal(map[string]any{"fetchedAt": time.Now().Add(-time.Hour).Unix(), "sourceSHA256": payloadSHA256(body), "payload": "source"})
-	_ = SeedProviderFileJSON("rule", "refreshed", seedFile, string(description), service.runningConfigurationSHA256())
+	_ = SeedProviderFileJSON("rule", "refreshed", seedFile, string(description), service.runningConfigurationSHA256(), 0)
 	if _, after := fixture.state(); after.PendingSHA256 != entry.PendingSHA256 || after.PendingCheckedAt != entry.PendingCheckedAt {
 		t.Fatalf("what waits changed: %+v -> %+v", entry, after)
 	}
@@ -182,7 +182,7 @@ func TestTheAwaitedPayloadIsTakenWhateverItsConfirmation(t *testing.T) {
 		seedFile := filepath.Join(fixture.home, "seed-awaited")
 		_ = os.WriteFile(seedFile, []byte(served), 0o600)
 		description, _ := json.Marshal(map[string]any{"fetchedAt": appFetched, "sourceSHA256": payloadSHA256([]byte(served)), "payload": "source"})
-		return SeedProviderFileJSON("rule", "refreshed", seedFile, string(description), service.runningConfigurationSHA256())
+		return SeedProviderFileJSON("rule", "refreshed", seedFile, string(description), service.runningConfigurationSHA256(), 0)
 	}
 	if answer := seed(); !strings.Contains(answer, `"result":"pendingApp"`) {
 		t.Fatalf("the awaited payload with no room: %s", answer)

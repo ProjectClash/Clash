@@ -6,7 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"reflect"
+	"slices"
 	"testing"
 )
 
@@ -76,7 +76,7 @@ func TestTheResolverLibraryAgreesWithTheFileOnMacOS(t *testing.T) {
 			filtered = append(filtered, line)
 		}
 	}
-	if !reflect.DeepEqual(filtered, fromFile) {
+	if !slices.Equal(filtered, fromFile) {
 		t.Fatalf("library %v (filtered %v) vs file %v", fromLibrary, filtered, fromFile)
 	}
 	t.Logf("library %v == file %v", filtered, fromFile)

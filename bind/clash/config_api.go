@@ -83,6 +83,9 @@ func PlatformConfigIntentJSON(configContent string) (*StringBox, error) {
 }
 
 func platformConfigIntentJSONUnguarded(configContent string) (*StringBox, error) {
+	if data, ok := takeStartedIntent(configContent); ok {
+		return WrapString(string(data)), nil
+	}
 	raw, err := config.UnmarshalRawConfig([]byte(configContent))
 	if err != nil {
 		return nil, bridgeSafeError(fmt.Errorf("clash: parse config: %w", err))
@@ -95,10 +98,13 @@ func platformConfigIntentJSONUnguarded(configContent string) (*StringBox, error)
 }
 
 func platformConfigIntentFromRaw(raw *config.RawConfig) ([]byte, error) {
+	return platformConfigIntentFromRawWithIPStack(raw, currentIPStackSettings())
+}
+
+func platformConfigIntentFromRawWithIPStack(raw *config.RawConfig, stack ipStackSettings) ([]byte, error) {
 	if err := validateRawNetworkExtensionIntent(raw); err != nil {
 		return nil, err
 	}
-	stack := currentIPStackSettings()
 	applyIPStackSettings(raw, stack)
 	tun := raw.Tun
 	fingerprint, err := tunRestartFingerprintWithIPStack(raw, stack)

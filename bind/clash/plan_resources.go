@@ -309,8 +309,9 @@ func normalizeResourceURL(raw, resource string) (string, error) {
 }
 
 func effectiveProviderMaximumBytes(raw any) (int64, error) {
+	ceiling := int64(providerContentBytes())
 	if raw == nil {
-		return int64(maximumProviderResourceBytes), nil
+		return ceiling, nil
 	}
 	var limit int64
 	switch value := raw.(type) {
@@ -320,23 +321,23 @@ func effectiveProviderMaximumBytes(raw any) (int64, error) {
 		limit = value
 	case uint64:
 		if value > math.MaxInt64 {
-			return int64(maximumProviderResourceBytes), fmt.Errorf("provider size-limit is out of range")
+			return ceiling, fmt.Errorf("provider size-limit is out of range")
 		}
 		limit = int64(value)
 	case string:
 		parsed, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
 		if err != nil {
-			return int64(maximumProviderResourceBytes), fmt.Errorf("provider size-limit must be a non-negative byte count")
+			return ceiling, fmt.Errorf("provider size-limit must be a non-negative byte count")
 		}
 		limit = parsed
 	default:
-		return int64(maximumProviderResourceBytes), fmt.Errorf("provider size-limit must be a non-negative byte count")
+		return ceiling, fmt.Errorf("provider size-limit must be a non-negative byte count")
 	}
 	if limit < 0 {
-		return int64(maximumProviderResourceBytes), fmt.Errorf("provider size-limit must not be negative")
+		return ceiling, fmt.Errorf("provider size-limit must not be negative")
 	}
-	if limit == 0 || limit > int64(maximumProviderResourceBytes) {
-		return int64(maximumProviderResourceBytes), nil
+	if limit == 0 || limit > ceiling {
+		return ceiling, nil
 	}
 	return limit, nil
 }

@@ -31,6 +31,7 @@ func init() {
 			router.Post(prefix+providerSeedRoute, serveProviderSeed)
 		}
 	})
+	route.SetProviderUpdater(updateProviderForUpstreamRoute)
 }
 
 type providerUpdateRequest struct {
@@ -98,7 +99,7 @@ func serveProviderSeed(writer mhttp.ResponseWriter, request *mhttp.Request) {
 		mhttp.Error(writer, ProviderUpdateUnavailablePrefix+"no tunnel is running", mhttp.StatusServiceUnavailable)
 		return
 	}
-	path, size, err := streamSeedBody(request.Body)
+	path, size, err := streamSeedBody(request.Body, seedBodyLimit(seed))
 	if err != nil {
 		mhttp.Error(writer, "invalid provider payload: "+err.Error(), mhttp.StatusBadRequest)
 		return
@@ -109,7 +110,14 @@ func serveProviderSeed(writer mhttp.ResponseWriter, request *mhttp.Request) {
 
 const providerRefreshIncomingDirectory = "incoming"
 
-func streamSeedBody(body io.Reader) (string, int64, error) {
+func seedBodyLimit(seed providerSeed) int64 {
+	if seed.Payload == "mapped" || seed.Payload == "indexed" || seed.Payload == "library" {
+		return maximumPendingCompileBytes
+	}
+	return int64(maximumProviderResourceBytes)
+}
+
+func streamSeedBody(body io.Reader, limit int64) (string, int64, error) {
 	directory := filepath.Join(providerCache.rootDirectory(), providerRefreshIncomingDirectory)
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return "", 0, err
@@ -118,15 +126,15 @@ func streamSeedBody(body io.Reader) (string, int64, error) {
 	if err != nil {
 		return "", 0, err
 	}
-	written, err := io.Copy(file, io.LimitReader(body, int64(maximumProviderResourceBytes)+1))
+	written, err := io.Copy(file, io.LimitReader(body, limit+1))
 	if err == nil {
 		err = file.Sync()
 	}
 	if closeErr := file.Close(); err == nil {
 		err = closeErr
 	}
-	if err == nil && (written == 0 || written > int64(maximumProviderResourceBytes)) {
-		err = fmt.Errorf("its size %d is not within 1..%d bytes", written, maximumProviderResourceBytes)
+	if err == nil && (written == 0 || written > limit) {
+		err = fmt.Errorf("its size %d is not within 1..%d bytes", written, limit)
 	}
 	if err != nil {
 		_ = os.Remove(file.Name())
@@ -180,7 +188,42 @@ func answerProviderRefresh(writer mhttp.ResponseWriter, parent context.Context, 
 	_, _ = writer.Write(answer)
 }
 
+func updateProviderForUpstreamRoute(request *mhttp.Request, kind, name string) (int, string, bool) {
+	if currentCoreService() == nil {
+		return 0, "", false
+	}
+	result, status, message := requestProviderRefreshResult(request.Context(), providerRefreshRequest{kind: kind, name: name}, "", providerRequestTimeout(0))
+	switch {
+	case status == mhttp.StatusNotFound && strings.HasPrefix(message, ProviderUpdateUnavailablePrefix):
+		return 0, "", false
+	case status != mhttp.StatusOK:
+		return status, message, true
+	}
+	switch result.Result {
+	case providerRefreshUpdated, providerRefreshUnchanged:
+		return mhttp.StatusNoContent, "", true
+	case providerRefreshPendingApp:
+		return mhttp.StatusServiceUnavailable, "clash: provider update waits for the App: " + result.PendingReason, true
+	}
+	if result.Error == "" {
+		return mhttp.StatusServiceUnavailable, "clash: provider update failed", true
+	}
+	return mhttp.StatusServiceUnavailable, result.Error, true
+}
+
 func requestProviderRefresh(parent context.Context, refresh providerRefreshRequest, expected string, timeout time.Duration) ([]byte, int, string) {
+	result, status, message := requestProviderRefreshResult(parent, refresh, expected, timeout)
+	if status != mhttp.StatusOK {
+		return nil, status, message
+	}
+	answer, err := json.Marshal(result)
+	if err != nil {
+		return nil, mhttp.StatusInternalServerError, err.Error()
+	}
+	return answer, mhttp.StatusOK, ""
+}
+
+func requestProviderRefreshResult(parent context.Context, refresh providerRefreshRequest, expected string, timeout time.Duration) (providerRefreshResult, int, string) {
 	delivered := false
 	defer func() {
 		if !delivered && refresh.seed != nil && refresh.seed.path != "" {
@@ -189,7 +232,7 @@ func requestProviderRefresh(parent context.Context, refresh providerRefreshReque
 	}()
 	service := currentCoreService()
 	if service == nil {
-		return nil, mhttp.StatusServiceUnavailable, ProviderUpdateUnavailablePrefix + "no tunnel is running"
+		return providerRefreshResult{}, mhttp.StatusServiceUnavailable, ProviderUpdateUnavailablePrefix + "no tunnel is running"
 	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
@@ -208,41 +251,40 @@ func requestProviderRefresh(parent context.Context, refresh providerRefreshReque
 	select {
 	case snapshot = <-snapshots:
 	case <-ctx.Done():
-		return nil, mhttp.StatusGatewayTimeout, "clash: provider update: the tunnel is busy with its configuration"
+		return providerRefreshResult{}, mhttp.StatusGatewayTimeout, "clash: provider update: the tunnel is busy with its configuration"
 	}
 	refresher, running := snapshot.refresher, snapshot.running
 	if expected != "" && expected != running {
-		return nil, mhttp.StatusConflict, SideUpdateStalePrefix + "the running configuration is not the one this seed was prepared for"
+		return providerRefreshResult{}, mhttp.StatusConflict, SideUpdateStalePrefix + "the running configuration is not the one this seed was prepared for"
 	}
 	if refresher == nil {
-		return nil, mhttp.StatusServiceUnavailable, ProviderUpdateUnavailablePrefix + "no tunnel is running"
+		return providerRefreshResult{}, mhttp.StatusServiceUnavailable, ProviderUpdateUnavailablePrefix + "no tunnel is running"
+	}
+	if refresher.byName[providerResourceKey(refresh.kind, refresh.name)] == nil {
+		return providerRefreshResult{}, mhttp.StatusNotFound, ProviderUpdateUnavailablePrefix + "the running configuration has no such provider for the tunnel to refresh"
 	}
 	refresh.reply = make(chan providerRefreshResult, 1)
 	select {
 	case refresher.requests <- refresh:
 		delivered = true
 	case <-refresher.ctx.Done():
-		return nil, mhttp.StatusServiceUnavailable, ProviderUpdateUnavailablePrefix + "the tunnel's configuration changed"
+		return providerRefreshResult{}, mhttp.StatusServiceUnavailable, ProviderUpdateUnavailablePrefix + "the tunnel's configuration changed"
 	case <-ctx.Done():
-		return nil, mhttp.StatusGatewayTimeout, "clash: provider update: the tunnel is busy with another provider"
+		return providerRefreshResult{}, mhttp.StatusGatewayTimeout, "clash: provider update: the tunnel is busy with another provider"
 	}
 	var result providerRefreshResult
 	select {
 	case result = <-refresh.reply:
 	case <-ctx.Done():
-		return nil, mhttp.StatusGatewayTimeout, "clash: provider update: still running in the tunnel; its result will be in the state file"
+		return providerRefreshResult{}, mhttp.StatusGatewayTimeout, "clash: provider update: still running in the tunnel; its result will be in the state file"
 	}
 	if result.stale {
-		return nil, mhttp.StatusServiceUnavailable, ProviderUpdateUnavailablePrefix + "the tunnel's configuration changed"
+		return providerRefreshResult{}, mhttp.StatusServiceUnavailable, ProviderUpdateUnavailablePrefix + "the tunnel's configuration changed"
 	}
 	if strings.HasPrefix(result.Error, ProviderUpdateUnavailablePrefix) {
-		return nil, mhttp.StatusNotFound, result.Error
+		return providerRefreshResult{}, mhttp.StatusNotFound, result.Error
 	}
-	answer, err := json.Marshal(result)
-	if err != nil {
-		return nil, mhttp.StatusInternalServerError, err.Error()
-	}
-	return answer, mhttp.StatusOK, ""
+	return result, mhttp.StatusOK, ""
 }
 
 func UpdateProviderJSON(kind, name string, timeoutMilliseconds int32) string {
@@ -257,7 +299,7 @@ func UpdateProviderJSON(kind, name string, timeoutMilliseconds int32) string {
 	return bridgeSafeString(string(answer))
 }
 
-func SeedProviderFileJSON(kind, name, payloadPath, seedJSON, expectedConfigSHA256 string) string {
+func SeedProviderFileJSON(kind, name, payloadPath, seedJSON, expectedConfigSHA256 string, timeoutMilliseconds int32) string {
 	if (kind != "rule" && kind != "proxy") || !validProviderSideUpdateName(name) || !validConfigurationSHA256(expectedConfigSHA256, true) {
 		return bridgeSafeString(dnsQueryError("invalid provider selector"))
 	}
@@ -276,14 +318,14 @@ func SeedProviderFileJSON(kind, name, payloadPath, seedJSON, expectedConfigSHA25
 	if err != nil {
 		return bridgeSafeString(dnsQueryError("invalid provider payload: " + err.Error()))
 	}
-	path, size, err := streamSeedBody(file)
+	path, size, err := streamSeedBody(file, seedBodyLimit(seed))
 	_ = file.Close()
 	if err != nil {
 		return bridgeSafeString(dnsQueryError("invalid provider payload: " + err.Error()))
 	}
 	seed.path, seed.bytes = path, size
 	answer, status, message := requestProviderRefresh(context.Background(),
-		providerRefreshRequest{kind: kind, name: name, seed: &seed}, expectedConfigSHA256, 60*time.Second)
+		providerRefreshRequest{kind: kind, name: name, seed: &seed}, expectedConfigSHA256, providerRequestTimeout(timeoutMilliseconds))
 	if status != mhttp.StatusOK {
 		return bridgeSafeString(dnsQueryError(message))
 	}
@@ -305,7 +347,9 @@ func (c *APIClient) SeedProvider(kind, name string, payload []byte, seedJSON, ex
 	if !validProviderSideUpdateName(name) || (kind != "rule" && kind != "proxy") {
 		return "", bridgeSafeError(errors.New("clash: seed requires a valid provider kind and name"))
 	}
-	if len(payload) == 0 || len(payload) > maximumProviderResourceBytes {
+	var described providerSeed
+	_ = json.Unmarshal([]byte(seedJSON), &described)
+	if len(payload) == 0 || int64(len(payload)) > seedBodyLimit(described) {
 		return "", bridgeSafeError(errors.New("clash: seed payload size is invalid"))
 	}
 	query := url.Values{"kind": []string{kind}, "name": []string{name}, "seed": []string{seedJSON}}

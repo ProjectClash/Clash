@@ -220,6 +220,7 @@ func TestValidateProviderForIOSRejectsUnsafeMRSLengthsWithoutPanicking(t *testin
 }
 
 func TestValidateProviderForIOSBoundsMRSDecompression(t *testing.T) {
+	asTunnelProcess(t)
 	decoded := buildDecodedMRSTestPayload(t, P.Domain, 1, func(output *bytes.Buffer) {
 		if err := binary.Write(output, binary.BigEndian, int64(maximumProviderResourceBytes)); err != nil {
 			t.Fatal(err)

@@ -28,10 +28,19 @@ var privateRouteTable = []struct{ method, suffix string }{
 	{http.MethodPut, "/proxy-share"},
 	{http.MethodDelete, "/proxy-share"},
 	{http.MethodPut, "/providers/side-update"},
+	{http.MethodPost, "/providers/health-check"},
 	{http.MethodPost, "/stun"},
 	{http.MethodGet, "/remote-control"},
 	{http.MethodGet, "/capabilities"},
 	{http.MethodGet, "/rules/match"},
+	{http.MethodGet, "/proxy-delays"},
+	{http.MethodGet, "/proxies-page"},
+	{http.MethodGet, "/group-members"},
+	{http.MethodGet, "/group-members-search"},
+	{http.MethodGet, "/proxy-lookup"},
+	{http.MethodGet, "/proxies-summary"},
+	{http.MethodGet, "/provider-nodes"},
+	{http.MethodGet, "/proxies-search"},
 }
 
 func TestPrivateRoutesAnswerUnderClashPrefix(t *testing.T) {

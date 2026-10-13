@@ -167,8 +167,8 @@ func TestControlledAnyTLSInterop(t *testing.T) {
 	if count := targetRequests.Load(); count != 2 {
 		t.Fatalf("target request count after reuse = %d, want 2", count)
 	}
-	if count := acceptedSessions.Load(); count != 1 {
-		t.Fatalf("accepted AnyTLS sessions = %d, want one reused TLS session", count)
+	if count := acceptedSessions.Load(); count != 2 {
+		t.Fatalf("accepted AnyTLS sessions = %d, want the first probe's and one reused by the UDP dial and the second probe", count)
 	}
 
 	for _, failure := range []struct {

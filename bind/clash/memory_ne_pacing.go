@@ -3,8 +3,6 @@ package clash
 import (
 	"runtime/debug"
 
-	"github.com/ProjectClash/Clash/adapter"
-
 	"github.com/ProjectClash/Clash/log"
 )
 
@@ -47,10 +45,14 @@ func armNEPacingForService(platform PlatformInterface) {
 	startPressureThresholdMonitor(machineLimit, pressureThresholdShedEnabled.Load())
 	setupMu.Unlock()
 
+	armSessionRelease()
+	armChosenFirst()
+
 	if probeAdmissionShouldArm(pacingBudgetedPlatform, platform.UnderNetworkExtension()) {
 		armProbeAdmission()
-		log.Infoln("[Memory] probe admission pacing armed: ceiling=%d step=%d", probeAdmissionCeilingBytes, probeAdmissionStepBytes)
+		log.Infoln("[Memory] probe admission armed: interactive=%d background=%d/%d/%d by node count", probeInteractiveCap,
+			probeBackgroundCap(0), probeBackgroundCap(1000), probeBackgroundCap(10000))
 	} else {
-		adapter.SetURLTestAdmission(nil)
+		disarmProbeAdmission()
 	}
 }

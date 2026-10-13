@@ -270,7 +270,7 @@ func TestAKeptSourceRecordFromBeforeTheIndexIsJudgedOnce(t *testing.T) {
 
 func TestASetWithoutNamesIsJudgedForAnIndexOnce(t *testing.T) {
 	home := compileStagingHome(t)
-	source := writeRuleSource(t, "nameless.txt", "DOMAIN-KEYWORD,ads\nIP-CIDR,10.0.0.0/8\n")
+	source := writeRuleSource(t, "nameless.txt", "DOMAIN-KEYWORD,ads\nDST-PORT,8443\n")
 	first, err := stageProviderRuntime(rawWithRuleProvider(source, "classical", "text"), currentRuntimePolicy(true), true)
 	if err != nil {
 		t.Fatal(err)

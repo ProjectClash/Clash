@@ -774,11 +774,7 @@ func (c *APIClient) HealthCheckProxyProvider(name string) error {
 	if !validProviderSideUpdateName(name) {
 		return bridgeSafeError(errors.New("clash: proxy provider health check requires a valid name"))
 	}
-	_, err := c.request(
-		http.MethodGet,
-		"/providers/proxies/"+url.PathEscape(name)+"/healthcheck",
-		nil,
-	)
+	_, err := c.request(http.MethodPost, privateAPIPrefix+"/providers/health-check?name="+url.QueryEscape(name), nil)
 	return bridgeSafeError(err)
 }
 

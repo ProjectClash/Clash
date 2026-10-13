@@ -24,16 +24,20 @@ import (
 const disabledGeoURL = "clash-ne-disabled://prestage-required"
 
 func parseConfigForIOS(content string, underNE bool) (*config.Config, error) {
-	cfg, _, err := parseConfigForIOSInternal(content, underNE, false)
+	cfg, _, err := parseConfigForIOSInternal(content, decodeConfigText(content), underNE, false, false)
 	return cfg, err
 }
 
 func parseConfigForIOSRuntime(content string, underNE bool, entry string) (*config.Config, *providerRuntime, error) {
-	cfg, runtime, err := parseConfigForIOSInternal(content, underNE, true)
+	return parseDecodedConfigForIOSRuntime(content, decodeConfigText(content), underNE, entry)
+}
+
+func parseDecodedConfigForIOSRuntime(content string, decoded *configDecode, underNE bool, entry string) (*config.Config, *providerRuntime, error) {
+	cfg, runtime, err := parseConfigForIOSInternal(content, decoded, underNE, true, entry == deviationEntryStart)
 	if err != nil {
 		return cfg, runtime, err
 	}
-	deviations, deviationErr := collectConfigDeviations(content, currentRuntimePolicy(underNE))
+	deviations, deviationErr := decoded.deviationRows(currentRuntimePolicy(underNE))
 	if deviationErr != nil {
 		log.Warnln("[Apple] could not compute the configuration deviation report: %v", deviationErr)
 	} else {
@@ -42,10 +46,13 @@ func parseConfigForIOSRuntime(content string, underNE bool, entry string) (*conf
 	return cfg, runtime, nil
 }
 
-func parseConfigForIOSInternal(content string, underNE bool, stageRuntime bool) (*config.Config, *providerRuntime, error) {
-	raw, err := config.UnmarshalRawConfig([]byte(content))
-	if err != nil {
-		return nil, nil, fmt.Errorf("clash: parse config: %w", err)
+func parseConfigForIOSInternal(content string, decoded *configDecode, underNE bool, stageRuntime bool, rememberIntent bool) (*config.Config, *providerRuntime, error) {
+	if decoded.err != nil {
+		return nil, nil, fmt.Errorf("clash: parse config: %w", decoded.err)
+	}
+	raw := decoded.raw
+	if rememberIntent {
+		rememberStartedIntent(content, raw)
 	}
 	startupStage("bind:unmarshalled")
 	canonicalizeProviderDefinitionKeys(raw)
@@ -66,12 +73,13 @@ func parseConfigForIOSInternal(content string, underNE bool, stageRuntime bool) 
 	normalizeRawConfigForApple(raw, policy)
 	applyIPStackSettings(raw, currentIPStackSettings())
 	startupStage("bind:normalized")
-	applyAppleDefaults(raw, probeUnwrittenAppleDefaults([]byte(content)))
+	applyAppleDefaults(raw, decoded.unwritten)
 	if err := validateRawConfigForIOS(raw); err != nil {
 		return nil, nil, err
 	}
 	startupStage("bind:ios-validated")
 	var runtime *providerRuntime
+	var err error
 	if stageRuntime {
 		pointProviderCacheAtHome()
 		refreshPlan := prepareProviderRefreshForTunnel(raw, policy)
@@ -166,6 +174,10 @@ type unwrittenAppleDefaults struct {
 }
 
 func probeUnwrittenAppleDefaults(content []byte) unwrittenAppleDefaults {
+	return probeUnwrittenAppleDefaultsWith(func(out any) error { return yaml.Unmarshal(content, out) })
+}
+
+func probeUnwrittenAppleDefaultsWith(decode func(out any) error) unwrittenAppleDefaults {
 	var probe struct {
 		UnifiedDelay *bool `yaml:"unified-delay"`
 		Profile      *struct {
@@ -175,7 +187,7 @@ func probeUnwrittenAppleDefaults(content []byte) unwrittenAppleDefaults {
 			Stack any `yaml:"stack"`
 		} `yaml:"tun"`
 	}
-	if err := yaml.Unmarshal(content, &probe); err != nil {
+	if err := decode(&probe); err != nil {
 		return unwrittenAppleDefaults{}
 	}
 	return unwrittenAppleDefaults{

@@ -2,134 +2,57 @@ package clash
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"testing"
-	"testing/synctest"
 	"time"
+
+	"github.com/ProjectClash/Clash/adapter"
+	"github.com/ProjectClash/Clash/adapter/provider"
 )
 
-func testAdmissionConfig(footprint func() int64) probeAdmissionConfig {
+func testAdmissionConfig(interactiveCap, backgroundCap int) probeAdmissionConfig {
 	return probeAdmissionConfig{
-		stepBytes:    4 << 20,
-		ceilingBytes: 48 << 20,
-		chargeTTL:    30 * time.Millisecond,
-		poll:         time.Millisecond,
-		maxWait:      15 * time.Millisecond,
-		footprint:    footprint,
+		interactiveCap: interactiveCap,
+		backgroundCap:  func() int { return backgroundCap },
 	}
 }
 
-func drainProbeAdmissionCharges(t *testing.T) {
+func backgroundCtx() context.Context { return adapter.WithBackgroundProbe(context.Background()) }
+
+func admitAsync(slots *probeSlots, ctx context.Context, background bool) (admitted chan func(), deferred chan struct{}) {
+	admitted, deferred = make(chan func(), 1), make(chan struct{}, 1)
+	go func() {
+		end, verdict := slots.admit(ctx, background)
+		if verdict == probeDeferred {
+			deferred <- struct{}{}
+			return
+		}
+		admitted <- end
+	}()
+	return admitted, deferred
+}
+
+func waitAdmitted(t *testing.T, admitted chan func(), what string) func() {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for probeAdmissionCharges.Load() != 0 {
-		if time.Now().After(deadline) {
-			t.Fatalf("charges never drained: %d", probeAdmissionCharges.Load())
-		}
-		time.Sleep(time.Millisecond)
+	select {
+	case end := <-admitted:
+		return end
+	case <-time.After(3 * time.Second):
+		t.Fatalf("%s was never admitted", what)
+		return nil
 	}
 }
 
-func TestProbeAdmissionAdmitsBelowCeilingAndCharges(t *testing.T) {
-	defer drainProbeAdmissionCharges(t)
-	cfg := testAdmissionConfig(func() int64 { return 40 << 20 })
-	waited, verdict := probeAdmissionWait(context.Background(), cfg)
-	if waited >= cfg.poll || verdict != probeAdmitted {
-		t.Fatalf("low water must admit immediately: waited=%v verdict=%v", waited, verdict)
+func notAdmitted(t *testing.T, admitted chan func(), what string) {
+	t.Helper()
+	select {
+	case <-admitted:
+		t.Fatalf("%s was admitted", what)
+	case <-time.After(30 * time.Millisecond):
 	}
-	if got := probeAdmissionCharges.Load(); got != 1 {
-		t.Fatalf("admission must charge one step, got %d", got)
-	}
-}
-
-func TestProbeAdmissionChargesCountAgainstCeiling(t *testing.T) {
-	defer drainProbeAdmissionCharges(t)
-	cfg := testAdmissionConfig(func() int64 { return 41 << 20 })
-	if _, verdict := probeAdmissionWait(context.Background(), cfg); verdict != probeAdmitted {
-		t.Fatal("first admission must not be forced")
-	}
-	start := time.Now()
-	waited, verdict := probeAdmissionWait(context.Background(), cfg)
-	if waited < cfg.poll {
-		t.Fatal("second admission at charged water must wait")
-	}
-	if verdict == probeForced {
-		if time.Since(start) < cfg.maxWait {
-			t.Fatal("forced admission must only happen after maxWait")
-		}
-	}
-}
-
-func TestProbeAdmissionWaitsUntilFootprintFalls(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		defer drainProbeAdmissionCharges(t)
-		var calls atomic.Int64
-		cfg := testAdmissionConfig(func() int64 {
-			if calls.Add(1) >= 4 {
-				return 40 << 20
-			}
-			return 49 << 20
-		})
-		waited, verdict := probeAdmissionWait(context.Background(), cfg)
-		if waited < cfg.poll {
-			t.Fatal("high water must wait")
-		}
-		if verdict != probeAdmitted {
-			t.Fatal("falling footprint must admit un-forced")
-		}
-	})
-}
-
-func TestProbeAdmissionForcesAfterMaxWait(t *testing.T) {
-	defer drainProbeAdmissionCharges(t)
-	cfg := testAdmissionConfig(func() int64 { return 49 << 20 })
-	start := time.Now()
-	waited, verdict := probeAdmissionWait(context.Background(), cfg)
-	if verdict != probeForced {
-		t.Fatal("sustained high water must force-admit, never refuse")
-	}
-	if waited < cfg.maxWait || time.Since(start) > 2*time.Second {
-		t.Fatalf("forced admission must come at maxWait, waited=%v", waited)
-	}
-	if got := probeAdmissionCharges.Load(); got != 1 {
-		t.Fatalf("forced admission still charges, got %d", got)
-	}
-}
-
-func TestProbeAdmissionDefersOnContextDone(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		defer drainProbeAdmissionCharges(t)
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Millisecond)
-		defer cancel()
-		cfg := testAdmissionConfig(func() int64 { return 49 << 20 })
-		_, verdict := probeAdmissionWait(ctx, cfg)
-		if verdict != probeDeferred {
-			t.Fatal("context expiry in the queue must defer — never a recorded fake timeout")
-		}
-		if got := probeAdmissionCharges.Load(); got != 0 {
-			t.Fatalf("a deferred probe must not charge, got %d", got)
-		}
-	})
-}
-
-func TestProbeAdmissionSensorUnavailablePassesUncharged(t *testing.T) {
-	cfg := testAdmissionConfig(func() int64 { return -1 })
-	waited, verdict := probeAdmissionWait(context.Background(), cfg)
-	if waited >= cfg.poll || verdict != probeAdmitted {
-		t.Fatalf("no sensor must mean no pacing: waited=%v verdict=%v", waited, verdict)
-	}
-	if got := probeAdmissionCharges.Load(); got != 0 {
-		t.Fatalf("no sensor must not charge, got %d", got)
-	}
-}
-
-func TestProbeAdmissionChargeDecays(t *testing.T) {
-	cfg := testAdmissionConfig(func() int64 { return 40 << 20 })
-	probeAdmissionWait(context.Background(), cfg)
-	drainProbeAdmissionCharges(t)
 }
 
 func TestProbeAdmissionShouldArmOnlyForNEOnBudgetedPlatform(t *testing.T) {
@@ -146,169 +69,292 @@ func TestProbeAdmissionShouldArmOnlyForNEOnBudgetedPlatform(t *testing.T) {
 	}
 }
 
-func TestProbeAdmissionBurstSelfSerializes(t *testing.T) {
-	defer drainProbeAdmissionCharges(t)
-	cfg := testAdmissionConfig(func() int64 { return 40 << 20 })
-	var immediate atomic.Int64
-	done := make(chan struct{})
-	for i := 0; i < 10; i++ {
-		go func() {
-			defer func() { done <- struct{}{} }()
-			waited, _ := probeAdmissionWait(context.Background(), cfg)
-			if waited < cfg.poll {
-				immediate.Add(1)
-			}
-		}()
-	}
-	for i := 0; i < 10; i++ {
-		<-done
-	}
-	if got := immediate.Load(); got > 2 {
-		t.Fatalf("burst must self-serialize: %d admitted immediately, want <= 2", got)
-	}
-}
-
-func TestProbeAdmissionForcedExitsSerialize(t *testing.T) {
-	defer drainProbeAdmissionCharges(t)
-	cfg := testAdmissionConfig(func() int64 { return 49 << 20 })
-	cfg.maxWait = 10 * time.Millisecond
-	cfg.forcedInterval = 40 * time.Millisecond
-	var mu sync.Mutex
-	var forcedAt []time.Time
-	done := make(chan struct{})
-	for i := 0; i < 6; i++ {
-		go func() {
-			defer func() { done <- struct{}{} }()
-			_, verdict := probeAdmissionWait(context.Background(), cfg)
-			if verdict == probeForced {
-				mu.Lock()
-				forcedAt = append(forcedAt, time.Now())
-				mu.Unlock()
-			}
-		}()
-	}
-	for i := 0; i < 6; i++ {
-		<-done
-	}
-	if len(forcedAt) != 6 {
-		t.Fatalf("all six must eventually force out, got %d", len(forcedAt))
-	}
-	sort.Slice(forcedAt, func(i, j int) bool { return forcedAt[i].Before(forcedAt[j]) })
-	for i := 1; i < len(forcedAt); i++ {
-		if gap := forcedAt[i].Sub(forcedAt[i-1]); gap < cfg.forcedInterval*6/10 {
-			t.Fatalf("forced exits %d and %d only %v apart, want >= ~%v", i-1, i, gap, cfg.forcedInterval)
+func TestBackgroundConcurrencyIsTenAtAnySize(t *testing.T) {
+	for _, c := range []struct{ nodes, want int }{
+		{0, 10}, {3, 10}, {200, 10}, {201, 10}, {2000, 10}, {2001, 10}, {10000, 10}, {100000, 10},
+	} {
+		if got := probeBackgroundCap(c.nodes); got != c.want {
+			t.Fatalf("%d nodes: background cap %d, want %d", c.nodes, got, c.want)
 		}
 	}
 }
 
-func TestProbeAdmissionForcedWinnerScavengesFirst(t *testing.T) {
-	defer drainProbeAdmissionCharges(t)
-	var scavenges atomic.Int64
-	cfg := testAdmissionConfig(func() int64 { return 49 << 20 })
-	cfg.maxWait = 5 * time.Millisecond
-	cfg.forcedInterval = 10 * time.Millisecond
-	cfg.scavenge = func() { scavenges.Add(1) }
-	if _, verdict := probeAdmissionWait(context.Background(), cfg); verdict != probeForced {
-		t.Fatal("sustained high water must force")
+func TestBackgroundProbesAreCappedAndAdmittedInOrder(t *testing.T) {
+	slots := newProbeSlots(testAdmissionConfig(16, 3))
+	var held []func()
+	for i := 0; i < 3; i++ {
+		end, verdict := slots.admit(backgroundCtx(), true)
+		if verdict != probeAdmitted {
+			t.Fatalf("background probe %d was %v", i, verdict)
+		}
+		held = append(held, end)
 	}
-	if got := scavenges.Load(); got != 1 {
-		t.Fatalf("the forced winner must scavenge once before proceeding, got %d", got)
+	type admitted struct {
+		index int
+		end   func()
 	}
-}
-
-func TestBackgroundProbeDefersFastUnderPressure(t *testing.T) {
-	cfg := testAdmissionConfig(func() int64 { return 49 << 20 })
-	cfg.backgroundGrace = 8 * time.Millisecond
-	start := time.Now()
-	waited, verdict := probeAdmissionAdmit(context.Background(), cfg, true)
-	if verdict != probeDeferred {
-		t.Fatalf("background at sustained high water must defer, got %v", verdict)
-	}
-	if time.Since(start) > time.Second || waited < cfg.backgroundGrace {
-		t.Fatalf("deferral must come at grace, waited=%v", waited)
-	}
-	if got := probeAdmissionCharges.Load(); got != 0 {
-		t.Fatalf("a deferred probe must not charge, got %d", got)
-	}
-}
-
-func TestBackgroundProbeEarnsAtLowWater(t *testing.T) {
-	defer drainProbeAdmissionCharges(t)
-	cfg := testAdmissionConfig(func() int64 { return 40 << 20 })
-	if _, verdict := probeAdmissionAdmit(context.Background(), cfg, true); verdict != probeAdmitted {
-		t.Fatalf("background at low water must earn admission, got %v", verdict)
-	}
-}
-
-func TestBackgroundProbeDefersOnContextDeath(t *testing.T) {
-	cfg := testAdmissionConfig(func() int64 { return 49 << 20 })
-	cfg.backgroundGrace = time.Second
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Millisecond)
-	defer cancel()
-	if _, verdict := probeAdmissionAdmit(ctx, cfg, true); verdict != probeDeferred {
-		t.Fatalf("background context death must defer, not pass through, got %v", verdict)
-	}
-	if got := probeAdmissionCharges.Load(); got != 0 {
-		t.Fatalf("deferred must not charge, got %d", got)
-	}
-}
-
-func TestProbeAdmissionCancellationWinsBeforeReservation(t *testing.T) {
-	for _, sample := range []int64{-1, 40 << 20, 49 << 20} {
-		t.Run(fmt.Sprint(sample), func(t *testing.T) {
-			defer drainProbeAdmissionCharges(t)
-			ctx, cancel := context.WithCancel(context.Background())
-			cancel()
-			var samples, scavenges int
-			beforeForced := probeAdmissionLastForcedNs.Load()
-			cfg := testAdmissionConfig(func() int64 { samples++; return sample })
-			cfg.scavenge = func() { scavenges++ }
-			cfg.maxWait = 0
-			_, verdict := probeAdmissionWait(ctx, cfg)
-			if verdict != probeDeferred {
-				t.Fatalf("cancelled request admitted: sample=%d verdict=%v", sample, verdict)
+	got := make(chan admitted, 12)
+	waitQueued := func(n int) {
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if _, _, _, waiting := slots.counts(); waiting == n {
+				return
 			}
-			if got := probeAdmissionCharges.Load(); got != 0 {
-				t.Fatalf("cancelled request charged %d", got)
+			if time.Now().After(deadline) {
+				t.Fatalf("%d probes never queued", n)
 			}
-			if samples != 0 || scavenges != 0 || probeAdmissionLastForcedNs.Load() != beforeForced {
-				t.Fatalf("pre-cancelled request performed work: samples=%d scavenges=%d", samples, scavenges)
+			time.Sleep(time.Millisecond)
+		}
+	}
+	for i := 3; i < 12; i++ {
+		go func(i int) {
+			end, verdict := slots.admit(backgroundCtx(), true)
+			if verdict != probeAdmitted {
+				t.Errorf("background probe %d was %v", i, verdict)
+				return
 			}
-		})
+			got <- admitted{i, end}
+		}(i)
+		waitQueued(i - 2)
+	}
+	for want := 3; want < 12; want++ {
+		held[0]()
+		held = held[1:]
+		next := <-got
+		if next.index != want {
+			t.Fatalf("probe %d admitted where %d was next in the queue", next.index, want)
+		}
+		if _, background, _, _ := slots.counts(); background > 3 {
+			t.Fatalf("%d background probes in flight under a cap of 3", background)
+		}
+		held = append(held, next.end)
+	}
+	for _, end := range held {
+		end()
 	}
 }
 
-func TestProbeAdmissionCancellationDuringSensorDefers(t *testing.T) {
-	for _, sample := range []int64{-1, 40 << 20, 49 << 20} {
-		t.Run(fmt.Sprint(sample), func(t *testing.T) {
-			defer drainProbeAdmissionCharges(t)
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			cfg := testAdmissionConfig(func() int64 { cancel(); return sample })
-			cfg.maxWait = 0
-			_, verdict := probeAdmissionWait(ctx, cfg)
-			if verdict != probeDeferred {
-				t.Fatalf("sensor returned after cancellation: sample=%d verdict=%v", sample, verdict)
-			}
-			if got := probeAdmissionCharges.Load(); got != 0 {
-				t.Fatalf("cancelled sensor charged %d", got)
-			}
-		})
+func TestInteractiveProbesGoFirst(t *testing.T) {
+	slots := newProbeSlots(testAdmissionConfig(16, 2))
+	first, _ := slots.admit(backgroundCtx(), true)
+	second, _ := slots.admit(backgroundCtx(), true)
+	queuedBackground, _ := admitAsync(slots, backgroundCtx(), true)
+	notAdmitted(t, queuedBackground, "a third background probe under a cap of 2")
+
+	interactive, verdict := slots.admit(context.Background(), false)
+	if verdict != probeAdmitted {
+		t.Fatal("an interactive probe waited behind background probes")
+	}
+	first()
+	notAdmitted(t, queuedBackground, "a background probe while the interactive one fills the shared cap")
+	second()
+	end := waitAdmitted(t, queuedBackground, "the background probe in the slot the interactive one leaves")
+	if _, verdict := slots.admit(context.Background(), false); verdict != probeAdmitted {
+		t.Fatal("a second interactive probe waited although its own cap has room")
+	}
+	end()
+	interactive()
+}
+
+func TestABackgroundProbeYieldsToAWaitingInteractiveOne(t *testing.T) {
+	slots := newProbeSlots(testAdmissionConfig(1, 10))
+	holding, _ := slots.admit(context.Background(), false)
+	waitingInteractive, _ := admitAsync(slots, context.Background(), false)
+	notAdmitted(t, waitingInteractive, "a second interactive probe under a cap of 1")
+	background, _ := admitAsync(slots, backgroundCtx(), true)
+	notAdmitted(t, background, "a background probe while an interactive one waits")
+	holding()
+	end := waitAdmitted(t, waitingInteractive, "the waiting interactive probe")
+	waitAdmitted(t, background, "the background probe once nothing interactive waits")()
+	end()
+}
+
+func TestInteractiveProbesQueueInOrderAtTheirCap(t *testing.T) {
+	slots := newProbeSlots(testAdmissionConfig(2, 10))
+	a, _ := slots.admit(context.Background(), false)
+	b, _ := slots.admit(context.Background(), false)
+	var queued []chan func()
+	for i := 0; i < 3; i++ {
+		admitted, _ := admitAsync(slots, context.Background(), false)
+		queued = append(queued, admitted)
+		time.Sleep(2 * time.Millisecond)
+	}
+	notAdmitted(t, queued[0], "a third interactive probe under a cap of 2")
+	a()
+	waitAdmitted(t, queued[0], "the first queued probe")()
+	notAdmitted(t, queued[2], "the third queued probe before the second")
+	b()
+	waitAdmitted(t, queued[1], "the second queued probe")()
+	waitAdmitted(t, queued[2], "the third queued probe")()
+}
+
+func TestADeferredProbeLeavesNothingBehind(t *testing.T) {
+	slots := newProbeSlots(testAdmissionConfig(16, 1))
+	holding, _ := slots.admit(backgroundCtx(), true)
+	ctx, cancel := context.WithCancel(backgroundCtx())
+	_, deferred := admitAsync(slots, ctx, true)
+	next, _ := admitAsync(slots, backgroundCtx(), true)
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+	select {
+	case <-deferred:
+	case <-time.After(3 * time.Second):
+		t.Fatal("a cancelled probe never left the queue")
+	}
+	holding()
+	end := waitAdmitted(t, next, "the probe behind the cancelled one")
+	if interactive, background, _, waiting := slots.counts(); interactive != 0 || background != 1 || waiting != 0 {
+		t.Fatalf("counts after a deferral: interactive=%d background=%d waiting=%d", interactive, background, waiting)
+	}
+	end()
+	end()
+	if _, background, _, _ := slots.counts(); background != 0 {
+		t.Fatalf("an end called twice gave back two slots: %d in flight", background)
+	}
+	cancelled, cancelNow := context.WithCancel(context.Background())
+	cancelNow()
+	if _, verdict := slots.admit(cancelled, false); verdict != probeDeferred {
+		t.Fatal("a probe already cancelled was admitted")
 	}
 }
 
-func TestProbeAdmissionCancellationDuringScavengeDefers(t *testing.T) {
-	defer drainProbeAdmissionCharges(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	cfg := testAdmissionConfig(func() int64 { return 49 << 20 })
-	cfg.maxWait = 0
-	cfg.scavenge = cancel
-	_, verdict := probeAdmissionWait(ctx, cfg)
-	if verdict != probeDeferred {
-		t.Fatalf("scavenge returned after cancellation: verdict=%v", verdict)
+func TestCancellationRacingAGrantLeaksNoSlot(t *testing.T) {
+	slots := newProbeSlots(testAdmissionConfig(16, 1))
+	for i := 0; i < 200; i++ {
+		holding, _ := slots.admit(backgroundCtx(), true)
+		ctx, cancel := context.WithCancel(backgroundCtx())
+		done := make(chan func(), 1)
+		go func() {
+			end, verdict := slots.admit(ctx, true)
+			if verdict == probeDeferred {
+				end = func() {}
+			}
+			done <- end
+		}()
+		time.Sleep(50 * time.Microsecond)
+		go cancel()
+		holding()
+		(<-done)()
+		if interactive, background, iw, bw := slots.counts(); interactive+background+iw+bw != 0 {
+			t.Fatalf("round %d left in_flight=%d/%d waiting=%d/%d", i, interactive, background, iw, bw)
+		}
 	}
-	if got := probeAdmissionCharges.Load(); got != 0 {
-		t.Fatalf("cancelled scavenge charged %d", got)
+}
+
+func TestTheNodeCountIsCachedForItsTTL(t *testing.T) {
+	reads := 0
+	counter := &probeNodeCounter{ttl: 30 * time.Millisecond, read: func() int { reads++; return 5000 }}
+	for i := 0; i < 10; i++ {
+		if counter.nodes() != 5000 {
+			t.Fatal("wrong count")
+		}
+	}
+	if reads != 1 {
+		t.Fatalf("counted %d times inside the TTL", reads)
+	}
+	time.Sleep(40 * time.Millisecond)
+	counter.nodes()
+	if reads != 2 {
+		t.Fatalf("not recounted after the TTL: %d reads", reads)
+	}
+}
+
+func TestTheHookAdmitsEveryBackgroundProbeAtTheCap(t *testing.T) {
+	hook := newProbeAdmissionHook(testAdmissionConfig(16, 4))
+	var inFlight, peak atomic.Int64
+	var wg sync.WaitGroup
+	errs := make(chan error, 64)
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			end, err := hook(backgroundCtx())
+			if err != nil {
+				errs <- err
+				return
+			}
+			if n := inFlight.Add(1); n > peak.Load() {
+				peak.Store(n)
+			}
+			time.Sleep(time.Millisecond)
+			inFlight.Add(-1)
+			end()
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(fmt.Errorf("a background probe was not admitted: %w", err))
+	}
+	if peak.Load() > 4 {
+		t.Fatalf("%d in flight under a cap of 4", peak.Load())
+	}
+}
+
+func TestArmingTheGateSetsTheRoundConcurrency(t *testing.T) {
+	t.Cleanup(disarmProbeAdmission)
+	armProbeAdmission()
+	if got := provider.RoundConcurrencyForTest(); got != probeBackgroundCap(liveNodeCount()) {
+		t.Fatalf("an armed gate leaves rounds at %d, want the tier %d", got, probeBackgroundCap(liveNodeCount()))
+	}
+	disarmProbeAdmission()
+	if got := provider.RoundConcurrencyForTest(); got != 10 {
+		t.Fatalf("a disarmed gate leaves rounds at %d, want upstream's 10", got)
+	}
+}
+
+func TestAProbeRoundIsSettledOnceItHasEnded(t *testing.T) {
+	previous := probeSettleQuiet
+	probeSettleQuiet = 80 * time.Millisecond
+	t.Cleanup(func() { probeSettleQuiet = previous })
+	hook := newProbeAdmissionHook(defaultProbeAdmissionConfig())
+	before := probeSettles.Load()
+	var ends []func()
+	for i := 0; i < probeSettleFloor+1; i++ {
+		end, err := hook(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		ends = append(ends, end)
+	}
+	for _, end := range ends[:len(ends)-1] {
+		end()
+	}
+	time.Sleep(200 * time.Millisecond)
+	if got := probeSettles.Load() - before; got != 0 {
+		t.Fatalf("settled %d times while a probe still ran", got)
+	}
+	ends[len(ends)-1]()
+	ends[len(ends)-1]()
+	time.Sleep(300 * time.Millisecond)
+	if got := probeSettles.Load() - before; got != 1 {
+		t.Fatalf("settled %d times after the round, want 1", got)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if got := probeSettles.Load() - before; got != 1 {
+		t.Fatalf("settled %d times with no new round, want 1", got)
+	}
+	end, _ := hook(context.Background())
+	end()
+	time.Sleep(300 * time.Millisecond)
+	if got := probeSettles.Load() - before; got != 1 {
+		t.Fatalf("a single probe was settled after: %d", got)
+	}
+}
+
+func TestTheProbeGatesCountsAreInTheDiagnostics(t *testing.T) {
+	previous := probeAdmissionCounts.Load()
+	t.Cleanup(func() { probeAdmissionCounts.Store(previous) })
+	counts := func() (int, int, int, int) { return 3, 7, 1, 2 }
+	probeAdmissionCounts.Store(&counts)
+	service := &BoxService{}
+	var diagnostics struct {
+		ProbeAdmission map[string]int `json:"probeAdmission"`
+	}
+	if err := json.Unmarshal([]byte(service.RuntimeDiagnosticsJSON()), &diagnostics); err != nil {
+		t.Fatal(err)
+	}
+	if got := diagnostics.ProbeAdmission; got["interactiveInFlight"] != 3 || got["backgroundInFlight"] != 7 || got["interactiveWaiting"] != 1 || got["backgroundWaiting"] != 2 {
+		t.Fatalf("diagnostics say %v", got)
 	}
 }

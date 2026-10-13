@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	ruleprovider "github.com/ProjectClash/Clash/rules/provider"
+
 	"github.com/ProjectClash/Clash/config"
 	C "github.com/ProjectClash/Clash/constant"
 )
@@ -49,7 +51,7 @@ func manifestEntry(t *testing.T, home, kind, name string) string {
 	return string(entry)
 }
 
-func TestPublishCompilesADomainRuleSetToMrs(t *testing.T) {
+func TestPublishCompilesADomainRuleSetToAMappedSet(t *testing.T) {
 	home := compileStagingHome(t)
 	source := writeRuleSource(t, "reject.txt", "example.com\n+.example.org\n")
 	raw := rawWithRuleProvider(source, "domain", "text")
@@ -61,30 +63,26 @@ func TestPublishCompilesADomainRuleSetToMrs(t *testing.T) {
 	defer runtime.close()
 
 	entry := manifestEntry(t, home, "rule", "reject")
-	if !strings.Contains(entry, `"compileVerdict":"compiled"`) {
-		t.Fatalf("no compiled verdict in manifest entry: %s", entry)
+	if !strings.Contains(entry, `"compileVerdict":"mapped"`) || !strings.Contains(entry, `"mappedChecksum":"`) {
+		t.Fatalf("no mapped verdict in manifest entry: %s", entry)
 	}
-	if !strings.Contains(entry, `"compiledBehavior":"domain"`) {
-		t.Fatalf("no compiled behavior in manifest entry: %s", entry)
+	if !strings.Contains(entry, `"compiledBehavior":"domain"`) || !strings.Contains(entry, `"count":2`) {
+		t.Fatalf("no compiled behavior or count in manifest entry: %s", entry)
 	}
 
 	definition := raw.RuleProvider["reject"]
-	if definition["format"] != "mrs" {
-		t.Fatalf("definition format is %v, artifact is mrs", definition["format"])
+	if definition["format"] != "text" || definition["behavior"] != "domain" ||
+		!strings.HasSuffix(definition["path"].(string), providerRuntimeIndexStubSuffix) {
+		t.Fatalf("definition does not name the stub: %v", definition)
 	}
-	if definition["behavior"] != "domain" {
-		t.Fatalf("definition behavior is %v", definition["behavior"])
+	provider := loadStagedRuleProvider(t, definition)
+	if provider.Count() != 2 {
+		t.Fatalf("the mapped set carries %d rules, source had 2", provider.Count())
 	}
-	staged, err := os.ReadFile(definition["path"].(string))
-	if err != nil {
-		t.Fatal(err)
-	}
-	count, err := ProviderEntryCountForIOS("rule", "domain", "mrs", staged)
-	if err != nil {
-		t.Fatalf("staged artifact is not readable MRS: %v", err)
-	}
-	if count != 2 {
-		t.Fatalf("artifact carries %d rules, source had 2", count)
+	for host, want := range map[string]bool{"example.com": true, "a.example.org": true, "example.org": true, "a.example.com": false} {
+		if got := provider.Match(&C.Metadata{Host: host}, anyProcess); got != want {
+			t.Fatalf("%s: matched %v", host, got)
+		}
 	}
 }
 
@@ -101,11 +99,11 @@ func TestClassicalYamlOfPureDomainsCompilesAsDomain(t *testing.T) {
 	defer runtime.close()
 
 	entry := manifestEntry(t, home, "rule", "reject")
-	if !strings.Contains(entry, `"compileVerdict":"compiled"`) {
+	if !strings.Contains(entry, `"compileVerdict":"mapped"`) {
 		t.Fatalf("pure-domain classical yaml did not compile: %s", entry)
 	}
 	definition := raw.RuleProvider["reject"]
-	if definition["behavior"] != "domain" || definition["format"] != "mrs" {
+	if definition["behavior"] != "domain" || definition["format"] != "text" {
 		t.Fatalf("classical→domain rewrite missing: behavior=%v format=%v",
 			definition["behavior"], definition["format"])
 	}
@@ -113,7 +111,7 @@ func TestClassicalYamlOfPureDomainsCompilesAsDomain(t *testing.T) {
 
 func TestUncompilableClassicalIsNeverStripped(t *testing.T) {
 	home := compileStagingHome(t)
-	content := "payload:\n  - DOMAIN-KEYWORD,ads\n  - IP-CIDR,10.0.0.0/8\n"
+	content := "payload:\n  - DOMAIN-KEYWORD,ads\n  - DST-PORT,8443\n"
 	source := writeRuleSource(t, "mixed.yaml", content)
 	raw := rawWithRuleProvider(source, "classical", "yaml")
 
@@ -166,15 +164,12 @@ func TestExtensionServesTheCompiledArtifactWithoutCompiling(t *testing.T) {
 	defer runtime.close()
 
 	definition := raw.RuleProvider["reject"]
-	if definition["format"] != "mrs" {
-		t.Fatalf("reuse path did not rewrite format: %v — the core would read MRS bytes as text", definition["format"])
+	if definition["format"] != "text" || definition["behavior"] != "domain" ||
+		!strings.HasSuffix(definition["path"].(string), providerRuntimeIndexStubSuffix) {
+		t.Fatalf("reuse path did not name the stub: %v", definition)
 	}
-	staged, err := os.ReadFile(definition["path"].(string))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ProviderEntryCountForIOS("rule", "domain", "mrs", staged); err != nil {
-		t.Fatalf("reuse path serves a file that is not the artifact: %v", err)
+	if count := loadStagedRuleProvider(t, definition).Count(); count != 1 {
+		t.Fatalf("reuse path serves a set of %d rules, not the compiled one", count)
 	}
 }
 
@@ -253,21 +248,21 @@ func TestInlineCommentsDoNotPoisonTheCompiledDomains(t *testing.T) {
 	}
 	defer runtime.close()
 
-	staged, err := os.ReadFile(raw.RuleProvider["reject"]["path"].(string))
+	stub := raw.RuleProvider["reject"]["path"].(string)
+	if count := loadStagedRuleProvider(t, raw.RuleProvider["reject"]).Count(); count != 2 {
+		t.Fatalf("compiled count=%d, want exactly the 2 real domains", count)
+	}
+	staged, err := os.ReadFile(strings.TrimSuffix(stub, providerRuntimeIndexStubSuffix) + providerRuntimeMappedDomainSuffix)
 	if err != nil {
 		t.Fatal(err)
 	}
-	count, err := ProviderEntryCountForIOS("rule", "domain", "mrs", staged)
-	if err != nil || count != 2 {
-		t.Fatalf("artifact count=%d err=%v, want exactly the 2 real domains", count, err)
-	}
 	if bytes.Contains(staged, []byte("广告")) || bytes.Contains(staged, []byte(" #")) {
-		t.Fatal("comment text rode into the compiled artifact")
+		t.Fatal("comment text rode into the compiled set")
 	}
 }
 
 func TestNoProfileStagesARefusedRuleSetEmpty(t *testing.T) {
-	content := "payload:\n  - DOMAIN-KEYWORD,ads\n  - IP-CIDR,10.0.0.0/8\n"
+	content := "payload:\n  - DOMAIN-KEYWORD,ads\n  - DST-PORT,8443\n"
 	for name, profile := range map[string]runtimeProfile{
 		"iOS":          runtimeProfileIOSPacketTunnel,
 		"tvOS":         runtimeProfileTVOSPacketTunnel,
@@ -350,7 +345,7 @@ func TestMacOSKeepsTheSourceWhenTheCompilerRefuses(t *testing.T) {
 func TestMacOSKeepsThePreparedCopyWhenStrippingPreceded(t *testing.T) {
 	home := compileStagingHome(t)
 	source := writeRuleSource(t, "mixed.yaml",
-		"payload:\n  - DOMAIN-KEYWORD,example\n  - SOURCE-APP-SIGNING-ID,com.example.app\n  - IP-CIDR,10.0.0.0/8\n")
+		"payload:\n  - DOMAIN-KEYWORD,example\n  - SOURCE-APP-SIGNING-ID,com.example.app\n  - DST-PORT,8443\n")
 	raw := rawWithRuleProvider(source, "classical", "yaml")
 
 	runtime, err := stageProviderRuntime(raw,
@@ -374,8 +369,8 @@ func TestMacOSKeepsThePreparedCopyWhenStrippingPreceded(t *testing.T) {
 	if strings.Contains(string(staged), "SOURCE-APP-SIGNING-ID") {
 		t.Fatal("the staged copy still carries a rule this profile cannot execute")
 	}
-	if !strings.Contains(string(staged), "IP-CIDR") {
-		t.Fatal("the staged copy lost IP-CIDR, which executes fine here — keptSource must keep capability, not just bytes")
+	if !strings.Contains(string(staged), "DST-PORT") {
+		t.Fatal("the staged copy lost DST-PORT, which executes fine here — keptSource must keep capability, not just bytes")
 	}
 }
 
@@ -415,7 +410,7 @@ func TestKeptSourceHitsTheCacheOnRepublish(t *testing.T) {
 
 func TestExtensionRidesTheSourceItCannotCompile(t *testing.T) {
 	home := compileStagingHome(t)
-	content := "payload:\n  - DOMAIN-KEYWORD,ads\n  - IP-CIDR,10.0.0.0/8\n"
+	content := "payload:\n  - DOMAIN-KEYWORD,ads\n  - DST-PORT,8443\n"
 	source := writeRuleSource(t, "mixed.yaml", content)
 	raw := rawWithRuleProvider(source, "classical", "yaml")
 
@@ -553,5 +548,28 @@ func TestCompiledSideUpdateRefusalCarriesTheDeferredPrefix(t *testing.T) {
 	}
 	if !strings.HasPrefix(SideUpdateDeferredPrefix, "clash: side update deferred: ") {
 		t.Fatalf("the exported prefix moved: %q — the client classifies by it", SideUpdateDeferredPrefix)
+	}
+}
+
+func TestAPublishStagesAClassicalSetPastTheHeapLimitEmpty(t *testing.T) {
+	home := compileStagingHome(t)
+	var b strings.Builder
+	b.WriteString("DOMAIN-SUFFIX,kept.example\n")
+	for i := 0; i <= ruleprovider.ClashClassicalRegexLimit; i++ {
+		fmt.Fprintf(&b, "DOMAIN-REGEX,^a%d\\.example$\n", i)
+	}
+	source := writeRuleSource(t, "heavy.txt", b.String())
+	raw := rawWithRuleProvider(source, "classical", "text")
+	runtime, err := stageProviderRuntime(raw, currentRuntimePolicy(true), true)
+	if err != nil {
+		t.Fatalf("the publish failed: %v", err)
+	}
+	defer runtime.close()
+	entry := manifestEntry(t, home, "rule", "reject")
+	if !strings.Contains(entry, "loads no rules") {
+		t.Fatalf("the record does not say why the set loads nothing: %s", entry)
+	}
+	if count := loadStagedRuleProvider(t, raw.RuleProvider["reject"]).Count(); count != 0 {
+		t.Fatalf("the staged set holds %d rules", count)
 	}
 }

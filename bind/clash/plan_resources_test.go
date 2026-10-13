@@ -63,6 +63,7 @@ rule-providers:
 }
 
 func TestPlanCarriesEffectiveProviderSizeLimit(t *testing.T) {
+	asAppProcess(t)
 	r := planOf(t, `
 rule-providers:
   small:
@@ -88,13 +89,14 @@ rule-providers:
 		limits[provider.Name] = provider.MaximumBytes
 	}
 	if limits["small"] != 10_240 ||
-		limits["bounded"] != maximumProviderResourceBytes ||
-		limits["default"] != maximumProviderResourceBytes {
+		limits["bounded"] != 33_554_432 ||
+		limits["default"] != maximumPendingCompileBytes {
 		t.Fatalf("effective provider limits = %+v", limits)
 	}
 }
 
 func TestPlanDefaultsNegativeProviderSizeLimit(t *testing.T) {
+	asAppProcess(t)
 	r := planOf(t, `
 proxy-providers:
   invalid:
@@ -105,7 +107,7 @@ proxy-providers:
 	if len(r.Errors) != 0 {
 		t.Fatalf("negative size-limit refused the configuration: %+v", r.Errors)
 	}
-	if len(r.Providers) != 1 || r.Providers[0].MaximumBytes != int64(maximumProviderResourceBytes) {
+	if len(r.Providers) != 1 || r.Providers[0].MaximumBytes != int64(maximumPendingCompileBytes) {
 		t.Fatalf("size-limit did not fall back: %+v", r.Providers)
 	}
 }

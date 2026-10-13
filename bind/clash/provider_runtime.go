@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ProjectClash/Clash/adapter/provider"
 	"github.com/ProjectClash/Clash/config"
 	C "github.com/ProjectClash/Clash/constant"
 	P "github.com/ProjectClash/Clash/constant/provider"
@@ -61,6 +62,7 @@ type providerRuntime struct {
 	verdicts  providerVerdictCounts
 	refresh   *providerRefreshPlan
 	private   bool
+	deferred  map[string]string
 }
 
 func providerRuntimeKey(kind, name string) string {
@@ -203,6 +205,8 @@ type stagedProviderRecord struct {
 	CompileReason    string               `json:"compileReason,omitempty"`
 	IndexJudged      bool                 `json:"indexJudged,omitempty"`
 	IndexChecksum    uint32               `json:"indexChecksum,omitempty"`
+	MappedChecksum   string               `json:"mappedChecksum,omitempty"`
+	SelectionKey     string               `json:"selectionKey,omitempty"`
 	ContentSHA256    string               `json:"contentSHA256,omitempty"`
 }
 
@@ -245,6 +249,9 @@ const (
 	compileVerdictNotCompilable = "notCompilable"
 	compileVerdictKeptSource    = "keptSource"
 	compileVerdictIndexed       = "indexed"
+	compileVerdictMapped        = "mapped"
+	compileVerdictLibrary       = "library"
+	compileVerdictNotLibrary    = "notLibrary"
 )
 
 type stagedProviderManifest struct {
@@ -491,7 +498,7 @@ func sweepStagedProviderRuntime(parent, stagedDirectory string, referenced map[s
 }
 
 func providerRuntimeBaseName(file string) string {
-	for _, suffix := range [...]string{providerRuntimeCompiledSuffix, providerRuntimeIndexSuffix, providerRuntimeIndexStubSuffix} {
+	for _, suffix := range [...]string{providerRuntimeCompiledSuffix, providerRuntimeIndexSuffix, providerRuntimeIndexStubSuffix, providerRuntimeMappedDomainSuffix, providerRuntimeMappedIPSuffix, providerRuntimeLibrarySuffix} {
 		if base, found := strings.CutSuffix(file, suffix); found {
 			return base
 		}
@@ -634,6 +641,12 @@ func stageProviderRuntime(raw *config.RawConfig, policy appleRuntimePolicy, comp
 					if record.CompileVerdict == compileVerdictIndexed {
 						files = append(files, fileName+providerRuntimeIndexSuffix, fileName)
 					}
+					if record.CompileVerdict == compileVerdictMapped {
+						files = append(files, fileName+mappedSuffix(record.CompiledBehavior))
+					}
+					if record.CompileVerdict == compileVerdictLibrary {
+						files = append(files, fileName+providerRuntimeLibrarySuffix)
+					}
 					for _, file := range files {
 						_ = os.Link(filepath.Join(sharedDirectory, file), filepath.Join(stagedDirectory, file))
 					}
@@ -644,16 +657,44 @@ func stageProviderRuntime(raw *config.RawConfig, policy appleRuntimePolicy, comp
 				sideUpdateSafe = providerSideUpdateSafe(definition)
 			}
 
+			appForm := ""
+			if tunnelProcess.Load() && !compileRuleSets {
+				appForm = appCompiledForm(namespace.kind, behavior, format, sideUpdateSafe)
+			}
+			leaveForTheApp := func() bool {
+				if appForm == "" || !sourceLargerThan(sourcePath, startTextSeedLimit) {
+					return false
+				}
+				if runtime.deferred == nil {
+					runtime.deferred = map[string]string{}
+				}
+				runtime.deferred[key] = sourcePath
+				pointAtNothingYet(definition, namespace.kind, behavior, appForm, fileName)
+				log.Warnln("[Provider] %s: its content waits for Clash to compile it; it is not read here", name)
+				return true
+			}
+			if record, hit := manifest.Entries[key]; appForm != "" &&
+				!(hit && record.Source == sourcePath && (record.CompileVerdict == appForm || record.CompileVerdict == compileVerdictNotLibrary)) &&
+				leaveForTheApp() {
+				continue
+			}
+
 			hitStart := time.Now()
 			if record, hit := manifest.Entries[key]; hit &&
 				stagedProviderRecordMatches(record, sourcePath, behavior, format) &&
 				stagedFileMatches(hitRuntimePath, record) &&
 				stagedIndexServable(record, stagedDirectory, fileName, compileRuleSets) &&
+				stagedMappedServable(record, stagedDirectory, fileName) &&
 				!(compileRuleSets && namespace.kind == "rule" &&
 					record.CompileVerdict == "" && record.UnreadableWarn == "") &&
 				!(compileRuleSets && namespace.kind == "rule" &&
 					record.CompileVerdict == compileVerdictKeptSource && !record.IndexJudged &&
-					classicalIndexable(behavior, format)) {
+					classicalIndexable(behavior, format)) &&
+				!(compileRuleSets && namespace.kind == "rule" && stagingMapsRuleSets &&
+					record.CompileVerdict == compileVerdictCompiled && mappable(record.CompiledBehavior)) &&
+				!(compileRuleSets && namespace.kind == "proxy" && stagingMapsRuleSets &&
+					record.CompileVerdict == "" && record.UnreadableWarn == "") &&
+				!(record.CompileVerdict == compileVerdictLibrary && record.SelectionKey != providerSelectionKey(definition)) {
 				cost.hitCount++
 				cost.hitNanos += time.Since(hitStart).Nanoseconds()
 				if namespace.kind == "rule" {
@@ -662,7 +703,7 @@ func stageProviderRuntime(raw *config.RawConfig, policy appleRuntimePolicy, comp
 				replayStagedProviderWarnings(name, namespace.kind, record)
 				record.SideUpdateSafe = sideUpdateSafe
 				entryBehavior, entryFormat := behavior, format
-				if record.CompileVerdict == compileVerdictCompiled &&
+				if (record.CompileVerdict == compileVerdictCompiled || record.CompileVerdict == compileVerdictMapped) &&
 					!compiledBehaviorIsKnown(record.CompiledBehavior) {
 					log.Warnln("[Apple] staged rule provider %q records an unknown compiled behavior; restaging from source", name)
 					record = stagedProviderRecord{}
@@ -671,6 +712,11 @@ func stageProviderRuntime(raw *config.RawConfig, policy appleRuntimePolicy, comp
 					definition["format"] = "mrs"
 					definition["behavior"] = record.CompiledBehavior
 					entryBehavior, entryFormat = record.CompiledBehavior, "mrs"
+				}
+				if record.CompileVerdict == compileVerdictMapped {
+					definition["format"] = "text"
+					definition["behavior"] = record.CompiledBehavior
+					entryBehavior, entryFormat = record.CompiledBehavior, "text"
 				}
 				next.Entries[key] = record
 				referenced[hitFileName] = struct{}{}
@@ -684,6 +730,9 @@ func stageProviderRuntime(raw *config.RawConfig, policy appleRuntimePolicy, comp
 				continue
 			}
 
+			if leaveForTheApp() {
+				continue
+			}
 			identity, err := stagedSourceIdentity(sourcePath)
 			if err != nil {
 				log.Warnln("[Apple] %s provider %q could not be staged (%v); it rides empty and the configuration still starts, as it does upstream",
@@ -698,6 +747,7 @@ func stageProviderRuntime(raw *config.RawConfig, policy appleRuntimePolicy, comp
 				File: fileName,
 			}
 			indexedRules := 0
+			mappedRules := -1
 			commitStart := time.Now()
 			if namespace.kind == "rule" {
 				if err := ruleProviderSchemaError(behavior, format); err != nil {
@@ -706,7 +756,7 @@ func stageProviderRuntime(raw *config.RawConfig, policy appleRuntimePolicy, comp
 				readStart := time.Now()
 				var payload []byte
 				if identity.size > 0 {
-					payload, err = readBoundedRegularFile(sourcePath, int64(maximumProviderResourceBytes), "published provider")
+					payload, err = readBoundedRegularFile(sourcePath, int64(providerContentBytes()), "published provider")
 				}
 				cost.readCount++
 				cost.readNanos += time.Since(readStart).Nanoseconds()
@@ -756,6 +806,14 @@ func stageProviderRuntime(raw *config.RawConfig, policy appleRuntimePolicy, comp
 							var indexErr error
 							stub, index, indexErr = stageClassicalIndex(content, format, stagedDirectory, fileName, writeStagedFile)
 							cost.compileNanos += time.Since(indexStart).Nanoseconds()
+							if errors.Is(indexErr, ruleprovider.ErrClassicalTooHeavy) {
+								if err := writeStagedFile(runtimePath, nil); err != nil {
+									return cleanupOnError(fmt.Errorf("clash: stage rule provider runtime: %w", err))
+								}
+								record.UnreadableWarn = indexErr.Error()
+								log.Warnln("[Apple] rule-provider %q loads no rules: %v", name, indexErr)
+								stub, indexErr = "", nil
+							}
 							if indexErr != nil {
 								return cleanupOnError(fmt.Errorf("clash: stage rule provider runtime: %w", indexErr))
 							}
@@ -772,7 +830,25 @@ func stageProviderRuntime(raw *config.RawConfig, policy appleRuntimePolicy, comp
 						} else {
 							logKeptSourceRuleProvider(name, compilation.Reason)
 						}
+					} else if stub, set, mapErr := stageMappedSet(compilation.artifact, compilation.Behavior, stagedDirectory, fileName, writeStagedFile); mapErr == nil && stub != "" {
+						fileName, runtimePath = stub, filepath.Join(stagedDirectory, stub)
+						record.File = fileName
+						record.CompileVerdict = compileVerdictMapped
+						record.CompiledBehavior = compilation.Behavior
+						record.MappedChecksum = hex.EncodeToString(set.SHA256[:])
+						mappedRules = set.Count
+						definition["format"] = "text"
+						definition["behavior"] = compilation.Behavior
+						if len(stripped) > 0 {
+							record.MetadataNoops = encodeMetadataNoops(stripped)
+							warnProviderMetadataNoops(name, stripped)
+						}
+						log.Infoln("[Apple] rule provider %q compiled to a mapped set: %d rules, %d bytes",
+							name, set.Count, len(set.Bytes))
 					} else {
+						if mapErr != nil {
+							log.Warnln("[Apple] rule provider %q could not be mapped (%v); staged as MRS", name, mapErr)
+						}
 						fileName = providerRuntimeCompiledFileName(namespace.kind, name, sourcePath)
 						runtimePath = filepath.Join(stagedDirectory, fileName)
 						record.File = fileName
@@ -830,9 +906,26 @@ func stageProviderRuntime(raw *config.RawConfig, policy appleRuntimePolicy, comp
 						}
 					}
 				}
+				if compileRuleSets && prepareErr == nil && record.CompileVerdict == compileVerdictCompiled &&
+					strings.EqualFold(strings.TrimSpace(format), "mrs") && mappable(behavior) {
+					stub, set, mapErr := stageMappedSet(payload, strings.ToLower(strings.TrimSpace(behavior)), stagedDirectory, fileName, writeStagedFile)
+					if mapErr != nil {
+						log.Warnln("[Apple] rule provider %q could not be mapped (%v); staged as MRS", name, mapErr)
+					} else if stub != "" {
+						fileName, runtimePath = stub, filepath.Join(stagedDirectory, stub)
+						record.File = fileName
+						record.CompileVerdict = compileVerdictMapped
+						record.CompiledBehavior = strings.ToLower(strings.TrimSpace(behavior))
+						record.MappedChecksum = hex.EncodeToString(set.SHA256[:])
+						mappedRules = set.Count
+						definition["format"] = "text"
+						definition["behavior"] = record.CompiledBehavior
+						log.Infoln("[Apple] rule provider %q mapped from MRS: %d rules, %d bytes", name, set.Count, len(set.Bytes))
+					}
+				}
 			} else {
 				readStart := time.Now()
-				payload, err := readBoundedRegularFile(sourcePath, int64(maximumProviderResourceBytes), "published provider")
+				payload, err := readBoundedRegularFile(sourcePath, int64(providerContentBytes()), "published provider")
 				cost.readCount++
 				cost.readNanos += time.Since(readStart).Nanoseconds()
 				cost.readBytes += int64(len(payload))
@@ -861,6 +954,31 @@ func stageProviderRuntime(raw *config.RawConfig, policy appleRuntimePolicy, comp
 						return cleanupOnError(fmt.Errorf("clash: stage proxy provider runtime: %w", err))
 					}
 				}
+				if compileRuleSets && stagingMapsRuleSets && err == nil {
+					content := payload
+					if len(stripped) > 0 {
+						content = prepared
+					}
+					compileStart := time.Now()
+					stub, count, libraryErr := stageProviderLibrary(name, definition, content, stagedDirectory, fileName, writeStagedFile)
+					cost.compileNanos += time.Since(compileStart).Nanoseconds()
+					switch {
+					case libraryErr == nil && stub != "":
+						sum, _ := ruleprovider.ClashMappedSetChecksumOf(filepath.Join(stagedDirectory, fileName+providerRuntimeLibrarySuffix))
+						fileName, runtimePath = stub, filepath.Join(stagedDirectory, stub)
+						record.File = fileName
+						record.CompileVerdict = compileVerdictLibrary
+						record.MappedChecksum = hex.EncodeToString(sum[:])
+						record.SelectionKey = providerSelectionKey(definition)
+						mappedRules = count
+						log.Infoln("[Apple] proxy provider %q compiled to a node library: %d nodes", name, count)
+					case errors.Is(libraryErr, provider.ErrProviderNotLibrary):
+						record.CompileVerdict = compileVerdictNotLibrary
+					case libraryErr != nil:
+						record.CompileVerdict = compileVerdictNotLibrary
+						log.Warnln("[Apple] proxy provider %q: %v", name, libraryErr)
+					}
+				}
 			}
 			cost.commitCount++
 			cost.commitNanos += time.Since(commitStart).Nanoseconds()
@@ -875,6 +993,9 @@ func stageProviderRuntime(raw *config.RawConfig, policy appleRuntimePolicy, comp
 				record.ContentSHA256 = stagedFileDigest(staged)
 				if record.CompileVerdict == compileVerdictIndexed {
 					record.Count = indexedRules
+				} else if record.CompileVerdict == compileVerdictLibrary {
+				} else if record.CompileVerdict == compileVerdictMapped {
+					record.Count = mappedRules
 				} else if namespace.kind == "rule" {
 					record.Count = stagedRuleSetCount(entryBehavior, entryFormat, staged)
 				}
@@ -1009,7 +1130,10 @@ func stageClassicalIndex(content []byte, format, directory, textName string, wri
 		return "", ruleprovider.ClashClassicalIndex{}, nil
 	}
 	index, err := ruleprovider.ClashCompileClassicalIndex(lines, rules.ParseRule)
-	if err != nil || index.Names == 0 {
+	if errors.Is(err, ruleprovider.ErrClassicalTooHeavy) {
+		return "", index, err
+	}
+	if err != nil || (index.Names == 0 && index.IPRules == 0) {
 		return "", index, nil
 	}
 	indexName, stubName := textName+providerRuntimeIndexSuffix, textName+providerRuntimeIndexStubSuffix
@@ -1042,7 +1166,8 @@ func stagedIndexServable(record stagedProviderRecord, directory, textName string
 
 func stagedRecordRunsCompiled(record stagedProviderRecord) bool {
 	return (record.CompileVerdict == compileVerdictCompiled && record.Format != "mrs") ||
-		record.CompileVerdict == compileVerdictIndexed
+		record.CompileVerdict == compileVerdictIndexed || record.CompileVerdict == compileVerdictMapped ||
+		record.CompileVerdict == compileVerdictLibrary
 }
 
 func pathInsideDirectory(path, directory string) bool {
@@ -1075,7 +1200,7 @@ func stageRuntimeProviderFile(sourcePath, runtimePath string) error {
 	if err != nil {
 		return fmt.Errorf("stat published provider: %w", err)
 	}
-	if !before.Mode().IsRegular() || before.Size() > int64(maximumProviderResourceBytes) {
+	if !before.Mode().IsRegular() || before.Size() > int64(providerContentBytes()) {
 		return fmt.Errorf("published provider is not a bounded regular file")
 	}
 	temporaryPath := fmt.Sprintf("%s.staging-%d-%d", runtimePath, os.Getpid(), time.Now().UnixNano())
@@ -1097,7 +1222,7 @@ func stageRuntimeProviderFile(sourcePath, runtimePath string) error {
 	if before.Size() == 0 {
 		return writeRuntimeProviderFile(runtimePath, nil)
 	}
-	payload, err := readBoundedRegularFile(sourcePath, int64(maximumProviderResourceBytes), "published provider")
+	payload, err := readBoundedRegularFile(sourcePath, int64(providerContentBytes()), "published provider")
 	if err != nil {
 		return err
 	}
@@ -1172,6 +1297,8 @@ func logRuleProviderDisposition(name string, record stagedProviderRecord) {
 		log.Infoln("[Apple] rule provider %q: compiled to MRS", name)
 	case record.CompileVerdict == compileVerdictIndexed:
 		log.Infoln("[Apple] rule provider %q: indexed, every rule loads and its names are mapped from disk", name)
+	case record.CompileVerdict == compileVerdictMapped:
+		log.Infoln("[Apple] rule provider %q: compiled, %d rules mapped from disk", name, record.Count)
 	case record.CompileVerdict == compileVerdictKeptSource:
 		log.Infoln("[Apple] rule provider %q: kept as source, every rule loads (%s)",
 			name, record.CompileReason)
@@ -1398,4 +1525,134 @@ func ruleFormatSpelling(format P.RuleFormat) string {
 	default:
 		return "yaml"
 	}
+}
+
+var stagingMapsRuleSets = true
+
+const (
+	providerRuntimeMappedDomainSuffix = ".cds"
+	providerRuntimeMappedIPSuffix     = ".cip"
+)
+
+func appCompiledForm(kind, behavior, format string, sideUpdateSafe bool) string {
+	switch {
+	case !stagingMapsRuleSets || !sideUpdateSafe:
+		return ""
+	case kind == "proxy":
+		return compileVerdictLibrary
+	case kind != "rule":
+		return ""
+	case mappable(behavior) && !strings.EqualFold(strings.TrimSpace(format), "mrs"):
+		return compileVerdictMapped
+	case strings.EqualFold(strings.TrimSpace(behavior), "classical") && !strings.EqualFold(strings.TrimSpace(format), "mrs"):
+		return compileVerdictIndexed
+	}
+	return ""
+}
+
+func sourceLargerThan(path string, limit int64) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Size() > limit
+}
+
+func pointAtNothingYet(definition map[string]any, kind, behavior, form, fileName string) {
+	definition["path"] = filepath.Join(C.Path.HomeDir(), ProviderRefreshDirectoryName, "awaits-app", fileName, awaitedEntry)
+	if kind == "rule" && form == compileVerdictMapped {
+		definition["format"] = "text"
+		definition["behavior"] = strings.ToLower(strings.TrimSpace(behavior))
+	}
+}
+
+func mappable(behavior string) bool {
+	switch strings.ToLower(strings.TrimSpace(behavior)) {
+	case "domain", "ipcidr":
+		return true
+	}
+	return false
+}
+
+func mappedSuffix(behavior string) string {
+	if strings.EqualFold(strings.TrimSpace(behavior), "ipcidr") {
+		return providerRuntimeMappedIPSuffix
+	}
+	return providerRuntimeMappedDomainSuffix
+}
+
+func stageMappedSet(mrs []byte, behavior, directory, textName string, write func(string, []byte) error) (string, ruleprovider.ClashCompiledSet, error) {
+	if !mappable(behavior) || !stagingMapsRuleSets {
+		return "", ruleprovider.ClashCompiledSet{}, nil
+	}
+	parsed, stubType := P.Domain, ruleprovider.ClashDomainSetStubType
+	if strings.EqualFold(behavior, "ipcidr") {
+		parsed, stubType = P.IPCIDR, ruleprovider.ClashIPCidrSetStubType
+	}
+	set, err := ruleprovider.ClashMappedFromMrs(mrs, parsed)
+	if err != nil {
+		return "", set, err
+	}
+	setName, stubName := textName+mappedSuffix(behavior), textName+providerRuntimeIndexStubSuffix
+	if err := write(filepath.Join(directory, setName), set.Bytes); err != nil {
+		return "", set, err
+	}
+	stub := ruleprovider.ClashMappedSetStub(stubType, setName, set.SHA256, set.Count) + "\n"
+	if err := write(filepath.Join(directory, stubName), []byte(stub)); err != nil {
+		return "", set, err
+	}
+	return stubName, set, nil
+}
+
+func stagedMappedServable(record stagedProviderRecord, directory, textName string) bool {
+	suffix := ""
+	switch record.CompileVerdict {
+	case compileVerdictMapped:
+		suffix = mappedSuffix(record.CompiledBehavior)
+	case compileVerdictLibrary:
+		suffix = providerRuntimeLibrarySuffix
+	default:
+		return true
+	}
+	sum, ok := ruleprovider.ClashMappedSetChecksumOf(filepath.Join(directory, textName+suffix))
+	return ok && hex.EncodeToString(sum[:]) == record.MappedChecksum
+}
+
+const providerRuntimeLibrarySuffix = ".cnl"
+
+func stageProviderLibrary(name string, definition map[string]any, content []byte, directory, textName string, write func(string, []byte) error) (string, int, error) {
+	library, count, err := provider.ClashCompileProviderLibrary(name, definition, content)
+	if err != nil {
+		return "", 0, err
+	}
+	libraryName, stubName := textName+providerRuntimeLibrarySuffix, textName+providerRuntimeIndexStubSuffix
+	if err := write(filepath.Join(directory, libraryName), library); err != nil {
+		return "", 0, err
+	}
+	sum := [sha256.Size]byte(library[len(library)-sha256.Size:])
+	if err := write(filepath.Join(directory, stubName), []byte(provider.ClashNodeLibraryStub(libraryName, sum, count)+"\n")); err != nil {
+		return "", 0, err
+	}
+	return stubName, count, nil
+}
+
+func providerProductSelectionKey(definition map[string]any) string {
+	selection := map[string]any{}
+	for _, key := range []string{"filter", "exclude-filter", "exclude-type", "dialer-proxy", "override"} {
+		if value, ok := definition[key]; ok {
+			selection[key] = value
+		}
+	}
+	encoded, _ := json.Marshal(selection)
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:])
+}
+
+func providerSelectionKey(definition map[string]any) string {
+	selection := map[string]any{}
+	for _, key := range []string{"filter", "exclude-filter", "exclude-type", "dialer-proxy", "override", "age-secret-key"} {
+		if value, ok := definition[key]; ok {
+			selection[key] = value
+		}
+	}
+	encoded, _ := json.Marshal(selection)
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:])
 }

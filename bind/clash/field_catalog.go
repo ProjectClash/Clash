@@ -267,7 +267,7 @@ func walkFieldsDepth(t reflect.Type, tag, prefix string, add func(syntaxField), 
 			walkFieldsDepth(f.Type, tag, prefix, add, depth)
 			continue
 		}
-		if name == "" || name == "-" || !f.IsExported() {
+		if name == "" || name == "-" || !f.IsExported() || clashPrivateKey(name) {
 			continue
 		}
 		path := prefix + name

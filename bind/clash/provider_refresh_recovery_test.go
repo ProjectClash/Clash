@@ -75,10 +75,10 @@ func TestTheStartDoesNotParseTheCachesSourceWhenTheRebuildHasNoRoom(t *testing.T
 
 func TestAFormatLeftOutIsYAMLForTheProductKey(t *testing.T) {
 	policy := currentRuntimePolicy(false)
-	if providerProductKey("rule", "domain", "", policy) != providerProductKey("rule", "Domain", " YAML ", policy) {
+	if providerProductKey("rule", "domain", "", "", policy) != providerProductKey("rule", "Domain", " YAML ", "", policy) {
 		t.Fatalf("a format left out is upstream's yaml")
 	}
-	if providerProductKey("rule", "domain", "text", policy) == providerProductKey("rule", "domain", "yaml", policy) {
+	if providerProductKey("rule", "domain", "text", "", policy) == providerProductKey("rule", "domain", "yaml", "", policy) {
 		t.Fatalf("text and yaml are different products")
 	}
 }
@@ -138,7 +138,7 @@ func TestARunningRequestKeepsItsCacheWhenTheStateIsLost(t *testing.T) {
 	if _, err := os.Stat(providerCache.requestDirectory("orphan")); !os.IsNotExist(err) {
 		t.Fatalf("an orphan stays: %v", err)
 	}
-	providerCache.setRunning("config", map[string]string{"rule:a": "running"}, nil)
+	providerCache.setRunning("config", map[string]string{"rule:a": "running"}, nil, nil)
 	if entry := providerCache.get("running"); entry == nil || entry.LastReferencedAt == 0 {
 		t.Fatalf("a running request is on record from its start: %+v", entry)
 	}
@@ -209,7 +209,7 @@ func TestATelevisionReachesTheRefresherInProcess(t *testing.T) {
 	}
 	description, _ := json.Marshal(map[string]any{"fetchedAt": time.Now().Add(time.Second).Unix(), "sourceSHA256": payloadSHA256([]byte(body)), "payload": "source"})
 	var result providerRefreshResult
-	answer := SeedProviderFileJSON("rule", "refreshed", seedFile, string(description), service.runningConfigurationSHA256())
+	answer := SeedProviderFileJSON("rule", "refreshed", seedFile, string(description), service.runningConfigurationSHA256(), 0)
 	if err := json.Unmarshal([]byte(answer), &result); err != nil || result.Result != providerRefreshUpdated || liveRuleCount() != 2 {
 		t.Fatalf("SeedProviderFileJSON answered %s", answer)
 	}
@@ -221,7 +221,7 @@ func TestATelevisionReachesTheRefresherInProcess(t *testing.T) {
 	}
 	outside := filepath.Join(t.TempDir(), "elsewhere")
 	_ = os.WriteFile(outside, []byte(body), 0o600)
-	if answer := SeedProviderFileJSON("rule", "refreshed", outside, string(description), ""); !strings.Contains(answer, `"error"`) {
+	if answer := SeedProviderFileJSON("rule", "refreshed", outside, string(description), "", 0); !strings.Contains(answer, `"error"`) {
 		t.Fatalf("a file outside the home is refused: %s", answer)
 	}
 	fixture.serve(http.StatusOK, "x.example\n")

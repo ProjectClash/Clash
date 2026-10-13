@@ -32,6 +32,7 @@ func configurationControllerConfig(cfg *config.Config, bindingSocketPath string)
 		server.EchKey = cfg.TLS.EchKey
 	}
 	server.IsDebug = cfg.General.LogLevel == log.DEBUG
+	memoryProfilingForDebug(server.IsDebug)
 	server.Cors = route.Cors{
 		AllowOrigins:        controller.Cors.AllowOrigins,
 		AllowPrivateNetwork: controller.Cors.AllowPrivateNetwork,

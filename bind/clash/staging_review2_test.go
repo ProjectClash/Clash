@@ -383,7 +383,7 @@ func TestPrivateStagingUsesTheSharedCompiledProduct(t *testing.T) {
 	for _, entry := range published.entries {
 		sharedPath = entry.runtimePath
 	}
-	if !strings.HasSuffix(sharedPath, providerRuntimeCompiledSuffix) {
+	if !strings.HasSuffix(sharedPath, providerRuntimeIndexStubSuffix) {
 		t.Fatalf("the App's publish must have compiled the set: %s", sharedPath)
 	}
 
@@ -406,7 +406,7 @@ func TestPrivateStagingUsesTheSharedCompiledProduct(t *testing.T) {
 	for _, entry := range private.entries {
 		privatePath = entry.runtimePath
 	}
-	if !private.private || !strings.HasSuffix(privatePath, providerRuntimeCompiledSuffix) {
+	if !private.private || !strings.HasSuffix(privatePath, providerRuntimeIndexStubSuffix) {
 		t.Fatalf("a private pass must use the compiled product, got %s (private %v)", privatePath, private.private)
 	}
 	sharedInfo, err := os.Stat(sharedPath)
@@ -417,6 +417,13 @@ func TestPrivateStagingUsesTheSharedCompiledProduct(t *testing.T) {
 	if err != nil || !os.SameFile(sharedInfo, privateInfo) {
 		t.Fatalf("the private hit must be a link to the shared product (err %v)", err)
 	}
+	mappedName := strings.TrimSuffix(filepath.Base(privatePath), providerRuntimeIndexStubSuffix) + providerRuntimeMappedDomainSuffix
+	sharedSet, err1 := os.Stat(filepath.Join(filepath.Dir(sharedPath), mappedName))
+	privateSet, err2 := os.Stat(filepath.Join(filepath.Dir(privatePath), mappedName))
+	if err1 != nil || err2 != nil || !os.SameFile(sharedSet, privateSet) {
+		t.Fatalf("the private pass did not link the mapped set its stub names (%v, %v)", err1, err2)
+	}
+
 }
 
 func TestAbandonedPrivateStagingIgnoresALinkedRoot(t *testing.T) {

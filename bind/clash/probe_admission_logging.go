@@ -44,18 +44,23 @@ func (d *probeAdmissionDiagnostics) observe(now time.Time, waited time.Duration,
 	return summary, true
 }
 
-func (d *probeAdmissionDiagnostics) record(waited time.Duration, verdict probeAdmissionVerdict, background bool, footprint func() int64) {
+const probeAdmissionLogWait = 100 * time.Millisecond
+
+func (d *probeAdmissionDiagnostics) record(waited time.Duration, verdict probeAdmissionVerdict, background bool, slots *probeSlots) {
 	summary, emit := d.observe(time.Now(), waited, verdict, background)
 	detail := log.Level() == log.DEBUG
 	if !emit && !detail {
 		return
 	}
-	currentFootprint, charges := footprint(), probeAdmissionCharges.Load()
+	interactive, backgroundInFlight, interactiveWaiting, backgroundWaiting := slots.counts()
 	if detail {
-		log.Debugln("[Memory] probe admission: waited %dms verdict=%d background=%t footprint=%d charges=%d", waited.Milliseconds(), verdict, background, currentFootprint, charges)
+		log.Debugln("[Memory] probe admission: waited %dms verdict=%d background=%t in_flight=%d/%d waiting=%d/%d",
+			waited.Milliseconds(), verdict, background, interactive, backgroundInFlight, interactiveWaiting, backgroundWaiting)
 	}
 	if emit {
 		c := summary.counts
-		log.Infoln("[Memory] probe admission summary: window_ms=%d interactive_admitted=%d interactive_forced=%d interactive_deferred=%d background_admitted=%d background_forced=%d background_deferred=%d max_wait_ms=%d footprint=%d charges=%d", summary.elapsed.Milliseconds(), c[0][probeAdmitted], c[0][probeForced], c[0][probeDeferred], c[1][probeAdmitted], c[1][probeForced], c[1][probeDeferred], summary.maxWait.Milliseconds(), currentFootprint, charges)
+		log.Infoln("[Memory] probe admission summary: window_ms=%d interactive_admitted=%d interactive_deferred=%d background_admitted=%d background_deferred=%d max_wait_ms=%d in_flight=%d/%d waiting=%d/%d background_cap=%d",
+			summary.elapsed.Milliseconds(), c[0][probeAdmitted], c[0][probeDeferred], c[1][probeAdmitted], c[1][probeDeferred], summary.maxWait.Milliseconds(),
+			interactive, backgroundInFlight, interactiveWaiting, backgroundWaiting, slots.cfg.backgroundCap())
 	}
 }

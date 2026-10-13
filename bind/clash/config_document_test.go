@@ -2,6 +2,9 @@ package clash
 
 import (
 	"encoding/json"
+	"github.com/ProjectClash/Clash/config"
+	"go.yaml.in/yaml/v3"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -101,5 +104,41 @@ func TestProjectionJSONRefusesUnknownPackagesAndEmptyLists(t *testing.T) {
 	}
 	if _, err := doc.ProjectionJSON("neither", `["catalog"]`); err == nil {
 		t.Fatal("an unknown document kind was accepted")
+	}
+}
+
+func TestADocumentsViewsAreTheTwoDecodesOfItsText(t *testing.T) {
+	text := `mode: rule
+proxies:
+  - &a {name: a, type: socks5, server: a.example.net, port: 1080}
+  - {name: b, type: socks5, server: b.example.net, port: 1080, udp: true}
+proxy-groups:
+  - {name: G, type: select, proxies: [a, b]}
+x-copy: *a
+rules:
+  - MATCH,G
+`
+	doc, err := NewConfigDocument(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer doc.Close()
+	views, err := doc.snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]any
+	if err := yaml.Unmarshal([]byte(text), &root); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := config.UnmarshalRawConfig([]byte(text))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(views.root, root) || !reflect.DeepEqual(views.raw.Proxy, raw.Proxy) || !reflect.DeepEqual(views.raw.ProxyGroup, raw.ProxyGroup) {
+		t.Fatalf("views differ from the decodes:\n%v\n%v", views.root, root)
+	}
+	if _, err := NewConfigDocument("proxies: [\n"); err == nil {
+		t.Fatal("a text that does not parse opened")
 	}
 }

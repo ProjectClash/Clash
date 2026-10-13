@@ -1,6 +1,7 @@
 package clash
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ProjectClash/Clash/adapter"
 	"github.com/ProjectClash/Clash/adapter/outboundgroup"
 	"github.com/ProjectClash/Clash/component/geodata"
 	"github.com/ProjectClash/Clash/config"
@@ -36,27 +38,52 @@ func ProxyCatalogForIOS(configContent, resourceMapJSON, selectionsJSON string) (
 }
 
 func proxyCatalog(configContent, resourceMapJSON, selectionsJSON string) (*StringBox, error) {
+	cfg, providerErrors, err := openProxyCatalog(configContent, resourceMapJSON, selectionsJSON)
+	if err != nil {
+		return nil, err
+	}
+	defer closeCatalogObjects(cfg.Proxies, cfg.Providers)
+	var b bytes.Buffer
+	b.WriteString(`{"proxies":`)
+	if err := adapter.WriteProxiesJSON(&b, cfg.Proxies, cfg.ProxyLibrary); err != nil {
+		return nil, bridgeSafeError(fmt.Errorf("clash: encode proxy catalog: %w", err))
+	}
+	rest, err := json.Marshal(map[string]any{"providers": cfg.Providers, "providerErrors": providerErrors})
+	if err != nil {
+		return nil, bridgeSafeError(fmt.Errorf("clash: encode proxy catalog: %w", err))
+	}
+	b.WriteByte(',')
+	b.Write(rest[1:])
+	return WrapString(bridgeSafeString(b.String())), nil
+}
+
+func openProxyCatalog(configContent, resourceMapJSON, selectionsJSON string) (*config.Config, map[string]string, error) {
+	cfg, providerErrors, _, err := openProxyCatalogDocument(configContent, resourceMapJSON, selectionsJSON)
+	return cfg, providerErrors, err
+}
+
+func openProxyCatalogDocument(configContent, resourceMapJSON, selectionsJSON string) (*config.Config, map[string]string, string, error) {
 	setupMu.Lock()
 	ready := setupDone
 	setupMu.Unlock()
 	if !ready {
-		return nil, bridgeSafeError(fmt.Errorf("clash: call Setup before ProxyCatalogForIOS"))
+		return nil, nil, "", bridgeSafeError(fmt.Errorf("clash: call Setup before ProxyCatalogForIOS"))
 	}
 	var resources resourceMap
 	if resourceMapJSON != "" {
 		if err := json.Unmarshal([]byte(resourceMapJSON), &resources); err != nil {
-			return nil, bridgeSafeError(fmt.Errorf("clash: resource map: %w", err))
+			return nil, nil, "", bridgeSafeError(fmt.Errorf("clash: resource map: %w", err))
 		}
 	}
 	selections := map[string]string{}
 	if selectionsJSON != "" {
 		if err := json.Unmarshal([]byte(selectionsJSON), &selections); err != nil {
-			return nil, bridgeSafeError(fmt.Errorf("clash: selections: %w", err))
+			return nil, nil, "", bridgeSafeError(fmt.Errorf("clash: selections: %w", err))
 		}
 	}
 	document, staged, err := catalogDocument(configContent, resources)
 	if err != nil {
-		return nil, bridgeSafeError(err)
+		return nil, nil, "", bridgeSafeError(err)
 	}
 
 	appParseMu.Lock()
@@ -69,9 +96,8 @@ func proxyCatalog(configContent, resourceMapJSON, selectionsJSON string) (*Strin
 
 	cfg, err := parseConfigForIOS(document, true)
 	if err != nil {
-		return nil, bridgeSafeError(err)
+		return nil, nil, "", bridgeSafeError(err)
 	}
-	defer closeCatalogObjects(cfg.Proxies, cfg.Providers)
 
 	providerErrors := map[string]string{}
 	for name, provider := range cfg.Providers {
@@ -97,7 +123,7 @@ func proxyCatalog(configContent, resourceMapJSON, selectionsJSON string) (*Strin
 			continue
 		}
 		content := payload
-		if format, ok := staged[name]; ok {
+		if format, ok := staged[name]; ok && !strings.HasSuffix(path, providerRuntimeIndexStubSuffix) {
 			content = proxyProviderRuntimeContent(format, payload)
 		}
 		if err := loader.LoadDetached(content, info.ModTime()); err != nil {
@@ -106,21 +132,18 @@ func proxyCatalog(configContent, resourceMapJSON, selectionsJSON string) (*Strin
 	}
 
 	restoreCatalogSelections(cfg, selections)
-
-	data, err := json.Marshal(map[string]any{
-		"proxies":        cfg.Proxies,
-		"providers":      cfg.Providers,
-		"providerErrors": providerErrors,
-	})
-	if err != nil {
-		return nil, bridgeSafeError(fmt.Errorf("clash: encode proxy catalog: %w", err))
-	}
-	return WrapString(bridgeSafeString(string(data))), nil
+	return cfg, providerErrors, document, nil
 }
 
 func catalogDocument(content string, resources resourceMap) (string, map[string]string, error) {
 	var root map[string]any
-	if err := yaml.Unmarshal([]byte(content), &root); err != nil {
+	if resources.NodeLibraryDirectory != "" {
+		document, err := decodeMihomoDocument([]byte(content))
+		if err != nil {
+			return "", nil, fmt.Errorf("clash: parse config: %w", err)
+		}
+		root = document
+	} else if err := yaml.Unmarshal([]byte(content), &root); err != nil {
 		return "", nil, fmt.Errorf("clash: parse config: %w", err)
 	}
 	if root == nil {
@@ -129,6 +152,7 @@ func catalogDocument(content string, resources resourceMap) (string, map[string]
 	canonicalizeProviderDefinitionKeysInDocument(root)
 	collisions := providerNamespaceCollisions(root)
 	remote := remoteProviderDefinitions(root, "proxy-providers")
+	resources.ProviderFetchedAt = publishedRefreshDefinitions(root, "proxy-providers", "proxy", remote, resources.ProviderFetchedAt)
 	if err := rewriteProviders(root, "proxy-providers", "proxy", resources.ProviderPaths, collisions); err != nil {
 		return "", nil, err
 	}
@@ -144,6 +168,21 @@ func catalogDocument(content string, resources resourceMap) (string, map[string]
 				staged[name], _ = definition["format"].(string)
 			}
 		}
+	}
+	reference, published := root["x-clash-node-library"]
+	if published && publishedNodeLibraryHere(reference) != nil && !nodesOnlyInLibrary(root, reference) {
+		published = false
+	}
+	if published {
+		if directory := resources.NodeLibraryDirectory; directory != "" {
+			catalogProviderLibraries(root, directory, staged)
+		}
+	} else if directory := resources.NodeLibraryDirectory; directory != "" {
+		dropWrittenNodeFields(root)
+		if err := writeNodeLibrary(root, directory); err != nil {
+			return "", nil, err
+		}
+		catalogProviderLibraries(root, directory, staged)
 	}
 	for _, key := range catalogIgnoredSections {
 		delete(root, key)
@@ -180,12 +219,13 @@ func restoreCatalogSelections(cfg *config.Config, selections map[string]string) 
 }
 
 func groupHasMember(group C.Proxy, member string) bool {
-	holder, ok := group.Adapter().(interface{ GetProxies(bool) []C.Proxy })
+	holder, ok := group.Adapter().(interface{ Members(bool) C.ProxyList })
 	if !ok {
 		return false
 	}
-	for _, proxy := range holder.GetProxies(false) {
-		if proxy.Name() == member {
+	members := holder.Members(false)
+	for i := 0; i < members.Len(); i++ {
+		if members.At(i).Name() == member {
 			return true
 		}
 	}
@@ -213,9 +253,7 @@ func closeCatalogObjects(proxies map[string]C.Proxy, providers map[string]P.Prox
 		closeAdapter(proxy)
 	}
 	for _, provider := range providers {
-		for _, proxy := range provider.Proxies() {
-			closeAdapter(proxy)
-		}
+		rangeHeldMembers(provider.ProxyList(), func(proxy C.Proxy) bool { closeAdapter(proxy); return true })
 		if closer, ok := provider.(interface{ Close() error }); ok {
 			_ = closer.Close()
 		}

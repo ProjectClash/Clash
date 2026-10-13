@@ -455,6 +455,7 @@ rules:
 }
 
 func TestProviderSideUpdateRejectsInvalidClientInputs(t *testing.T) {
+	asTunnelProcess(t)
 	client, err := NewAPIClient("/tmp/does-not-exist.sock", newRecordingClashAPIHandler())
 	if err != nil {
 		t.Fatal(err)

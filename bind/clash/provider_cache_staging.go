@@ -32,6 +32,9 @@ type providerRefreshTarget struct {
 	product                      *providerCacheProduct
 	checkSoon                    bool
 	serverFirst                  bool
+	awaits                       string
+	selection                    string
+	builtHere                    bool
 	pending                      *providerCacheImport
 }
 
@@ -45,6 +48,7 @@ type providerCacheImport struct {
 	older                       bool
 	serverFirst                 bool
 	groupMember                 bool
+	waitsForApp                 bool
 }
 
 type providerSeedCandidate struct {
@@ -67,14 +71,24 @@ type providerRefreshPlan struct {
 	targets []*providerRefreshTarget
 }
 
-func providerProductKey(kind, behavior, format string, policy appleRuntimePolicy) string {
+func providerProductKey(kind, behavior, format, selection string, policy appleRuntimePolicy) string {
 	format = strings.ToLower(strings.TrimSpace(format))
 	if format == "" {
 		format = "yaml"
 	}
-	digest := sha256.Sum256([]byte(strings.Join([]string{kind, strings.ToLower(strings.TrimSpace(behavior)),
-		format, stagedPolicyFingerprint(policy)}, "\x00")))
+	parts := []string{kind, strings.ToLower(strings.TrimSpace(behavior)), format, stagedPolicyFingerprint(policy)}
+	if selection != "" {
+		parts = append(parts, selection)
+	}
+	digest := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return hex.EncodeToString(digest[:16])
+}
+
+func providerProductSelection(kind, name string, definition map[string]any) string {
+	if kind != "proxy" {
+		return ""
+	}
+	return name + "\x00" + providerProductSelectionKey(definition)
 }
 
 func newProductGeneration() string {
@@ -139,7 +153,8 @@ func prepareProviderRefreshForTunnel(raw *config.RawConfig, policy appleRuntimeP
 			target := &providerRefreshTarget{
 				kind: namespace.kind, name: name, spec: spec, definition: definition,
 				requestKey:     spec.requestKey(namespace.kind),
-				productKey:     providerProductKey(namespace.kind, behavior, format, policy),
+				productKey:     providerProductKey(namespace.kind, behavior, format, providerProductSelection(namespace.kind, name, definition), policy),
+				selection:      providerProductSelection(namespace.kind, name, definition),
 				sourceBehavior: behavior, sourceFormat: format,
 				sideUpdateSafe: namespace.kind == "proxy" || providerSideUpdateSafe(definition),
 			}
@@ -212,9 +227,12 @@ func prepareProviderRefreshForTunnel(raw *config.RawConfig, policy appleRuntimeP
 			definition := target.definition
 			var product *providerCacheProduct
 			if cacheHasContent {
-				if candidate := entry.Products[target.productKey]; candidate != nil && candidate.SourceSHA256 == entry.SourceSHA256 {
+				if candidate := entry.Products[target.productKey]; productRuns(entry, candidate) {
+					if candidate.BuiltHere {
+						target.builtHere = true
+					}
 					directory := providerCache.productDirectory(target.requestKey, target.productKey, candidate.Generation)
-					if productFilesExist(directory, candidate) {
+					if productFilesExist(directory, candidate) && !productParsedTooLarge(target, candidate, directory) {
 						product = candidate
 					}
 				}
@@ -250,10 +268,76 @@ func prepareProviderRefreshForTunnel(raw *config.RawConfig, policy appleRuntimeP
 func startUnloaded(target *providerRefreshTarget, directory string) {
 	target.productDirectory = directory
 	target.definition["path"] = filepath.Join(directory, providerCacheNativeEntry)
+	if target.awaits = formTheAppCompiles(target); target.awaits != "" {
+		target.definition["path"] = filepath.Join(directory, awaitedEntry)
+		if target.awaits == "mapped" {
+			target.definition["format"] = "text"
+			target.definition["behavior"] = strings.ToLower(strings.TrimSpace(target.sourceBehavior))
+		}
+		return
+	}
 	if target.kind == "rule" && compilesNatively(target.sourceBehavior, target.sourceFormat) {
 		target.definition["format"] = "mrs"
 		target.definition["behavior"] = strings.ToLower(strings.TrimSpace(target.sourceBehavior))
 	}
+}
+
+func formTheAppCompiles(target *providerRefreshTarget) string {
+	if !stagingMapsRuleSets || !target.sideUpdateSafe {
+		return ""
+	}
+	switch {
+	case target.kind == "proxy":
+		return "library"
+	case target.kind != "rule":
+		return ""
+	case mappable(target.sourceBehavior):
+		return "mapped"
+	case strings.EqualFold(strings.TrimSpace(target.sourceBehavior), "classical") && !strings.EqualFold(strings.TrimSpace(target.sourceFormat), "mrs"):
+		return "indexed"
+	}
+	return ""
+}
+
+const unloadedTextName = "source"
+
+const awaitedEntry = providerCacheNativeEntry + providerRuntimeIndexStubSuffix
+
+func awaitedProduct(target *providerRefreshTarget) *providerCacheProduct {
+	return awaitedProductIn(target, target.awaits)
+}
+
+func awaitedProductIn(target *providerRefreshTarget, form string) *providerCacheProduct {
+	product := &providerCacheProduct{
+		Variant: form, Entry: awaitedEntry, Generation: filepath.Base(target.productDirectory),
+		Behavior: target.sourceBehavior, Format: target.sourceFormat,
+		SourceForm: catalogForm(target.sourceBehavior, target.sourceFormat), Selection: target.selection,
+	}
+	switch form {
+	case "mapped":
+		product.Behavior, product.Format = strings.ToLower(strings.TrimSpace(target.sourceBehavior)), "text"
+		product.Files = []string{awaitedEntry, providerCacheNativeEntry + mappedSuffix(target.sourceBehavior)}
+	case "indexed":
+		product.Files = []string{awaitedEntry, unloadedTextName, unloadedTextName + providerRuntimeIndexSuffix}
+	case "library":
+		product.Files = []string{awaitedEntry, providerCacheNativeEntry + providerRuntimeLibrarySuffix}
+	}
+	return product
+}
+
+func formOf(target *providerRefreshTarget) string {
+	if target.product != nil {
+		if target.product.Stopgap && !target.builtHere {
+			if form := formTheAppCompiles(target); form != "" {
+				return form
+			}
+		}
+		return target.product.Variant
+	}
+	if target.builtHere {
+		return ""
+	}
+	return target.awaits
 }
 
 func compilesNatively(behavior, format string) bool {
@@ -267,6 +351,9 @@ func compilesNatively(behavior, format string) bool {
 
 func serveCachedProduct(target *providerRefreshTarget, product *providerCacheProduct) {
 	target.product = product
+	if product.BuiltHere {
+		target.builtHere = true
+	}
 	target.productDirectory = providerCache.productDirectory(target.requestKey, target.productKey, product.Generation)
 	target.definition["path"] = filepath.Join(target.productDirectory, product.Entry)
 	if target.kind == "rule" {
@@ -287,6 +374,7 @@ func completeProviderRefreshAfterStaging(plan *providerRefreshPlan, runtime *pro
 		imported  *providerCacheImport
 	}
 	groups := map[string]*productGroup{}
+	deferred := map[string]*providerCacheImport{}
 	groupOf := func(target *providerRefreshTarget) *productGroup {
 		key := target.requestKey + "\x00" + target.productKey
 		if groups[key] == nil {
@@ -300,6 +388,11 @@ func completeProviderRefreshAfterStaging(plan *providerRefreshPlan, runtime *pro
 		}
 		group := groupOf(target)
 		if group.imported != nil {
+			continue
+		}
+		if runtime != nil && runtime.deferred[providerRuntimeKey(target.kind, target.name)] != "" && target.pending.fromSeed {
+			seed := *target.pending
+			deferred[target.requestKey+"\x00"+target.productKey] = &seed
 			continue
 		}
 		var entry providerRuntimeEntry
@@ -339,6 +432,21 @@ func completeProviderRefreshAfterStaging(plan *providerRefreshPlan, runtime *pro
 			continue
 		}
 		group := groupOf(target)
+		if seed := deferred[target.requestKey+"\x00"+target.productKey]; group.imported == nil && seed != nil {
+			target.pending = nil
+			if !seed.older {
+				target.pending = &providerCacheImport{waitsForApp: true, seedPath: seed.seedPath, seedIdentity: seed.seedIdentity, fetchedAt: seed.fetchedAt, etag: seed.etag}
+			}
+			if product := runnableCachedProduct(target); product != nil {
+				serveCachedProduct(target, product)
+				continue
+			}
+			if group.directory == "" {
+				group.directory = providerCache.productDirectory(target.requestKey, target.productKey, newProductGeneration())
+			}
+			startUnloaded(target, group.directory)
+			continue
+		}
 		if group.imported == nil {
 			if group.directory == "" {
 				group.directory = providerCache.productDirectory(target.requestKey, target.productKey, newProductGeneration())
@@ -354,6 +462,37 @@ func completeProviderRefreshAfterStaging(plan *providerRefreshPlan, runtime *pro
 		target.productDirectory = group.directory
 		pointAtProduct(target, group.imported.product)
 	}
+}
+
+const startTextSeedLimit = 1 << 20
+
+const builtHereStartLimit = 2 << 20
+
+func productParsedTooLarge(target *providerRefreshTarget, product *providerCacheProduct, directory string) bool {
+	if product.BuiltHere {
+		return sourceLargerThan(filepath.Join(directory, product.Entry), builtHereStartLimit)
+	}
+	form := formTheAppCompiles(target)
+	return form != "" && product.Variant != form && sourceLargerThan(filepath.Join(directory, product.Entry), startTextSeedLimit)
+}
+
+func runnableCachedProduct(target *providerRefreshTarget) *providerCacheProduct {
+	entry := providerCache.get(target.requestKey)
+	if entry == nil || entry.SourceSHA256 == "" {
+		return nil
+	}
+	product := entry.Products[target.productKey]
+	if product == nil {
+		return nil
+	}
+	directory := providerCache.productDirectory(target.requestKey, target.productKey, product.Generation)
+	stopgap := product.Stopgap && !sourceLargerThan(filepath.Join(directory, product.Entry), startTextSeedLimit)
+	builtHere := product.BuiltHere && !sourceLargerThan(filepath.Join(directory, product.Entry), builtHereStartLimit)
+	if !productRuns(entry, product) || product.Variant != formTheAppCompiles(target) && !stopgap && !builtHere ||
+		!productFilesExist(directory, product) {
+		return nil
+	}
+	return product
 }
 
 func pointAtProduct(target *providerRefreshTarget, product *providerCacheProduct) {
@@ -373,6 +512,10 @@ func commitProviderRefreshPlan(plan *providerRefreshPlan) map[string]int {
 	for _, target := range plan.targets {
 		imported := target.pending
 		target.pending = nil
+		if imported != nil && imported.waitsForApp {
+			commitSeedForTheApp(target, imported, now)
+			continue
+		}
 		if imported == nil || imported.product == nil {
 			continue
 		}
@@ -458,11 +601,17 @@ func linkStagedProduct(target *providerRefreshTarget, entry providerRuntimeEntry
 	files := []string{entryName}
 	variant := "text"
 	switch {
+	case target.kind == "proxy" && entry.compileVerdict == compileVerdictLibrary:
+		variant = "library"
+		files = append(files, entry.textFileName+providerRuntimeLibrarySuffix)
 	case target.kind == "proxy":
 		variant = "proxy"
 	case entry.compileVerdict == compileVerdictIndexed:
 		variant = "indexed"
 		files = append(files, entry.textFileName, entry.textFileName+providerRuntimeIndexSuffix)
+	case entry.compileVerdict == compileVerdictMapped:
+		variant = "mapped"
+		files = append(files, entry.textFileName+mappedSuffix(entry.behavior))
 	case entry.compileVerdict == compileVerdictCompiled && !strings.EqualFold(strings.TrimSpace(entry.sourceFormat), "mrs"):
 		variant = "compiled"
 	case strings.EqualFold(strings.TrimSpace(entry.sourceFormat), "mrs"):
@@ -479,8 +628,43 @@ func linkStagedProduct(target *providerRefreshTarget, entry providerRuntimeEntry
 	return &providerCacheProduct{
 		Variant: variant, Entry: entryName, Files: files, Generation: generation,
 		Behavior: entry.behavior, Format: entry.format,
-		SourceForm: catalogForm(target.sourceBehavior, target.sourceFormat),
+		SourceForm: catalogForm(target.sourceBehavior, target.sourceFormat), Selection: target.selection,
 	}, nil
+}
+
+func commitSeedForTheApp(target *providerRefreshTarget, imported *providerCacheImport, now int64) {
+	sha, _, err := hashFile(imported.seedPath)
+	if err != nil {
+		log.Warnln("[Provider] %s: its content could not be left for Clash to compile: %v", target.name, err)
+		return
+	}
+	confirmed := unixOrZero(imported.fetchedAt)
+	if confirmed == 0 {
+		confirmed = now
+	}
+	pendingPath := providerCache.pendingPath(target.requestKey)
+	if entry := providerCache.get(target.requestKey); entry != nil &&
+		(entry.SourceSHA256 == sha ||
+			knowsRunningContent(entry) && confirmed <= runningConfirmation(entry) ||
+			entry.PendingSHA256 == sha && regularFileExists(pendingPath) ||
+			entry.PendingSHA256 != "" && entry.PendingCheckedAt > confirmed && regularFileExists(pendingPath)) {
+		providerCache.update(target.requestKey, func(cached *providerCacheEntry) {
+			cached.LastReferencedAt = now
+			reflectWaitLocked(cached)
+		})
+		return
+	}
+	if err := linkOrCopyFile(imported.seedPath, pendingPath); err != nil {
+		log.Warnln("[Provider] %s: its content could not be left for Clash to compile: %v", target.name, err)
+		return
+	}
+	providerCache.update(target.requestKey, func(cached *providerCacheEntry) {
+		cached.Kind, cached.URL = target.kind, target.spec.URL
+		cached.LastReferencedAt = now
+		cached.PendingSHA256, cached.PendingETag, cached.PendingWait = sha, imported.etag, providerRefreshPendingRecompile
+		cached.PendingCheckedAt = confirmed
+		cached.Result, cached.Error, cached.PendingReason = providerRefreshPendingApp, "", providerRefreshPendingRecompile
+	})
 }
 
 func linkOrCopyFile(source, destination string) error {
@@ -489,7 +673,7 @@ func linkOrCopyFile(source, destination string) error {
 	}
 	temporary := fmt.Sprintf("%s.link-%d-%d", destination, os.Getpid(), time.Now().UnixNano())
 	if err := os.Link(source, temporary); err != nil {
-		payload, readErr := readBoundedRegularFile(source, int64(maximumProviderResourceBytes), "provider product")
+		payload, readErr := readBoundedRegularFile(source, int64(providerContentBytes()), "provider product")
 		if readErr != nil {
 			return err
 		}
@@ -509,9 +693,12 @@ func hashFile(path string) (string, int64, error) {
 	}
 	defer file.Close()
 	digest := sha256.New()
-	size, err := io.Copy(digest, io.LimitReader(file, int64(maximumProviderResourceBytes)+1))
+	size, err := io.Copy(digest, io.LimitReader(file, maximumPendingCompileBytes+1))
 	if err != nil {
 		return "", 0, err
+	}
+	if size > maximumPendingCompileBytes {
+		return "", 0, fmt.Errorf("%s is larger than %d bytes", filepath.Base(path), maximumPendingCompileBytes)
 	}
 	return hex.EncodeToString(digest.Sum(nil)), size, nil
 }

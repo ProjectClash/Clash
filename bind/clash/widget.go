@@ -49,13 +49,18 @@ func widgetGroupJSONUnguarded(group string, limit int) string {
 	if !ok {
 		return bridgeSafeString("{}")
 	}
-	all := members.Proxies()
-	names := make([]string, 0, len(all))
-	for _, member := range all {
+	var all C.ProxyList = C.ProxySlice(nil)
+	if holder, ok := members.(interface{ Members(bool) C.ProxyList }); ok {
+		all = holder.Members(false)
+	} else {
+		all = C.ProxySlice(members.Proxies())
+	}
+	names := make([]string, 0, min(all.Len(), max(limit, 0)+1))
+	for i := 0; i < all.Len(); i++ {
 		if limit > 0 && len(names) == limit {
 			break
 		}
-		names = append(names, member.Name())
+		names = append(names, all.At(i).Name())
 	}
 	return bridgeSafeString(mustJSON(map[string]any{
 		"name": proxy.Name(),

@@ -60,6 +60,7 @@ rule-providers:
 }
 
 func TestPlanNegativeSizeLimitFallsBackInsteadOfRefusing(t *testing.T) {
+	asAppProcess(t)
 	r := planOf(t, `
 proxy-providers:
   p: {type: http, url: https://example.com/p.yaml, size-limit: -1}
@@ -68,7 +69,7 @@ proxy-providers:
 	if len(r.Providers) != 1 {
 		t.Fatalf("provider dropped: %+v", r.Providers)
 	}
-	if r.Providers[0].MaximumBytes != int64(maximumProviderResourceBytes) {
+	if r.Providers[0].MaximumBytes != int64(maximumPendingCompileBytes) {
 		t.Fatalf("size-limit did not fall back to the default: %d", r.Providers[0].MaximumBytes)
 	}
 	if noticeContaining(t, r, "size-limit") == "" {

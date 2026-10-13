@@ -45,6 +45,7 @@ func TestControlledMASQUEH3Interop(t *testing.T) {
 
 func testControlledMASQUEH3Interop(t *testing.T, mode string) {
 	t.Helper()
+	pinSessionReleaseOff(t)
 	pinUnifiedDelayOff(t)
 	serverCertificate, _, serverPublicKey := newControlledMASQUEIdentity(t, "localhost")
 	_, clientPrivateKey, _ := newControlledMASQUEIdentity(t, "client.controlled.test")
@@ -203,6 +204,7 @@ func TestControlledMASQUEH2Interop(t *testing.T) {
 
 func testControlledMASQUEH2Interop(t *testing.T, mode string) {
 	t.Helper()
+	pinSessionReleaseOff(t)
 	pinUnifiedDelayOff(t)
 	serverCertificate, serverPrivateKey, serverPublicKey := newControlledMASQUEIdentity(t, "localhost")
 	_, clientPrivateKey, _ := newControlledMASQUEIdentity(t, "client.controlled.test")

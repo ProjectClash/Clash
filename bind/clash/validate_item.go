@@ -248,6 +248,7 @@ func (p standInProxyProvider) Type() P.ProviderType       { return P.Proxy }
 func (p standInProxyProvider) Initial() error             { return nil }
 func (p standInProxyProvider) Update() error              { return nil }
 func (p standInProxyProvider) Proxies() []C.Proxy         { return nil }
+func (p standInProxyProvider) ProxyList() C.ProxyList     { return C.ProxySlice(p.Proxies()) }
 func (p standInProxyProvider) Count() int                 { return 0 }
 func (p standInProxyProvider) Touch()                     {}
 func (p standInProxyProvider) HealthCheck()               {}

@@ -26,7 +26,7 @@ func seedThroughTheTelevision(t *testing.T, fixture *refreshFixture, service *Bo
 		description["fetchedAt"] = fetchedAt
 	}
 	encoded, _ := json.Marshal(description)
-	return SeedProviderFileJSON(fixture.options.kind, "refreshed", seedFile, string(encoded), service.runningConfigurationSHA256())
+	return SeedProviderFileJSON(fixture.options.kind, "refreshed", seedFile, string(encoded), service.runningConfigurationSHA256(), 0)
 }
 
 func TestASeedThatWillNotBuildLeavesWhatWaits(t *testing.T) {
@@ -147,6 +147,9 @@ func TestTheCatalogFindsAClassicalSetsCompiledProduct(t *testing.T) {
 		published: "DOMAIN-SUFFIX,a.example\n", served: "DOMAIN-SUFFIX,a.example\nDOMAIN-SUFFIX,b.example\n", compile: true, fetchedAgo: 2 * time.Hour})
 	service := fixture.start()
 	fixture.waitFor("the refresh", func() bool { return liveRuleCount() == 2 })
+	fixture.waitForEntry("the refresh's own result", func(e *providerCacheEntry) bool {
+		return e.Result == providerRefreshUpdated && e.CountAfter == 2
+	})
 	product, _ := liveProduct(t, fixture, service)
 	if product.Variant != "compiled" || !strings.EqualFold(product.Behavior, "domain") {
 		t.Skipf("fixture: the classical set did not compile to a domain set (%s %s)", product.Variant, product.Behavior)
@@ -203,7 +206,7 @@ func TestTheAwaitedPayloadIsKnownByItsBytes(t *testing.T) {
 	seedFile := filepath.Join(fixture.home, "seed-unnamed")
 	_ = os.WriteFile(seedFile, []byte(served), 0o600)
 	description, _ := json.Marshal(map[string]any{"fetchedAt": waiting.PendingCheckedAt - 10, "payload": "source"})
-	if answer := SeedProviderFileJSON("rule", "refreshed", seedFile, string(description), service.runningConfigurationSHA256()); !strings.Contains(answer, `"result":"updated"`) {
+	if answer := SeedProviderFileJSON("rule", "refreshed", seedFile, string(description), service.runningConfigurationSHA256(), 0); !strings.Contains(answer, `"result":"updated"`) {
 		t.Fatalf("the awaited payload, unnamed: %s", answer)
 	}
 }

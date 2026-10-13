@@ -79,6 +79,7 @@ func TestSingleNodeFailureCarriesTheReason(t *testing.T) {
 }
 
 func TestProxyPayloadSizeRefusalsNameWhatIsWrong(t *testing.T) {
+	asTunnelProcess(t)
 	if _, err := InspectProxyPayloadForIOS(nil, "singleNode"); err == nil || !strings.Contains(err.Error(), "empty") {
 		t.Fatalf("the empty-payload refusal does not say it is empty: %v", err)
 	}

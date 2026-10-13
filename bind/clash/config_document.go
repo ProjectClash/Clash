@@ -22,10 +22,18 @@ type ConfigDocument struct {
 
 func NewConfigDocument(configContent string) (*ConfigDocument, error) {
 	var root map[string]any
-	if err := yaml.Unmarshal([]byte(configContent), &root); err != nil {
-		return nil, bridgeSafeError(fmt.Errorf("clash: parse config: %w", err))
+	var rootErr error
+	read := false
+	raw, err := config.ClashUnmarshalRawConfig([]byte(configContent), func(decode func(any) error) {
+		read = true
+		rootErr = decode(&root)
+	})
+	if !read {
+		rootErr = yaml.Unmarshal([]byte(configContent), &root)
 	}
-	raw, err := config.UnmarshalRawConfig([]byte(configContent))
+	if rootErr != nil {
+		return nil, bridgeSafeError(fmt.Errorf("clash: parse config: %w", rootErr))
+	}
 	if err != nil {
 		return nil, bridgeSafeError(fmt.Errorf("clash: parse config: %w", err))
 	}

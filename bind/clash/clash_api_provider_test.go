@@ -56,8 +56,8 @@ func TestClashAPIClientReadsProviderCatalogAndRunsHealthCheck(t *testing.T) {
 	requests := make(chan string, 4)
 	server := &http.Server{Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		requests <- request.Method + " " + request.RequestURI
-		if strings.HasSuffix(request.URL.Path, "/healthcheck") {
-			writer.WriteHeader(http.StatusNoContent)
+		if strings.HasSuffix(request.URL.Path, "/health-check") {
+			writer.WriteHeader(http.StatusAccepted)
 			return
 		}
 		writer.Header().Set("Content-Type", "application/json")
@@ -89,7 +89,7 @@ func TestClashAPIClientReadsProviderCatalogAndRunsHealthCheck(t *testing.T) {
 	want := []string{
 		"GET /providers/proxies",
 		"GET /providers/proxies/proxy%2Fname",
-		"GET /providers/proxies/proxy%2Fname/healthcheck",
+		"POST /clash/v1/providers/health-check?name=proxy%2Fname",
 		"GET /providers/rules",
 	}
 	for _, expected := range want {
@@ -115,5 +115,64 @@ func TestClashAPIClientRejectsEmptyProviderUpdateNames(t *testing.T) {
 	}
 	if err := client.HealthCheckProxyProvider(""); err == nil || !strings.Contains(err.Error(), "name") {
 		t.Fatalf("empty proxy provider health name error = %v", err)
+	}
+}
+
+func TestProviderHealthCheckAsksTheRouteThatAnswersAtOnce(t *testing.T) {
+	path := shortClashSocketPath(t)
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests := make(chan string, 1)
+	server := &http.Server{Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests <- request.Method + " " + request.RequestURI
+		writer.WriteHeader(http.StatusAccepted)
+	})}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() {
+		_ = server.Close()
+		_ = listener.Close()
+	})
+	client, err := NewAPIClient(path, newRecordingClashAPIHandler())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.HealthCheckProxyProvider("large"); err != nil {
+		t.Fatalf("a started round is not a failed health check: %v", err)
+	}
+	if got, want := <-requests, "POST /clash/v1/providers/health-check?name=large"; got != want {
+		t.Fatalf("health check request = %q, want %q", got, want)
+	}
+}
+
+func TestProviderHealthCheckStillReportsWhatTheCoreSays(t *testing.T) {
+	path := shortClashSocketPath(t)
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{Handler: http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		http.Error(writer, "proxy provider not found", http.StatusNotFound)
+	})}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() {
+		_ = server.Close()
+		_ = listener.Close()
+	})
+	client, err := NewAPIClient(path, newRecordingClashAPIHandler())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.HealthCheckProxyProvider("missing"); err == nil || !strings.Contains(err.Error(), "404") {
+		t.Fatalf("an unknown provider = %v, want the core's 404", err)
+	}
+
+	unreachable, err := NewAPIClient(shortClashSocketPath(t), newRecordingClashAPIHandler())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unreachable.HealthCheckProxyProvider("any"); err == nil {
+		t.Fatal("a core that cannot be reached reported a started round")
 	}
 }

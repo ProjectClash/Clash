@@ -16,6 +16,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ProjectClash/Clash/adapter/outbound"
+	adapterprovider "github.com/ProjectClash/Clash/adapter/provider"
+
+	ruleprovider "github.com/ProjectClash/Clash/rules/provider"
+
 	"github.com/ProjectClash/Clash/component/age"
 	mihomoHttp "github.com/ProjectClash/Clash/component/http"
 	"github.com/ProjectClash/Clash/component/resource"
@@ -97,6 +102,8 @@ type providerSeed struct {
 	ETag             string `json:"etag"`
 	SubscriptionInfo string `json:"subscriptionInfo"`
 	Payload          string `json:"payload"`
+	Count            int    `json:"count,omitempty"`
+	BuildHere        bool   `json:"buildHere,omitempty"`
 	path             string
 	bytes            int64
 }
@@ -173,7 +180,7 @@ func (s *BoxService) startProviderRefreshLocked() {
 }
 
 func (r *providerRefresher) publishRunning(seeded map[string]int) {
-	running, variants := map[string]string{}, map[string]string{}
+	running, variants, productKeys := map[string]string{}, map[string]string{}, map[string]string{}
 	referenced, liveDirectories := map[string]bool{}, map[string]bool{}
 	for name, task := range r.byName {
 		running[name] = task.requestKey
@@ -184,12 +191,15 @@ func (r *providerRefresher) publishRunning(seeded map[string]int) {
 			if target.productDirectory != "" {
 				liveDirectories[target.productDirectory] = true
 			}
-			if target.product != nil {
-				variants[providerResourceKey(target.kind, target.name)] = target.product.Variant
+			if form := formOf(target); form != "" {
+				variants[providerResourceKey(target.kind, target.name)] = form
+			}
+			if target.productKey != "" {
+				productKeys[providerResourceKey(target.kind, target.name)] = target.productKey
 			}
 		}
 	}
-	providerCache.setRunning(r.configSHA256, running, variants)
+	providerCache.setRunning(r.configSHA256, running, variants, productKeys)
 	{
 		keys := make([]string, 0, len(r.tasks))
 		byKey := map[string]*providerRefreshTask{}
@@ -524,7 +534,7 @@ func (r *providerRefresher) handle(request providerRefreshRequest) providerRefre
 		return providerRefreshResult{Result: providerRefreshFailed, Error: ProviderUpdateUnavailablePrefix + "the running configuration has no such provider for the tunnel to refresh"}
 	}
 	if request.seed != nil {
-		return r.applySeed(task, request.seed)
+		return r.applySeed(task, request.seed, request.name)
 	}
 	return r.refresh(task)
 }
@@ -632,6 +642,9 @@ func (r *providerRefresher) download(task *providerRefreshTask, entry *providerC
 	limit, defaulted := task.spec.SizeLimit, false
 	if limit <= 0 {
 		limit, defaulted = resource.DefaultRemoteSizeLimit, true
+		if taskWaitsForTheApp(task) {
+			limit = maximumPendingCompileBytes
+		}
 	}
 	reader := io.Reader(response.Body)
 	if limit > 0 {
@@ -685,6 +698,19 @@ func (r *providerRefresher) refresh(task *providerRefreshTask) providerRefreshRe
 	for _, target := range task.targets {
 		serverFirst = serverFirst || target.serverFirst
 	}
+	if entry != nil && entry.PendingSHA256 != "" && (entry.PendingWait == providerRefreshPendingRecompile ||
+		entry.PendingWait == "" && entry.PendingReason == providerRefreshPendingRecompile) {
+		pendingPath := providerCache.pendingPath(task.requestKey)
+		if size := fileSize(pendingPath); runsAsTextUntilTheApp(task, size) || size > 0 && taskBuiltHere(task) {
+			if sha, _, err := hashFile(pendingPath); err == nil && sha == entry.PendingSHA256 {
+				var confirmed time.Time
+				if entry.PendingCheckedAt > 0 {
+					confirmed = time.Unix(entry.PendingCheckedAt, 0)
+				}
+				return r.applySource(task, entry, providerSourceFile{pendingPath, sha, size, originPending}, confirmed, entry.PendingETag)
+			}
+		}
+	}
 	if entry != nil && entry.SourceSHA256 != "" && !task.current(entry) && entry.PendingSHA256 == "" &&
 		entry.RebuildFailedSHA256 != entry.SourceSHA256 && !serverFirst {
 		sourcePath := providerCache.sourcePath(task.requestKey)
@@ -722,10 +748,11 @@ func (r *providerRefresher) refresh(task *providerRefreshTask) providerRefreshRe
 		if wait == "" {
 			wait = entry.PendingReason
 		}
-		if wait != providerRefreshPendingMemory {
+		pendingPath := providerCache.pendingPath(task.requestKey)
+		if wait != providerRefreshPendingMemory && !(wait == providerRefreshPendingRecompile &&
+			(runsAsTextUntilTheApp(task, fileSize(pendingPath)) || taskBuiltHere(task))) {
 			return r.stillPending(task, started, wait)
 		}
-		pendingPath := providerCache.pendingPath(task.requestKey)
 		return r.applySource(task, entry, providerSourceFile{pendingPath, entry.PendingSHA256, fileSize(pendingPath), originPending}, started, entry.PendingETag)
 	case downloaded.notModified,
 		task.current(entry) && entry != nil && downloaded.sha256 == entry.SourceSHA256:
@@ -965,11 +992,16 @@ type providerProductBuild struct {
 	directory string
 	product   *providerCacheProduct
 	writes    []refreshWrite
+	moves     []refreshMove
 }
 
 type refreshWrite struct {
 	name    string
 	payload []byte
+}
+
+type refreshMove struct {
+	name, from string
 }
 
 func (r *providerRefresher) applySource(task *providerRefreshTask, entry *providerCacheEntry, source providerSourceFile, checkedAt time.Time, etag string) providerRefreshResult {
@@ -982,7 +1014,20 @@ func (r *providerRefresher) applySource(task *providerRefreshTask, entry *provid
 	if task.routes && task.loaded() {
 		return r.pending(task, checkedAt, providerRefreshPendingRoutes, source, etag)
 	}
+	stopgap := false
+	if taskWaitsForTheApp(task) {
+		if !runsAsTextUntilTheApp(task, size) {
+			return r.pending(task, checkedAt, providerRefreshPendingRecompile, source, etag)
+		}
+		stopgap = true
+	}
 	groups := r.groups(task)
+	for _, group := range groups {
+		if target := group.targets[0]; stopgap || task.kind == "proxy" && group.product.Variant == "library" &&
+			(target.product == nil || target.product.Stopgap) {
+			group.product = stopgapProduct(target)
+		}
+	}
 	var needed int64
 	for _, group := range groups {
 		estimate := estimateProviderBuildBytes(task.kind, group.product.Variant, group.targets[0].sourceBehavior, int(size), nil)
@@ -1058,7 +1103,7 @@ func (r *providerRefresher) applySource(task *providerRefreshTask, entry *provid
 				if live, ok := liveFileProvider(target.kind, target.name); ok && !checkedAt.IsZero() {
 					live.SetUpdatedAt(checkedAt)
 				}
-				providerCache.setRunningVariant(providerResourceKey(target.kind, target.name), group.product.Variant)
+				providerCache.setRunningVariant(providerResourceKey(target.kind, target.name), formOf(target))
 			}
 		}
 		task.failures = 0
@@ -1153,10 +1198,23 @@ func (r *providerRefresher) groups(task *providerRefreshTask) []*providerProduct
 
 func (r *providerRefresher) productFor(target *providerRefreshTarget) *providerCacheProduct {
 	if target.product != nil {
+		if form := formOf(target); target.product.Stopgap && form != target.product.Variant {
+			return awaitedProductIn(target, form)
+		}
 		copied := *target.product
 		copied.Files = append([]string(nil), target.product.Files...)
 		copied.SourceForm = catalogForm(target.sourceBehavior, target.sourceFormat)
+		copied.Selection = target.selection
+		copied.Stopgap = copied.Stopgap && !target.builtHere
+		copied.BuiltHere = copied.BuiltHere || target.builtHere
 		return &copied
+	}
+	if target.awaits != "" && !target.builtHere {
+		return awaitedProduct(target)
+	}
+	entry := providerCacheNativeEntry
+	if target.awaits != "" {
+		entry = awaitedEntry
 	}
 	variant, behavior, format := "text", target.sourceBehavior, target.sourceFormat
 	switch {
@@ -1168,9 +1226,9 @@ func (r *providerRefresher) productFor(target *providerRefreshTarget) *providerC
 		variant = "mrs"
 	}
 	return &providerCacheProduct{
-		Variant: variant, Entry: providerCacheNativeEntry, Files: []string{providerCacheNativeEntry},
+		Variant: variant, Entry: entry, Files: []string{entry}, BuiltHere: target.builtHere,
 		Behavior: behavior, Format: format, Generation: filepath.Base(target.productDirectory),
-		SourceForm: catalogForm(target.sourceBehavior, target.sourceFormat),
+		SourceForm: catalogForm(target.sourceBehavior, target.sourceFormat), Selection: target.selection,
 	}
 }
 
@@ -1221,6 +1279,8 @@ func (r *providerRefresher) buildProduct(task *providerRefreshTask, group *provi
 		}
 	}
 	switch product.Variant {
+	case "mapped", "library":
+		return providerRefreshPendingRecompile, nil
 	case "compiled":
 		compilation := compileRuleProviderPayload(content, target.sourceBehavior, target.sourceFormat)
 		if compilation.Reason != "" || compilation.Behavior != product.Behavior {
@@ -1229,6 +1289,9 @@ func (r *providerRefresher) buildProduct(task *providerRefreshTask, group *provi
 		group.writes = []refreshWrite{{product.Entry, compilation.artifact}}
 		product.Count = compilation.Rules
 	case "indexed":
+		if stagingMapsRuleSets {
+			return providerRefreshPendingRecompile, nil
+		}
 		if len(product.Files) < 2 {
 			return providerRefreshPendingRecompile, nil
 		}
@@ -1277,6 +1340,24 @@ func commitProducts(builds []*providerProductBuild) (count int, err error) {
 		if err := os.MkdirAll(build.directory, 0o700); err != nil {
 			restore()
 			return 0, err
+		}
+		for _, move := range build.moves {
+			path := filepath.Join(build.directory, move.name)
+			saved := path + ".rollback"
+			_ = os.Remove(saved)
+			existed := true
+			if err := os.Link(path, saved); err != nil {
+				if !errors.Is(err, os.ErrNotExist) {
+					restore()
+					return 0, err
+				}
+				existed = false
+			}
+			rollbacks = append(rollbacks, rollback{path, saved, existed})
+			if err := os.Rename(move.from, path); err != nil {
+				restore()
+				return 0, err
+			}
 		}
 		for _, write := range build.writes {
 			path := filepath.Join(build.directory, write.name)
@@ -1327,7 +1408,7 @@ func commitProducts(builds []*providerProductBuild) (count int, err error) {
 	return count, nil
 }
 
-func (r *providerRefresher) applySeed(task *providerRefreshTask, seed *providerSeed) providerRefreshResult {
+func (r *providerRefresher) applySeed(task *providerRefreshTask, seed *providerSeed, name string) providerRefreshResult {
 	entry := providerCache.get(task.requestKey)
 	var fetchedAt time.Time
 	if seed.FetchedAt > 0 {
@@ -1357,6 +1438,15 @@ func (r *providerRefresher) applySeed(task *providerRefreshTask, seed *providerS
 	r.noteSubscriptionInfo(task, seed.SubscriptionInfo)
 	switch seed.Payload {
 	case "source", "":
+		if seed.BuildHere && task.kind == "proxy" {
+			r.locked(func() {
+				for _, target := range task.targets {
+					if target.product == nil && target.awaits == "library" || target.product != nil && target.product.Stopgap {
+						target.builtHere = true
+					}
+				}
+			})
+		}
 		sha, _, err := hashFile(seed.path)
 		if err != nil {
 			discard()
@@ -1374,6 +1464,15 @@ func (r *providerRefresher) applySeed(task *providerRefreshTask, seed *providerS
 	case "mrs":
 		defer discard()
 		return r.applyCompiledSeed(task, seed, fetchedAt)
+	case "mapped":
+		defer discard()
+		return r.applyMappedSeed(task, seed, fetchedAt, name)
+	case "indexed":
+		defer discard()
+		return r.applyIndexedSeed(task, entry, seed, fetchedAt, name)
+	case "library":
+		defer discard()
+		return r.applyLibrarySeed(task, seed, fetchedAt, name)
 	default:
 		discard()
 		return r.fail(task, fetchedAt, fmt.Errorf("unknown seed payload %q", seed.Payload))
@@ -1502,4 +1601,251 @@ func liveFileProvider(kind, name string) (liveProvider, bool) {
 func payloadSHA256(payload []byte) string {
 	digest := sha256.Sum256(payload)
 	return hex.EncodeToString(digest[:])
+}
+
+func (r *providerRefresher) applyMappedSeed(task *providerRefreshTask, seed *providerSeed, fetchedAt time.Time, name string) providerRefreshResult {
+	target := task.targetNamed(name)
+	if formOf(target) != "mapped" || seed.SourceSHA256 == "" || len(r.productFor(target).Files) < 2 {
+		return r.fail(task, fetchedAt, errors.New("this set does not run mapped; send its source"))
+	}
+	group := r.groupOf(task, target)
+	behavior, err := ruleBehavior(group.product.Behavior)
+	if err != nil {
+		return r.fail(task, fetchedAt, err)
+	}
+	sum, err := ruleprovider.ClashCheckMappedSet(seed.path, behavior)
+	if err != nil {
+		return r.fail(task, fetchedAt, fmt.Errorf("the seed is not a mapped set of this set's behavior: %w", err))
+	}
+	stubType := ruleprovider.ClashDomainSetStubType
+	if behavior == P.IPCIDR {
+		stubType = ruleprovider.ClashIPCidrSetStubType
+	}
+	setName := group.product.Files[1]
+	stub := ruleprovider.ClashMappedSetStub(stubType, setName, sum, seed.Count) + "\n"
+	group.moves = []refreshMove{{name: setName, from: seed.path}}
+	group.writes = []refreshWrite{{group.product.Entry, []byte(stub)}}
+	group.product.Count = seed.Count
+	group.product.SourceSHA256 = seed.SourceSHA256
+	return r.commitSeededProduct(task, group, seed, fetchedAt)
+}
+
+func (r *providerRefresher) commitSeededProduct(task *providerRefreshTask, group *providerProductBuild, seed *providerSeed, fetchedAt time.Time) providerRefreshResult {
+	target := group.targets[0]
+	countBefore := r.liveCount(task)
+	var countAfter int
+	var commitErr error
+	committed := r.locked(func() {
+		countAfter, commitErr = commitProducts([]*providerProductBuild{group})
+		if commitErr != nil {
+			return
+		}
+		_ = os.Remove(providerCache.sourcePath(task.requestKey))
+		for _, target := range group.targets {
+			target.product = group.product
+			if live, ok := liveFileProvider(target.kind, target.name); ok && !fetchedAt.IsZero() {
+				live.SetUpdatedAt(fetchedAt)
+			}
+		}
+		everyForm := true
+		for _, other := range task.targets {
+			if other.product == nil || other.product.SourceSHA256 != seed.SourceSHA256 {
+				everyForm = false
+			}
+		}
+		task.failures = 0
+		r.reschedule(task, time.Now(), false)
+		r.recordLocked(task, func(cached *providerCacheEntry) {
+			cached.SourceSHA256, cached.SourceBytes = seed.SourceSHA256, 0
+			cached.LastCheckedAt, cached.LastChangedAt = unixOrZero(fetchedAt), time.Now().Unix()
+			if cached.PendingSHA256 == seed.SourceSHA256 && cached.PendingCheckedAt > cached.LastCheckedAt {
+				cached.LastCheckedAt = cached.PendingCheckedAt
+			}
+			if !fetchedAt.IsZero() {
+				cached.LastChangedAt = fetchedAt.Unix()
+			}
+			cached.RebuildFailedSHA256 = ""
+			cached.ETag, cached.ETagSHA256 = "", ""
+			if seed.ETag != "" {
+				cached.ETag, cached.ETagSHA256 = seed.ETag, seed.SourceSHA256
+			}
+			products := map[string]*providerCacheProduct{target.productKey: group.product}
+			for key, product := range cached.Products {
+				if key != target.productKey && product != nil {
+					products[key] = product
+				}
+			}
+			cached.Products = products
+			cached.Result, cached.Error, cached.PendingReason = providerRefreshUpdated, "", ""
+			if everyForm && settlesWaitLocked(cached, seed.SourceSHA256, unixOrZero(fetchedAt)) {
+				clearPendingLocked(cached)
+				_ = os.Remove(providerCache.pendingPath(task.requestKey))
+			}
+			reflectWaitLocked(cached)
+			cached.CountBefore, cached.CountAfter = countBefore, countAfter
+		})
+	})
+	if !committed {
+		return providerRefreshResult{stale: true}
+	}
+	if commitErr != nil {
+		return r.fail(task, fetchedAt, commitErr)
+	}
+	return providerRefreshResult{Result: providerRefreshUpdated, CountBefore: countBefore, CountAfter: countAfter, CheckedAt: unixOrZero(fetchedAt)}
+}
+
+func (r *providerRefresher) applyIndexedSeed(task *providerRefreshTask, entry *providerCacheEntry, seed *providerSeed, fetchedAt time.Time, name string) providerRefreshResult {
+	target := task.targetNamed(name)
+	if formOf(target) != "indexed" || seed.SourceSHA256 == "" || len(r.productFor(target).Files) < 2 {
+		return r.fail(task, fetchedAt, errors.New("this set does not run indexed; send its source"))
+	}
+	pending := providerCache.pendingPath(task.requestKey)
+	if entry == nil || entry.PendingSHA256 != seed.SourceSHA256 || !regularFileExists(pending) {
+		return r.fail(task, fetchedAt, errors.New("the content this index was compiled from does not wait here"))
+	}
+	checksum, err := ruleprovider.ClashCheckClassicalIndexFile(seed.path)
+	if err != nil {
+		return r.fail(task, fetchedAt, fmt.Errorf("the seed is not a classical index: %w", err))
+	}
+	format, err := P.ParseRuleFormat(strings.TrimSpace(target.sourceFormat))
+	if err != nil || format == P.MrsRule {
+		return r.fail(task, fetchedAt, errors.New("this set is not read as text"))
+	}
+	group := r.groupOf(task, target)
+	textName := group.product.Files[1]
+	indexName := textName + providerRuntimeIndexSuffix
+	textCopy, err := linkIntoIncoming(pending)
+	if err != nil {
+		return r.fail(task, fetchedAt, err)
+	}
+	defer os.Remove(textCopy)
+	stub := ruleprovider.ClashClassicalIndexStub(indexName, checksum, textName, format)
+	if format == P.YamlRule {
+		stub = "payload:\n  - '" + stub + "'\n"
+	} else {
+		stub += "\n"
+	}
+	group.moves = []refreshMove{{name: textName, from: textCopy}, {name: indexName, from: seed.path}}
+	group.writes = []refreshWrite{{group.product.Entry, []byte(stub)}}
+	group.product.IndexChecksum = checksum
+	group.product.Count = seed.Count
+	group.product.SourceSHA256 = seed.SourceSHA256
+	return r.commitSeededProduct(task, group, seed, fetchedAt)
+}
+
+func (task *providerRefreshTask) targetNamed(name string) *providerRefreshTarget {
+	for _, target := range task.targets {
+		if target.name == name {
+			return target
+		}
+	}
+	return task.targets[0]
+}
+
+func (r *providerRefresher) groupOf(task *providerRefreshTask, target *providerRefreshTarget) *providerProductBuild {
+	groups := r.groups(task)
+	for _, group := range groups {
+		for _, member := range group.targets {
+			if member == target {
+				return group
+			}
+		}
+	}
+	return groups[0]
+}
+
+func linkIntoIncoming(path string) (string, error) {
+	directory := filepath.Join(providerCache.rootDirectory(), providerRefreshIncomingDirectory)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return "", err
+	}
+	second := filepath.Join(directory, fmt.Sprintf("link-%d-%d", os.Getpid(), time.Now().UnixNano()))
+	if err := os.Link(path, second); err == nil {
+		return second, nil
+	}
+	source, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer source.Close()
+	copied, err := os.OpenFile(second, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return "", err
+	}
+	if _, err := io.Copy(copied, source); err != nil {
+		copied.Close()
+		_ = os.Remove(second)
+		return "", err
+	}
+	return second, copied.Close()
+}
+
+func runsAsTextUntilTheApp(task *providerRefreshTask, size int64) bool {
+	if size <= 0 || size > startTextSeedLimit {
+		return false
+	}
+	for _, target := range task.targets {
+		if target.product != nil {
+			return false
+		}
+		if target.kind == "rule" && !strings.EqualFold(strings.TrimSpace(target.sourceFormat), "text") {
+			return false
+		}
+	}
+	return true
+}
+
+func stopgapProduct(target *providerRefreshTarget) *providerCacheProduct {
+	variant, behavior, format := "proxy", target.sourceBehavior, target.sourceFormat
+	if target.kind == "rule" {
+		variant, behavior, format = "text", strings.ToLower(strings.TrimSpace(target.sourceBehavior)), "text"
+	}
+	return &providerCacheProduct{
+		Variant: variant, Entry: awaitedEntry, Files: []string{awaitedEntry}, Stopgap: true,
+		Behavior: behavior, Format: format, Generation: filepath.Base(target.productDirectory),
+		SourceForm: catalogForm(target.sourceBehavior, target.sourceFormat), Selection: target.selection,
+	}
+}
+
+func taskBuiltHere(task *providerRefreshTask) bool {
+	for _, target := range task.targets {
+		if !target.builtHere {
+			return false
+		}
+	}
+	return len(task.targets) > 0
+}
+
+func taskWaitsForTheApp(task *providerRefreshTask) bool {
+	if !stagingMapsRuleSets || len(task.targets) == 0 {
+		return false
+	}
+	for _, target := range task.targets {
+		if form := formOf(target); form != "mapped" && form != "indexed" && form != "library" {
+			return false
+		}
+	}
+	return true
+}
+
+func (r *providerRefresher) applyLibrarySeed(task *providerRefreshTask, seed *providerSeed, fetchedAt time.Time, name string) providerRefreshResult {
+	target := task.targetNamed(name)
+	if formOf(target) != "library" || seed.SourceSHA256 == "" || len(r.productFor(target).Files) < 2 {
+		return r.fail(task, fetchedAt, errors.New("this subscription does not run from a node library; send its source"))
+	}
+	sum, ok := ruleprovider.ClashMappedSetChecksumOf(seed.path)
+	if !ok {
+		return r.fail(task, fetchedAt, errors.New("the seed is not a node library"))
+	}
+	if err := outbound.CheckNodeLibraryFile(seed.path, sum); err != nil {
+		return r.fail(task, fetchedAt, fmt.Errorf("the seed is not a node library: %w", err))
+	}
+	group := r.groupOf(task, target)
+	libraryName := group.product.Files[1]
+	stub := adapterprovider.ClashNodeLibraryStub(libraryName, sum, seed.Count) + "\n"
+	group.moves = []refreshMove{{name: libraryName, from: seed.path}}
+	group.writes = []refreshWrite{{group.product.Entry, []byte(stub)}}
+	group.product.Count = seed.Count
+	group.product.SourceSHA256 = seed.SourceSHA256
+	return r.commitSeededProduct(task, group, seed, fetchedAt)
 }

@@ -95,6 +95,7 @@ func TestStateChangingPrivateRoutesFollowTheExposureTable(t *testing.T) {
 	proxyShareStart := probe{http.MethodPut, "/clash/v1/proxy-share", "application/json", []byte(`{}`)}
 	proxyShareStop := probe{http.MethodDelete, "/clash/v1/proxy-share", "", nil}
 	sideUpdate := probe{http.MethodPut, "/clash/v1/providers/side-update", "application/octet-stream", []byte("x")}
+	healthCheck := probe{http.MethodPost, "/clash/v1/providers/health-check", "", nil}
 	reached := func(client *http.Client, base, secret string, p probe) bool {
 		code, _ := requestOver(t, client, p.method, base+p.path, secret, p.contentType, p.body)
 		if code == http.StatusUnauthorized {
@@ -113,15 +114,21 @@ func TestStateChangingPrivateRoutesFollowTheExposureTable(t *testing.T) {
 			t.Errorf("the App lost %s %s", p.method, p.path)
 		}
 	}
+	if !reached(tcp, configBase, "config", healthCheck) || !reached(unix, "http://unix", "", healthCheck) {
+		t.Errorf("%s %s is not served beside upstream's healthcheck route", healthCheck.method, healthCheck.path)
+	}
 	managedPort := freePort(t)
 	apply(t, map[string]any{"mode": "local", "httpPort": managedPort, "secret": "app", "generation": 1})
 	managedBase := fmt.Sprintf("http://127.0.0.1:%d", managedPort)
 	if !reached(tcp, managedBase, "app", providerUpdate) {
-		t.Error("the External Controller cannot update a provider; upstream's PUT /providers only rereads the cache here")
+		t.Error("the External Controller cannot ask the refresher for a provider's check with its result")
 	}
 	for _, p := range []probe{proxyShareStart, proxyShareStop, sideUpdate} {
 		if reached(tcp, managedBase, "app", p) {
 			t.Errorf("the External Controller reaches %s %s; a key holder must not widen its own reach", p.method, p.path)
 		}
+	}
+	if !reached(tcp, managedBase, "app", healthCheck) {
+		t.Errorf("the External Controller does not serve %s %s, which upstream's healthcheck route is served beside", healthCheck.method, healthCheck.path)
 	}
 }

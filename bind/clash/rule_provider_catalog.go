@@ -1,9 +1,11 @@
 package clash
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -55,6 +57,12 @@ func ruleProviderCatalog(configContent, resourceMapJSON string, compileRuleSets 
 	appParseMu.Lock()
 	defer appParseMu.Unlock()
 	policy := currentRuntimePolicy(true)
+	catalogStubDirectory = filepath.Join(C.Path.HomeDir(), ProviderRefreshDirectoryName, "catalog", fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano()))
+	defer func() {
+		_ = os.RemoveAll(catalogStubDirectory)
+		_ = os.Remove(filepath.Dir(catalogStubDirectory))
+		catalogStubDirectory = ""
+	}()
 	document, loads, err := ruleCatalogDocument(configContent, resources, policy, compileRuleSets)
 	if err != nil {
 		return nil, err
@@ -140,6 +148,7 @@ func ruleCatalogDocument(content string, resources resourceMap, policy appleRunt
 	canonicalizeProviderDefinitionKeysInDocument(root)
 	collisions := providerNamespaceCollisions(root)
 	remote := remoteProviderDefinitions(root, "rule-providers")
+	resources.ProviderFetchedAt = publishedRefreshDefinitions(root, "rule-providers", "rule", remote, resources.ProviderFetchedAt)
 	if err := rewriteProviders(root, "rule-providers", "rule", resources.ProviderPaths, collisions); err != nil {
 		return "", nil, err
 	}
@@ -154,7 +163,7 @@ func ruleCatalogDocument(content string, resources resourceMap, policy appleRunt
 			if kind, _ := definition["type"].(string); !strings.EqualFold(kind, "file") {
 				continue
 			}
-			native, _ := definition[providerCatalogNativeField].(bool)
+			startsAs, _ := definition[providerCatalogNativeField].(string)
 			delete(definition, providerCatalogNativeField)
 			sourceValue, _ := definition["path"].(string)
 			if strings.TrimSpace(sourceValue) == "" {
@@ -163,8 +172,8 @@ func ruleCatalogDocument(content string, resources resourceMap, policy appleRunt
 			sourcePath := C.Path.Resolve(sourceValue)
 			info, err := os.Stat(sourcePath)
 			if err != nil {
-				if native {
-					definition["format"] = "mrs"
+				if startsAs != "" {
+					definition["format"] = startsAs
 					behavior, _ := definition["behavior"].(string)
 					definition["behavior"] = strings.ToLower(strings.TrimSpace(behavior))
 				}
@@ -187,13 +196,24 @@ func ruleCatalogDocument(content string, resources resourceMap, policy appleRunt
 					if len(stripped) > 0 {
 						served = prepared
 					}
-					if (compileRuleSets || native) && len(payload) > 0 {
+					if (compileRuleSets || startsAs != "") && len(payload) > 0 {
 						if compilation := compileRuleProviderPayload(served, behavior, format); compilation.Reason == "" {
-							definition["format"] = "mrs"
-							definition["behavior"] = compilation.Behavior
-							served = compilation.artifact
+							if stub, ok := catalogMappedStub(name, compilation.artifact, compilation.Behavior, compileRuleSets || startsAs == "text"); ok {
+								definition["path"], definition["format"], definition["behavior"] = stub.path, "text", compilation.Behavior
+								served = stub.bytes
+							} else {
+								definition["format"] = "mrs"
+								definition["behavior"] = compilation.Behavior
+								served = compilation.artifact
+							}
 						}
 					}
+				}
+			}
+			if strings.EqualFold(strings.TrimSpace(format), "mrs") {
+				if stub, ok := catalogMappedStub(name, payload, strings.ToLower(strings.TrimSpace(behavior)), compileRuleSets); ok {
+					definition["path"], definition["format"], definition["behavior"] = stub.path, "text", strings.ToLower(strings.TrimSpace(behavior))
+					served = stub.bytes
 				}
 			}
 			loads[name] = ruleLoad{content: served, updatedAt: info.ModTime()}
@@ -207,4 +227,37 @@ func ruleCatalogDocument(content string, resources resourceMap, policy appleRunt
 		return "", nil, fmt.Errorf("clash: encode rule catalog document: %w", err)
 	}
 	return string(out), loads, nil
+}
+
+type catalogStub struct {
+	path  string
+	bytes []byte
+}
+
+var catalogStubDirectory string
+
+func catalogMappedStub(name string, mrs []byte, behavior string, compileRuleSets bool) (catalogStub, bool) {
+	if !compileRuleSets || !stagingMapsRuleSets || !mappable(behavior) || len(mrs) == 0 {
+		return catalogStub{}, false
+	}
+	directory := catalogStubDirectory
+	if directory == "" {
+		return catalogStub{}, false
+	}
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return catalogStub{}, false
+	}
+	textName := fmt.Sprintf("%x.provider", sha256.Sum256([]byte(name+"\x00"+string(mrs))))
+	stubName, _, err := stageMappedSet(mrs, behavior, directory, textName, func(path string, data []byte) error {
+		return writeRuntimeProviderFile(path, data)
+	})
+	if err != nil || stubName == "" {
+		return catalogStub{}, false
+	}
+	path := filepath.Join(directory, stubName)
+	stub, err := os.ReadFile(path)
+	if err != nil {
+		return catalogStub{}, false
+	}
+	return catalogStub{path: path, bytes: stub}, true
 }

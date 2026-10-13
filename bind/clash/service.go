@@ -59,11 +59,11 @@ type BoxService struct {
 	inboundCount             int32
 	outboundCount            int32
 	dnsTransports            dnsTransportSnapshot
-	outboundEndpointKinds    map[string]string
 	providerRuntime          *providerRuntime
 	refresher                *providerRefresher
 	refreshGeneration        uint64
 	refreshCancel            context.CancelFunc
+	sessionSweepCancel       context.CancelFunc
 	orphanedProviderRuntimes []*providerRuntime
 	proxyShare               *proxyShareRuntime
 	pauseCount               atomic.Uint64
@@ -94,9 +94,11 @@ func NewService(platform PlatformInterface) (*BoxService, error) {
 	if cacheDisabled {
 		return nil, bridgeSafeError(errors.New("clash: NewService is unavailable after App-only DisablePersistentCache Setup"))
 	}
+	tunnelProcess.Store(true)
 	platform = bridgeSafePlatform(platform)
 	logWriter := redirectLogs(platform)
 	armNEPacingForService(platform)
+	armNodeCatalog(platform)
 	installSocketHook(platform)
 	setUnscopedResolversArePhysical(!platform.UnderNetworkExtension())
 	installLocalZoneResolver(true)
@@ -154,7 +156,6 @@ func (s *BoxService) start(configContent string) (startErr error) {
 	setStartupBreadcrumbRecording(currentRuntimePolicy(s.platform.UnderNetworkExtension()).networkExtension)
 	startupStageCounting("bind:unmarshal-begin", int64(len(configContent)))
 	var startedDNSTransports dnsTransportSnapshot
-	startedOutboundEndpointKinds := snapshotOutboundEndpointKinds(configContent)
 	var startedProviderRuntime *providerRuntime
 	done := make(chan error, 1)
 	var pendingTunOpen chan tunOpenResult
@@ -186,9 +187,11 @@ func (s *BoxService) start(configContent string) (startErr error) {
 		debug.FreeOSMemory()
 		s.startFootprintBytes = readFootprintForReload()
 		s.configLength = len(configContent)
-		s.providerBytes = providerPayloadBytes(configContent)
 		logFootprint("before parsing the configuration")
-		cfg, runtime, err := parseConfigForIOSRuntime(configContent, s.platform.UnderNetworkExtension(), deviationEntryStart)
+		decoded := decodeConfigText(configContent)
+		s.providerBytes = decoded.providerBytes()
+		cfg, runtime, err := parseDecodedConfigForIOSRuntime(configContent, decoded, s.platform.UnderNetworkExtension(), deviationEntryStart)
+		decoded = nil
 		logFootprint("after parsing the configuration")
 		startupPhase("config-parsed")
 		if err != nil {
@@ -283,11 +286,12 @@ func (s *BoxService) start(configContent string) (startErr error) {
 	s.resumeSTUNSessions()
 	s.startTimeUnix = time.Now().Unix()
 	s.inboundCount = runtimeInboundCount()
-	s.outboundCount = int32(len(tunnel.Proxies()))
+	s.outboundCount = int32(len(tunnel.Proxies()) + runningNodeCount())
 	s.dnsTransports = startedDNSTransports
-	s.outboundEndpointKinds = startedOutboundEndpointKinds
 	s.providerRuntime = startedProviderRuntime
 	s.startProviderRefreshLocked()
+	s.startSessionSweepLocked()
+	refreshNodeCatalog()
 	setOOMEvidenceCoreState(true, s.startTimeUnix, s.inboundCount, s.outboundCount)
 	publishCoreService(s)
 	startupPhase("start-return-done")
@@ -380,7 +384,7 @@ func (s *BoxService) reload(configContent string) error {
 	if !s.running {
 		return classify(CoreOutcomeRestart, errors.New("clash: Reload before Start"))
 	}
-	verdict := s.judgeReloadAgainstTheCeiling(configContent)
+	verdict, decoded := s.judgeReloadAgainstTheCeiling(configContent)
 	if verdict.Reason == reloadRefusedMemory {
 		return classify(CoreOutcomeMemory, reloadMemoryRefusal(verdict))
 	}
@@ -412,7 +416,12 @@ func (s *BoxService) reload(configContent string) error {
 			}
 		}()
 		underNE := s.platform.UnderNetworkExtension()
-		cfg, runtime, err := parseConfigForIOSRuntime(configContent, underNE, deviationEntryReload)
+		if decoded == nil {
+			decoded = decodeConfigText(configContent)
+		}
+		providerSources := decoded.providerSources
+		cfg, runtime, err := parseDecodedConfigForIOSRuntime(configContent, decoded, underNE, deviationEntryReload)
+		decoded = nil
 		if hook := reloadTestAfterParse; hook != nil {
 			hook()
 		}
@@ -475,15 +484,15 @@ func (s *BoxService) reload(configContent string) error {
 			previousProviderRuntime.close()
 		}
 		s.startProviderRefreshLocked()
+		refreshNodeCatalog()
 		s.inboundCount = s.runtimeInboundCountLocked()
-		s.outboundCount = int32(len(tunnel.Proxies()))
+		s.outboundCount = int32(len(tunnel.Proxies()) + runningNodeCount())
 		s.dnsTransports = snapshotDNSTransports(cfg)
-		s.outboundEndpointKinds = snapshotOutboundEndpointKinds(configContent)
 		s.configLength = len(configContent)
 		if s.candidateProviderBytes >= 0 {
 			s.providerBytes = s.candidateProviderBytes
 		} else {
-			s.providerBytes = providerPayloadBytes(configContent)
+			s.providerBytes = providerSources.bytes()
 		}
 		setOOMEvidenceCoreState(true, s.startTimeUnix, s.inboundCount, s.outboundCount)
 		debug.FreeOSMemory()
@@ -579,13 +588,13 @@ func (s *BoxService) Close() error {
 		s.tunFd = -1
 	}
 	s.resetTunState()
+	s.stopSessionSweepLocked()
 	s.running = false
 	s.runningConfigSHA256 = ""
 	s.startTimeUnix = 0
 	s.inboundCount = 0
 	s.outboundCount = 0
 	s.dnsTransports = dnsTransportSnapshot{}
-	s.outboundEndpointKinds = nil
 	activeCoreCount.Add(-1)
 	setOOMEvidenceCoreState(false, 0, 0, 0)
 	stopLogRedirect(s.logWriter)
@@ -652,6 +661,8 @@ func (s *BoxService) RuntimeDiagnosticsJSON() string {
 	memory := currentRuntimeMemorySnapshot()
 	nat64 := nat64DiagnosticsSnapshot()
 	admission := tunnel.TCPConnectionAdmissionSnapshot()
+	udpAdmission := tunnel.UDPSessionAdmissionSnapshot()
+	endpointKinds, endpointKindsUnnamed := s.outboundEndpointKindsLocked()
 	diagnostics := map[string]any{
 		"processIdentifier":                   os.Getpid(),
 		"startTimeUnix":                       s.startTimeUnix,
@@ -664,11 +675,17 @@ func (s *BoxService) RuntimeDiagnosticsJSON() string {
 		"dnsProxyTransportTypes":              s.dnsTransports.proxyServer,
 		"dnsDirectTransportTypes":             s.dnsTransports.direct,
 		"dnsPolicyTransportTypes":             s.dnsTransports.policy,
-		"outboundEndpointKinds":               s.outboundEndpointKinds,
+		"outboundEndpointKinds":               endpointKinds,
+		"outboundEndpointKindsUnnamed":        endpointKindsUnnamed,
 		"connectionCount":                     connectionCount,
 		"tcpConnectionAdmissionLimit":         admission.Limit,
 		"tcpConnectionAdmissionActive":        admission.Active,
 		"tcpConnectionAdmissionRejectedTotal": admission.Rejected,
+		"tcpConnectionAdmissionEvictedTotal":  admission.Evicted,
+		"udpSessionAdmissionLimit":            udpAdmission.Limit,
+		"udpSessionAdmissionActive":           udpAdmission.Active,
+		"udpSessionAdmissionRejectedTotal":    udpAdmission.Rejected,
+		"udpSessionAdmissionEvictedTotal":     udpAdmission.Evicted,
 		"running":                             s.running,
 		"pauseCount":                          s.pauseCount.Load(),
 		"wakeCount":                           s.wakeCount.Load(),
@@ -694,6 +711,13 @@ func (s *BoxService) RuntimeDiagnosticsJSON() string {
 	}
 	if runtimeSetup.softMemoryLimit > 0 {
 		diagnostics["softMemoryLimit"] = runtimeSetup.softMemoryLimit
+	}
+	if counts := probeAdmissionCounts.Load(); counts != nil {
+		interactive, background, interactiveWaiting, backgroundWaiting := (*counts)()
+		diagnostics["probeAdmission"] = map[string]int{
+			"interactiveInFlight": interactive, "backgroundInFlight": background,
+			"interactiveWaiting": interactiveWaiting, "backgroundWaiting": backgroundWaiting,
+		}
 	}
 	if conf := coreListener.GetTunConf(); conf.Enable {
 		diagnostics["tunStack"] = conf.Stack.String()

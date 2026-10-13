@@ -1,10 +1,12 @@
 package clash
 
 import (
+	"bytes"
 	"encoding/json"
 	"sync"
 	"time"
 
+	"github.com/ProjectClash/Clash/adapter"
 	P "github.com/ProjectClash/Clash/constant/provider"
 	"github.com/ProjectClash/Clash/tunnel"
 	"github.com/ProjectClash/Clash/tunnel/statistic"
@@ -53,7 +55,15 @@ func ConnectionsJSON() string {
 }
 
 func ProxiesJSON() string {
-	return bridgeSafeString(mustJSON(map[string]any{"proxies": tunnel.Proxies()}))
+	if library := tunnel.ProxyLibrary(); library != nil {
+		var b bytes.Buffer
+		b.WriteString(`{"proxies":`)
+		if err := adapter.WriteProxiesJSON(&b, tunnel.Proxies(), library); err == nil {
+			b.WriteByte('}')
+			return bridgeSafeString(b.String())
+		}
+	}
+	return bridgeSafeString(proxiesJSON(tunnel.Proxies()))
 }
 
 func RuleProvidersJSON() string {

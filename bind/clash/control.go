@@ -60,7 +60,7 @@ func mustStatusRanges(spec string) utils.IntRanges[uint16] {
 }
 
 func URLTest(name, url string) int32 {
-	proxy, ok := tunnel.Proxies()[name]
+	proxy, ok := lookupRunningProxy(name)
 	if !ok {
 		proxy, ok = proxyFromProviders(name)
 		if !ok {
@@ -72,16 +72,11 @@ func URLTest(name, url string) int32 {
 
 func proxyFromProviders(name string) (C.Proxy, bool) {
 	var found C.Proxy
-	for _, prov := range tunnel.Providers() {
-		for _, proxy := range prov.Proxies() {
-			if proxy.Name() != name {
-				continue
-			}
-			if found != nil {
-				return nil, false
-			}
-			found = proxy
+	for _, proxy := range providerNodesNamed(name) {
+		if found != nil {
+			return nil, false
 		}
+		found = proxy
 	}
 	return found, found != nil
 }

@@ -32,7 +32,7 @@ func collectScalarDefaults(value reflect.Value, prefix string, depth int, into m
 			continue
 		}
 		tag := strings.Split(field.Tag.Get("yaml"), ",")[0]
-		if tag == "" || tag == "-" {
+		if tag == "" || tag == "-" || clashPrivateKey(tag) {
 			continue
 		}
 		key := tag

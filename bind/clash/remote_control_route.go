@@ -21,6 +21,7 @@ var controllerCapabilities = []string{
 	"deviations-v1",
 	"mode-stream-v1",
 	"stun-v1",
+	"provider-health-check-v1",
 }
 
 func init() {

@@ -87,7 +87,7 @@ func TestDeferredCompileDoesNotReplaceBytesUnderAParsedProvider(t *testing.T) {
 			if closer, ok := nextProvider.(interface{ Close() error }); ok {
 				defer closer.Close()
 			}
-			if got, _ := nextProvider.(interface{ MarshalJSON() ([]byte, error) }).MarshalJSON(); !strings.Contains(string(got), `"format":"MrsRule"`) {
+			if got, _ := nextProvider.(interface{ MarshalJSON() ([]byte, error) }).MarshalJSON(); !strings.Contains(string(got), `"behavior":"Domain"`) {
 				t.Fatalf("next start did not read the compiled artifact: %s", got)
 			}
 		})

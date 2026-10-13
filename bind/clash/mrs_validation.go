@@ -97,21 +97,21 @@ func validateMRSForIOS(payload []byte, expectedBehavior P.RuleBehavior) error {
 func inspectMRSForIOS(payload []byte, expectedBehavior P.RuleBehavior) (int, error) {
 	decoder, err := zstd.NewReader(
 		bytes.NewReader(payload),
-		zstd.WithDecoderMaxMemory(uint64(maximumProviderResourceBytes)),
+		zstd.WithDecoderMaxMemory(uint64(providerContentBytes())),
 	)
 	if err != nil {
 		return 0, fmt.Errorf("open MRS zstd payload: %w", err)
 	}
 	defer decoder.Close()
 	decoded := &mrsDecodedReader{reader: decoder}
-	limited := &io.LimitedReader{R: decoded, N: int64(maximumProviderResourceBytes) + 1}
+	limited := &io.LimitedReader{R: decoded, N: int64(providerContentBytes()) + 1}
 	count, structuralErr := inspectMRSStream(&mrsCursor{reader: limited}, expectedBehavior)
 	_, _ = io.Copy(io.Discard, limited)
 	if decoded.err != nil {
 		return 0, fmt.Errorf("decode MRS payload: %w", decoded.err)
 	}
-	if decoded.read == 0 || decoded.read > maximumProviderResourceBytes {
-		return 0, fmt.Errorf("decoded MRS payload exceeds the %d-byte iOS provider limit", maximumProviderResourceBytes)
+	if decoded.read == 0 || decoded.read > int64(providerContentBytes()) {
+		return 0, fmt.Errorf("decoded MRS payload exceeds the %d-byte iOS provider limit", providerContentBytes())
 	}
 	return count, structuralErr
 }

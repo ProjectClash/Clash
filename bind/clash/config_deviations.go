@@ -710,6 +710,38 @@ func collectConfigDeviations(mergedYAML string, policy appleRuntimePolicy) ([]co
 	if err := yaml.Unmarshal([]byte(mergedYAML), &root); err != nil {
 		return nil, err
 	}
+	return configDeviationRows(root, policy), nil
+}
+
+func deviationDocumentOf(root map[string]any) map[string]any {
+	if root == nil {
+		return nil
+	}
+	kept := make(map[string]any)
+	keep := func(key string) {
+		if value, present := root[key]; present {
+			kept[key] = value
+		}
+	}
+	for i := range deviationRules {
+		top, _, _ := strings.Cut(deviationRules[i].field, ".")
+		keep(top)
+	}
+	keep("rules")
+	keep("sub-rules")
+	if proxies, isList := root["proxies"].([]any); isList {
+		entries := make([]any, len(proxies))
+		for index, entry := range proxies {
+			if proxy, isMap := entry.(map[string]any); isMap && isEasyTierProxyType(proxy) {
+				entries[index] = map[string]any{"type": proxy["type"], "name": proxy["name"]}
+			}
+		}
+		kept["proxies"] = entries
+	}
+	return kept
+}
+
+func configDeviationRows(root map[string]any, policy appleRuntimePolicy) []configDeviation {
 	deviations := make([]configDeviation, 0)
 	for _, rule := range deviationRules {
 		if rule.ruleScan {
@@ -758,7 +790,7 @@ func collectConfigDeviations(mergedYAML string, policy appleRuntimePolicy) ([]co
 	}
 	deviations = append(deviations, ownerMetadataRuleDeviations(root, policy)...)
 	deviations = append(deviations, easyTierPlaceholderDeviations(root, policy)...)
-	return deviations, nil
+	return deviations
 }
 
 func ownerMetadataRuleDeviations(root map[string]any, policy appleRuntimePolicy) []configDeviation {

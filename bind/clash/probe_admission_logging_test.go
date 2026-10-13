@@ -44,26 +44,18 @@ func TestProbeAdmissionLogStormIsBounded(t *testing.T) {
 	old := log.Level()
 	log.SetLevel(log.INFO)
 	defer log.SetLevel(old)
-	samples := 0
-	cfg := testAdmissionConfig(func() int64 { samples++; return 49 << 20 })
-	hook := newProbeAdmissionHook(cfg)
+	hook := newProbeAdmissionHook(testAdmissionConfig(1, 1))
 	ctx, cancel := context.WithCancel(adapter.WithBackgroundProbe(context.Background()))
 	cancel()
 	events := captureProbeAdmissionLogs(t, func() {
 		for i := 0; i < 1000; i++ {
-			if err := hook(ctx); err != adapter.ErrURLTestDeferred {
+			if _, err := hook(ctx); err != adapter.ErrURLTestDeferred {
 				t.Fatalf("probe %d changed its outcome: %v", i, err)
 			}
 		}
 	})
 	if len(events) != 1 {
 		t.Errorf("1000 skipped probes emitted %d events, want one immediate summary", len(events))
-	}
-	if samples != 1 {
-		t.Errorf("diagnostics sampled footprint %d times, want one", samples)
-	}
-	if probeAdmissionCharges.Load() != 0 {
-		t.Fatal("canceled probes acquired charges")
 	}
 }
 
@@ -130,26 +122,27 @@ func TestProbeAdmissionLogFastPathAndHookReset(t *testing.T) {
 	old := log.Level()
 	log.SetLevel(log.INFO)
 	defer log.SetLevel(old)
-	samples := 0
-	cfg := testAdmissionConfig(func() int64 { samples++; return 0 })
+	cfg := testAdmissionConfig(1000, 1000)
 	hook := newProbeAdmissionHook(cfg)
 	events := captureProbeAdmissionLogs(t, func() {
 		for i := 0; i < 100; i++ {
-			if err := hook(context.Background()); err != nil {
+			end, err := hook(context.Background())
+			if err != nil {
 				t.Fatal(err)
 			}
+			end()
 		}
 	})
-	if len(events) != 0 || samples != 100 {
-		t.Fatalf("fast probes gained diagnostics: events=%d samples=%d", len(events), samples)
+	if len(events) != 0 {
+		t.Fatalf("probes admitted at once produced %d log events", len(events))
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	events = captureProbeAdmissionLogs(t, func() {
-		if err := hook(ctx); err != adapter.ErrURLTestDeferred {
+		if _, err := hook(ctx); err != adapter.ErrURLTestDeferred {
 			t.Fatal(err)
 		}
-		if err := newProbeAdmissionHook(cfg)(ctx); err != adapter.ErrURLTestDeferred {
+		if _, err := newProbeAdmissionHook(cfg)(ctx); err != adapter.ErrURLTestDeferred {
 			t.Fatal(err)
 		}
 	})
@@ -162,14 +155,12 @@ func TestProbeAdmissionLogDebugKeepsDetails(t *testing.T) {
 	old := log.Level()
 	log.SetLevel(log.DEBUG)
 	defer log.SetLevel(old)
-	samples := 0
-	cfg := testAdmissionConfig(func() int64 { samples++; return 49 << 20 })
-	hook := newProbeAdmissionHook(cfg)
+	hook := newProbeAdmissionHook(testAdmissionConfig(1, 1))
 	ctx, cancel := context.WithCancel(adapter.WithBackgroundProbe(context.Background()))
 	cancel()
 	events := captureProbeAdmissionLogs(t, func() {
 		for i := 0; i < 32; i++ {
-			if err := hook(ctx); err != adapter.ErrURLTestDeferred {
+			if _, err := hook(ctx); err != adapter.ErrURLTestDeferred {
 				t.Fatal(err)
 			}
 		}
@@ -179,22 +170,22 @@ func TestProbeAdmissionLogDebugKeepsDetails(t *testing.T) {
 		switch event.LogLevel {
 		case log.DEBUG:
 			details++
-			for _, field := range []string{"waited ", "verdict=3", "background=true", "footprint=51380224", "charges=0"} {
+			for _, field := range []string{"waited ", "verdict=3", "background=true", "in_flight=0/0", "waiting=0/0"} {
 				if !strings.Contains(event.Payload, field) {
 					t.Errorf("detail missing %q: %s", field, event.Payload)
 				}
 			}
 		case log.INFO:
 			summaries++
-			if !strings.Contains(event.Payload, "background_deferred=1") {
+			if !strings.Contains(event.Payload, "background_deferred=1") || !strings.Contains(event.Payload, "background_cap=1") {
 				t.Errorf("summary missing count: %s", event.Payload)
 			}
 		default:
 			t.Errorf("unexpected diagnostic level: %v", event.LogLevel)
 		}
 	}
-	if details != 32 || summaries != 1 || samples != 32 {
-		t.Fatalf("debug: details=%d summaries=%d samples=%d", details, summaries, samples)
+	if details != 32 || summaries != 1 {
+		t.Fatalf("debug: details=%d summaries=%d", details, summaries)
 	}
 }
 

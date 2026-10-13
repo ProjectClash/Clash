@@ -36,7 +36,7 @@ func compileRuleProviderUnguarded(sourcePath, behavior, format, outputPath strin
 	if !providerSourceContained(outputPath, home) {
 		return nil, bridgeSafeError(errors.New("clash: compiled rule provider destination is outside this app's container"))
 	}
-	source, err := readBoundedRegularFile(sourcePath, int64(maximumProviderResourceBytes), "rule provider")
+	source, err := readBoundedRegularFile(sourcePath, int64(providerContentBytes()), "rule provider")
 	if err != nil {
 		return nil, bridgeSafeError(fmt.Errorf("clash: read rule provider: %w", err))
 	}

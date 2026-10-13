@@ -15,6 +15,7 @@ import (
 )
 
 func TestSourceMRSSideUpdatePreservesLiveProvider(t *testing.T) {
+	withoutRuleSetMapping(t)
 	for _, tc := range []struct {
 		name, behavior, format, oldRule, newRule string
 		oldMeta, newMeta                         C.Metadata
@@ -148,6 +149,7 @@ func TestSourceMRSSideUpdatePreservesLiveProvider(t *testing.T) {
 }
 
 func TestSourceMRSStagingPreservesRecompileAndRouteSafety(t *testing.T) {
+	withoutRuleSetMapping(t)
 	for _, format := range []string{"mrs", "text", "yaml", ""} {
 		t.Run("format="+format, func(t *testing.T) {
 			opts := testOptions(t)
@@ -199,6 +201,7 @@ func TestSourceMRSStagingPreservesRecompileAndRouteSafety(t *testing.T) {
 }
 
 func TestSourceMRSSideUpdateRollsBackMissingLiveProvider(t *testing.T) {
+	withoutRuleSetMapping(t)
 	opts := testOptions(t)
 	if err := Setup(opts); err != nil {
 		t.Fatal(err)
@@ -231,4 +234,11 @@ func TestSourceMRSSideUpdateRollsBackMissingLiveProvider(t *testing.T) {
 	if _, err = os.Stat(entry.runtimePath + ".rollback"); !os.IsNotExist(err) {
 		t.Fatalf("rollback link not consumed: %v", err)
 	}
+}
+
+func withoutRuleSetMapping(t *testing.T) {
+	t.Helper()
+	previous := stagingMapsRuleSets
+	stagingMapsRuleSets = false
+	t.Cleanup(func() { stagingMapsRuleSets = previous })
 }

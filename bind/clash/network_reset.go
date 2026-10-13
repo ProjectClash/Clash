@@ -21,21 +21,14 @@ func resetEveryOutboundSession() int {
 		seen[adapter] = struct{}{}
 		adapters = append(adapters, adapter)
 	}
-	for _, proxy := range tunnel.Proxies() {
-		add(proxy)
-	}
-	for _, provider := range tunnel.Providers() {
-		for _, proxy := range provider.Proxies() {
-			add(proxy)
-		}
-	}
+	rangeHeldProxies(func(proxy C.Proxy) bool { add(proxy); return true })
 	return resetSessionsOf(adapters)
 }
 
 func resetSessionsOf(adapters []C.ProxyAdapter) int {
 	reset := 0
 	for _, adapter := range adapters {
-		if resetter, ok := adapter.(outbound.NetworkResetter); ok {
+		if resetter, ok := outbound.AsNetworkResetter(adapter); ok {
 			resetter.ResetNetwork()
 			reset++
 		}

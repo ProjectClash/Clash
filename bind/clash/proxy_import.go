@@ -92,7 +92,7 @@ var mihomoConfigurationKeys = &lazyValue[map[string]struct{}]{build: func() map[
 				collect(field.Type)
 				continue
 			}
-			if tag == "" || tag == "-" {
+			if tag == "" || tag == "-" || clashPrivateKey(tag) {
 				continue
 			}
 			keys[tag] = struct{}{}
@@ -318,12 +318,21 @@ func InspectProxyPayloadForIOS(payload []byte, context string) (*StringBox, erro
 }
 
 func inspectProxyPayloadForIOSUnguarded(payload []byte, context string, construct bool) (*StringBox, error) {
-	if len(payload) == 0 {
-		return nil, bridgeSafeError(fmt.Errorf("clash: proxy payload is empty"))
+	report, err := proxyImportReportOf(payload, context, construct)
+	if err != nil {
+		return nil, bridgeSafeError(err)
 	}
-	if len(payload) > maximumProviderResourceBytes {
-		return nil, bridgeSafeError(fmt.Errorf("clash: proxy payload is %d bytes, over the %d-byte limit",
-			len(payload), maximumProviderResourceBytes))
+	bridgedValue0, bridgedErr := encodeProxyImportReport(report)
+	return bridgedValue0, bridgeSafeError(bridgedErr)
+}
+
+func proxyImportReportOf(payload []byte, context string, construct bool) (proxyImportReport, error) {
+	if len(payload) == 0 {
+		return proxyImportReport{}, fmt.Errorf("clash: proxy payload is empty")
+	}
+	if limit := providerContentBytes(); len(payload) > limit {
+		return proxyImportReport{}, fmt.Errorf("clash: proxy payload is %d bytes, over the %d-byte limit",
+			len(payload), limit)
 	}
 	var contextNotice string
 	switch context {
@@ -335,24 +344,22 @@ func inspectProxyPayloadForIOSUnguarded(payload []byte, context string, construc
 
 	if report, matched, err := inspectProxyContainer(payload, context, construct); matched {
 		if err != nil {
-			return nil, bridgeSafeError(err)
+			return proxyImportReport{}, err
 		}
 		addProxyImportContextNotice(&report, contextNotice)
-		bridgedValue0, bridgedErr := encodeProxyImportReport(report)
-		return bridgedValue0, bridgeSafeError(bridgedErr)
+		return report, nil
 	}
 	if decoded, decodeErr := convert.TryDecodeBase64(string(bytes.TrimSpace(payload))); decodeErr == nil {
 		if report, matched, containerErr := inspectProxyContainer(decoded, context, construct); matched {
 			if containerErr != nil {
-				return nil, bridgeSafeError(containerErr)
+				return proxyImportReport{}, containerErr
 			}
 			addProxyImportContextNotice(&report, contextNotice)
-			bridgedValue0, bridgedErr := encodeProxyImportReport(report)
-			return bridgedValue0, bridgeSafeError(bridgedErr)
+			return report, nil
 		}
 	}
 	if context == "configuration" {
-		return nil, bridgeSafeError(fmt.Errorf("clash: configuration payload is not a recognized configuration container"))
+		return proxyImportReport{}, fmt.Errorf("clash: configuration payload is not a recognized configuration container")
 	}
 
 	text := string(payload)
@@ -366,10 +373,10 @@ func inspectProxyPayloadForIOSUnguarded(payload []byte, context string, construc
 	}
 	records := extractProxyImportRecords(text)
 	if len(records) == 0 {
-		return nil, bridgeSafeError(fmt.Errorf("clash: proxy payload format is unknown"))
+		return proxyImportReport{}, fmt.Errorf("clash: proxy payload format is unknown")
 	}
 	if context == "singleNode" && len(records) != 1 {
-		return nil, bridgeSafeError(fmt.Errorf("clash: single-node import contains %d records", len(records)))
+		return proxyImportReport{}, fmt.Errorf("clash: single-node import contains %d records", len(records))
 	}
 
 	capabilities := make(map[string]proxyImportCapability, len(proxyImportCapabilities))
@@ -462,8 +469,7 @@ func inspectProxyPayloadForIOSUnguarded(payload []byte, context string, construc
 		pending = nil
 	}
 	addProxyImportContextNotice(&report, contextNotice)
-	bridgedValue0, bridgedErr := encodeProxyImportReport(report)
-	return bridgedValue0, bridgeSafeError(bridgedErr)
+	return report, nil
 }
 
 func constructProxyForImport(proxy map[string]any, construct bool) (string, error) {
@@ -488,6 +494,64 @@ func ReadProxyPayloadForIOS(payload []byte, context string) (*StringBox, error) 
 		return nil, bridgeSafeError(err)
 	}
 	return out, nil
+}
+
+type proxyImportSummary struct {
+	Format           string                   `json:"format"`
+	Context          string                   `json:"context"`
+	Count            int                      `json:"count"`
+	Skipped          []proxyImportIssue       `json:"skipped"`
+	SkippedCount     int                      `json:"skippedCount"`
+	NotHonoured      []proxyImportIssue       `json:"notHonoured"`
+	NotHonouredCount int                      `json:"notHonouredCount"`
+	PayloadShape     *proxyImportPayloadShape `json:"payloadShape,omitempty"`
+}
+
+const proxyImportSummaryIssues = 50
+
+func InspectProxyPayloadSummaryForIOS(payload []byte, context string) (*StringBox, error) {
+	out, err := recoverAppCall("InspectProxyPayloadSummaryForIOS", func() (*StringBox, error) { return proxyImportSummaryOf(payload, context, true) })
+	if err != nil {
+		return nil, bridgeSafeError(err)
+	}
+	return out, nil
+}
+
+func ReadProxyPayloadSummaryForIOS(payload []byte, context string) (*StringBox, error) {
+	out, err := recoverAppCall("ReadProxyPayloadSummaryForIOS", func() (*StringBox, error) { return proxyImportSummaryOf(payload, context, false) })
+	if err != nil {
+		return nil, bridgeSafeError(err)
+	}
+	return out, nil
+}
+
+func proxyImportSummaryOf(payload []byte, context string, construct bool) (*StringBox, error) {
+	report, err := proxyImportReportOf(payload, context, construct)
+	if err != nil {
+		return nil, err
+	}
+	encoded, err := encodeProxyImportSummary(report)
+	if err != nil {
+		return nil, err
+	}
+	return WrapString(encoded), nil
+}
+
+func encodeProxyImportSummary(report proxyImportReport) (string, error) {
+	summary := proxyImportSummary{
+		Format: report.Format, Context: report.Context, Count: len(report.Proxies),
+		Skipped: report.Skipped[:min(len(report.Skipped), proxyImportSummaryIssues)], SkippedCount: len(report.Skipped),
+		NotHonoured: report.NotHonoured[:min(len(report.NotHonoured), proxyImportSummaryIssues)], NotHonouredCount: len(report.NotHonoured),
+		PayloadShape: report.PayloadShape,
+	}
+	if summary.Skipped == nil {
+		summary.Skipped = []proxyImportIssue{}
+	}
+	if summary.NotHonoured == nil {
+		summary.NotHonoured = []proxyImportIssue{}
+	}
+	encoded, err := json.Marshal(summary)
+	return string(encoded), err
 }
 
 func encodeProxyImportReport(report proxyImportReport) (*StringBox, error) {
@@ -560,12 +624,19 @@ func inspectProxyContainer(payload []byte, context string, construct bool) (prox
 		matched              bool
 		containerSkipped     []proxyImportIssue
 		containerNotHonoured [][]string
+		decoded              map[string]any
 	)
 	switch {
 	case looksLikeMihomoYAML(text):
 		matched = true
 		format = "mihomo-yaml"
-		proxies, err = parseMihomoProxyDocument(trimmed)
+		document, decodeErr := decodeMihomoDocument(trimmed)
+		if decodeErr == nil {
+			decoded = document
+			proxies, err = mihomoProxiesOf(document)
+		} else {
+			err = decodeErr
+		}
 	case trimmed[0] == '-':
 		if parsed, ok := parseBareMihomoProxySequence(trimmed); ok {
 			matched = true
@@ -598,7 +669,12 @@ func inspectProxyContainer(payload []byte, context string, construct bool) (prox
 		proxies, containerNotHonoured, ssdSkipped, err = parseSSDSubscription(text)
 		containerSkipped = append(containerSkipped, ssdSkipped...)
 	}
-	shape := classifyProxyImportDocument(trimmed)
+	var shape *proxyImportPayloadShape
+	if decoded != nil {
+		shape = describeProxyImportPayloadShape(decoded)
+	} else {
+		shape = classifyProxyImportDocument(trimmed)
+	}
 	if !matched {
 		if shape != nil && shape.IsConfiguration {
 			return proxyImportReport{
@@ -679,11 +755,17 @@ func inspectProxyContainer(payload []byte, context string, construct bool) (prox
 }
 
 func classifyProxyImportDocument(payload []byte) *proxyImportPayloadShape {
-	var document map[string]any
-	if err := yaml.Unmarshal(payload, &document); err != nil || len(document) == 0 {
+	document, err := decodeMihomoDocument(payload)
+	if err != nil || len(document) == 0 {
 		return nil
 	}
 	return describeProxyImportPayloadShape(document)
+}
+
+func decodeMihomoDocument(payload []byte) (map[string]any, error) {
+	var document map[string]any
+	err := yaml.ClashUnmarshal(payload, &document, yaml.ClashSequence{Key: "proxies", Item: reflect.TypeOf(map[string]any{})}, nil)
+	return document, err
 }
 
 func mihomoDocumentFormat(payload []byte) string {
@@ -699,11 +781,7 @@ func looksLikeMihomoYAML(text string) bool {
 	return mihomoProxyKeyPattern.get().MatchString(text)
 }
 
-func parseMihomoProxyDocument(payload []byte) ([]map[string]any, error) {
-	var document map[string]any
-	if err := yaml.Unmarshal(payload, &document); err != nil {
-		return nil, err
-	}
+func mihomoProxiesOf(document map[string]any) ([]map[string]any, error) {
 	raw, ok := document["proxies"]
 	if !ok {
 		raw = document["Proxy"]

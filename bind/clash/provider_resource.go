@@ -5,7 +5,9 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"reflect"
 	"strings"
+	"sync/atomic"
 
 	"github.com/ProjectClash/Clash/adapter"
 	proxyprovider "github.com/ProjectClash/Clash/adapter/provider"
@@ -19,6 +21,15 @@ import (
 
 const maximumProviderResourceBytes = 16 * 1024 * 1024
 
+var tunnelProcess atomic.Bool
+
+func providerContentBytes() int {
+	if tunnelProcess.Load() {
+		return maximumProviderResourceBytes
+	}
+	return maximumPendingCompileBytes
+}
+
 func DecryptAgeForIOS(payload []byte, secretKey string) ([]byte, error) {
 	out, err := recoverAppCall("DecryptAgeForIOS", func() ([]byte, error) { return decryptAgeForIOSUnguarded(payload, secretKey) })
 	if err != nil {
@@ -28,7 +39,7 @@ func DecryptAgeForIOS(payload []byte, secretKey string) ([]byte, error) {
 }
 
 func decryptAgeForIOSUnguarded(payload []byte, secretKey string) ([]byte, error) {
-	if len(payload) == 0 || len(payload) > maximumProviderResourceBytes {
+	if len(payload) == 0 || len(payload) > providerContentBytes() {
 		return nil, bridgeSafeError(fmt.Errorf("clash: encrypted provider size is invalid"))
 	}
 	if len(secretKey) == 0 || len(secretKey) > 64*1024 {
@@ -44,14 +55,14 @@ func decryptAgeForIOSUnguarded(payload []byte, secretKey string) ([]byte, error)
 	if err != nil {
 		return nil, bridgeSafeError(fmt.Errorf("clash: decrypt age provider: %w", err))
 	}
-	if len(plaintext) == 0 || len(plaintext) > maximumProviderResourceBytes {
+	if len(plaintext) == 0 || len(plaintext) > providerContentBytes() {
 		return nil, bridgeSafeError(fmt.Errorf("clash: decrypted provider size is invalid"))
 	}
 	return plaintext, nil
 }
 
 func ValidateProviderForIOS(kind, behavior, format string, payload []byte) error {
-	if len(payload) == 0 || len(payload) > maximumProviderResourceBytes {
+	if len(payload) == 0 || len(payload) > providerContentBytes() {
 		return bridgeSafeError(fmt.Errorf("clash: provider payload size is invalid"))
 	}
 	if bytes.HasPrefix(payload, []byte(age.FileHeader)) {
@@ -101,7 +112,7 @@ func isUpstreamEmptyRuleError(err error) bool {
 }
 
 func ProviderEntryCountForIOS(kind, behavior, format string, payload []byte) (int, error) {
-	if len(payload) == 0 || len(payload) > maximumProviderResourceBytes {
+	if len(payload) == 0 || len(payload) > providerContentBytes() {
 		return 0, bridgeSafeError(fmt.Errorf("clash: provider payload size is invalid"))
 	}
 	if bytes.HasPrefix(payload, []byte(age.FileHeader)) {
@@ -142,7 +153,7 @@ func ProviderEntryCountForIOS(kind, behavior, format string, payload []byte) (in
 			return 0, bridgeSafeError(err)
 		}
 		var document proxyprovider.ProxySchema
-		if err := yaml.Unmarshal(payload, &document); err != nil {
+		if err := unmarshalProxySchema(payload, &document); err != nil {
 			proxies, convertErr := convertProxyShareLinks(payload, true)
 			if convertErr != nil {
 				return 0, bridgeSafeError(fmt.Errorf("clash: count proxy provider: %w", convertErr))
@@ -192,12 +203,18 @@ type providerEgressNoop struct {
 	index int
 }
 
+var proxySchemaSequence = yaml.ClashSequence{Key: "proxies", Item: reflect.TypeOf(map[string]any(nil))}
+
+func unmarshalProxySchema(payload []byte, document *proxyprovider.ProxySchema) error {
+	return yaml.ClashUnmarshal(payload, document, proxySchemaSequence, nil)
+}
+
 func sanitizeProxyProviderPayloadForIOS(format string, payload []byte, parseNodes bool) ([]byte, []providerEgressNoop, error) {
 	if format != "" && format != "yaml" {
 		return nil, nil, fmt.Errorf("clash: proxy provider format %q is unsupported", format)
 	}
 	var document proxyprovider.ProxySchema
-	if err := yaml.Unmarshal(payload, &document); err != nil {
+	if err := unmarshalProxySchema(payload, &document); err != nil {
 		proxies, convertErr := convertProxyShareLinks(payload, true)
 		if convertErr != nil {
 			return nil, nil, fmt.Errorf("clash: parse proxy provider: %w; convert share links: %v", err, convertErr)

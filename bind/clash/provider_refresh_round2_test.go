@@ -122,7 +122,7 @@ func TestASeedOlderThanWhatWaitsDoesNotDisplaceIt(t *testing.T) {
 	seedFile := filepath.Join(fixture.home, "seed-between")
 	_ = os.WriteFile(seedFile, body, 0o600)
 	description, _ := json.Marshal(map[string]any{"fetchedAt": time.Now().Add(-time.Hour).Unix(), "sourceSHA256": payloadSHA256(body), "payload": "source"})
-	answer := SeedProviderFileJSON("rule", "refreshed", seedFile, string(description), service.runningConfigurationSHA256())
+	answer := SeedProviderFileJSON("rule", "refreshed", seedFile, string(description), service.runningConfigurationSHA256(), 0)
 	var result providerRefreshResult
 	if err := json.Unmarshal([]byte(answer), &result); err != nil || result.Result != providerRefreshUnchanged {
 		t.Fatalf("a seed of what runs: %s", answer)
@@ -202,7 +202,7 @@ func TestACompiledSeedIsJudgedByItsWindow(t *testing.T) {
 	seedFile := filepath.Join(fixture.home, "seed-mrs")
 	_ = os.WriteFile(seedFile, artifact.Bytes(), 0o600)
 	description, _ := json.Marshal(map[string]any{"fetchedAt": time.Now().Add(time.Second).Unix(), "sourceSHA256": payloadSHA256(source), "payload": "mrs"})
-	answer := SeedProviderFileJSON("rule", "refreshed", seedFile, string(description), service.runningConfigurationSHA256())
+	answer := SeedProviderFileJSON("rule", "refreshed", seedFile, string(description), service.runningConfigurationSHA256(), 0)
 	if !strings.Contains(answer, `"result":"updated"`) || liveRuleCount() != 2 {
 		t.Fatalf("an MRS with a 1 MiB window fits in 8 MiB: %s", answer)
 	}

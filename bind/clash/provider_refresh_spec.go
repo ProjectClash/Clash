@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -110,6 +111,30 @@ func (spec *providerRefreshSpec) requestKey(kind string) string {
 		write(spec.Header[name]...)
 	}
 	return hex.EncodeToString(digest.Sum(nil))
+}
+
+func publishedRefreshDefinitions(root map[string]any, key, kind string, remote map[string]map[string]any, fetchedAt map[string]int64) map[string]int64 {
+	providers, _ := root[key].(map[string]any)
+	merged := map[string]int64{}
+	for name, at := range fetchedAt {
+		merged[name] = at
+	}
+	for name, raw := range providers {
+		definition, _ := raw.(map[string]any)
+		marker, _ := definition[providerRefreshField].(map[string]any)
+		if marker == nil || remote[name] != nil {
+			continue
+		}
+		spec, ok := decodeProviderRefreshMarker(marker)
+		if !ok {
+			continue
+		}
+		remote[name] = marker
+		if _, known := merged[providerResourceKey(kind, name)]; !known && !spec.FetchedAt.IsZero() {
+			merged[providerResourceKey(kind, name)] = spec.FetchedAt.Unix()
+		}
+	}
+	return merged
 }
 
 func remoteProviderDefinitions(root map[string]any, key string) map[string]map[string]any {
@@ -282,7 +307,7 @@ func rewriteRefreshedForCatalog(root map[string]any, key, kind string, remote ma
 			case seedNewer && owners[member.form] != "":
 				path = owners[member.form]
 			case !seedNewer && cacheHasContent:
-				if product, productPath := cachedProviderProduct(home, requestKey, state, member.form); product != nil {
+				if product, productPath := cachedProviderProduct(home, requestKey, state, member.form, providerProductSelection(kind, member.name, definition)); product != nil {
 					path, behavior, format = productPath, product.Behavior, product.Format
 				} else if member.seedPath == "" {
 					if source := cachedProviderSource(kind, member.spec); source != "" {
@@ -302,6 +327,9 @@ func rewriteRefreshedForCatalog(root map[string]any, key, kind string, remote ma
 			}
 			if path == "" {
 				path = unseededProviderPath(kind, member.name)
+			}
+			if _, marked := definition[providerRefreshField]; !marked {
+				definition[providerRefreshField] = maps.Clone(remote[member.name])
 			}
 			if path == member.seedPath && !member.unseeded {
 				continue
@@ -323,8 +351,13 @@ func rewriteRefreshedForCatalog(root map[string]any, key, kind string, remote ma
 			}
 			sourceBehavior, _ := definition["behavior"].(string)
 			sourceFormat, _ := definition["format"].(string)
-			if kind == "rule" && member.seedPath == "" && legacy == "" && compilesNatively(sourceBehavior, sourceFormat) {
-				definition[providerCatalogNativeField] = true
+			if kind == "rule" && member.seedPath == "" && legacy == "" {
+				switch {
+				case stagingMapsRuleSets && !feedsPlatformRoutes(root, member.name, sourceBehavior) && mappable(sourceBehavior):
+					definition[providerCatalogNativeField] = "text"
+				case compilesNatively(sourceBehavior, sourceFormat):
+					definition[providerCatalogNativeField] = "mrs"
+				}
 			}
 		}
 	}
@@ -350,15 +383,17 @@ func readProviderCacheEntries(home string) map[string]*providerCacheEntry {
 	return state.Entries
 }
 
-func cachedProviderProduct(home, requestKey string, entry *providerCacheEntry, form string) (*providerCacheProduct, string) {
+func cachedProviderProduct(home, requestKey string, entry *providerCacheEntry, form, selection string) (*providerCacheProduct, string) {
 	keys := make([]string, 0, len(entry.Products))
 	for productKey := range entry.Products {
 		keys = append(keys, productKey)
 	}
 	sort.Strings(keys)
+	var unlabelled *providerCacheProduct
+	var unlabelledPath string
 	for _, productKey := range keys {
 		product := entry.Products[productKey]
-		if product == nil || product.SourceSHA256 != entry.SourceSHA256 {
+		if !productRuns(entry, product) {
 			continue
 		}
 		madeFor := product.SourceForm
@@ -369,11 +404,25 @@ func cachedProviderProduct(home, requestKey string, entry *providerCacheEntry, f
 			continue
 		}
 		directory := filepath.Join(home, ProviderRefreshDirectoryName, providerRefreshCacheDirectory, requestKey, "products", productKey, product.Generation)
+		if selection != "" && product.Selection != selection {
+			if product.Selection == "" && product.Variant != "library" && unlabelled == nil && productFilesExist(directory, product) {
+				unlabelled, unlabelledPath = product, filepath.Join(directory, product.Entry)
+			}
+			continue
+		}
 		if productFilesExist(directory, product) {
 			return product, filepath.Join(directory, product.Entry)
 		}
 	}
+	if unlabelled != nil {
+		return unlabelled, unlabelledPath
+	}
 	return nil, ""
+}
+
+func feedsPlatformRoutes(root map[string]any, name, behavior string) bool {
+	tun, ok := root["tun"].(map[string]any)
+	return ok && routeSetProviderNames(tun)[name] && strings.EqualFold(strings.TrimSpace(behavior), "ipcidr")
 }
 
 const providerCatalogNativeField = "x-clash-catalog-native"
