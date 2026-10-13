@@ -174,3 +174,6 @@ replace github.com/metacubex/mipstack => ../../third_party/mipstack
 
 // Pin the ARM64 race CAS repair; ordinary build source is unchanged.
 replace github.com/metacubex/gvisor => ../../third_party/gvisor
+
+// Keep gomobile on the same HY2 UDP fragment-cache fix; replacements are not inherited.
+replace github.com/metacubex/sing-quic => ../../third_party/sing-quic

@@ -169,3 +169,7 @@ replace github.com/metacubex/mipstack => ./third_party/mipstack
 
 // Pin the ARM64 race CAS repair; ordinary build source is unchanged.
 replace github.com/metacubex/gvisor => ./third_party/gvisor
+
+// The pinned revision keeps every reassembled HY2 UDP packet in its fragment cache for
+// ten seconds; the snapshot lets go of a packet once it is whole.
+replace github.com/metacubex/sing-quic => ./third_party/sing-quic
