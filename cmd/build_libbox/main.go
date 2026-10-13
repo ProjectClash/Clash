@@ -93,10 +93,11 @@ func main() {
 		outPath = filepath.Join(root, output)
 	}
 
-	ldflags := "-X github.com/ProjectClash/Clash/constant.Version=" + version
-	if !debugBuild && !internalBuild {
-		ldflags += " -s -w -buildid="
+	runtimeGODEBUG, err := appleRuntimeGODEBUG(root)
+	if err != nil {
+		fatal(err)
 	}
+	ldflags := appleLdflags(version, !debugBuild && !internalBuild, runtimeGODEBUG)
 	buildTags := effectiveBaseTags(internalBuild, !withoutQUIC)
 	toolchain, err := goToolchainVersion(root)
 	if err != nil {
@@ -188,7 +189,20 @@ func main() {
 			overlayCleanup()
 			fatal(err)
 		}
+		if err := verifyRuntimeGODEBUGInXCFramework(outPath, runtimeGODEBUG); err != nil {
+			overlayCleanup()
+			fatal(err)
+		}
 	}
+}
+
+func appleLdflags(version string, strip bool, runtimeGODEBUG string) string {
+	ldflags := "-X github.com/ProjectClash/Clash/constant.Version=" + version
+	ldflags += " -X runtime.godebugDefault=" + runtimeGODEBUG
+	if strip {
+		ldflags += " -s -w -buildid="
+	}
+	return ldflags
 }
 
 func appleSerialBuildPlan() []appleSlicePlan {
