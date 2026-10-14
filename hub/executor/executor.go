@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
@@ -118,7 +119,7 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	applyProbe("rules")
 	updateSniffer(cfg.Sniffer)
 	applyProbe("sniffer")
-	updateMITM(cfg.MITM)
+	updateMITM(cfg.MITM, cfg.TLS.CustomTrustCert)
 	applyProbe("mitm")
 	updateHosts(cfg.Hosts)
 	applyProbe("hosts")
@@ -414,7 +415,7 @@ func updateSniffer(snifferConfig *sniffer.Config) {
 	}
 }
 
-func updateMITM(mitmConfig *mitm.Config) {
+func updateMITM(mitmConfig *mitm.Config, customTrustCert []string) {
 	if mitmConfig == nil || !mitmConfig.Enable {
 		tunnel.UpdateMITM(nil)
 		log.Infoln("MITM is closed")
@@ -423,10 +424,10 @@ func updateMITM(mitmConfig *mitm.Config) {
 	// Seed the outer-leg verification pool with the user's custom trust
 	// certificates, matching how the core's own CA pool is extended above;
 	// without them, origins behind private CAs fail the outer handshake.
-	if mitmConfig.UpstreamRoots == nil && len(cfg.TLS.CustomTrustCert) > 0 {
+	if mitmConfig.UpstreamRoots == nil && len(customTrustCert) > 0 {
 		pool := x509.NewCertPool()
 		ok := true
-		for _, certPEM := range cfg.TLS.CustomTrustCert {
+		for _, certPEM := range customTrustCert {
 			if !pool.AppendCertsFromPEM([]byte(certPEM)) {
 				log.Warnln("mitm: ignoring an unparseable custom trust certificate")
 				ok = false
