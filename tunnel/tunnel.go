@@ -771,21 +771,48 @@ func handleTCPConnContext(parent context.Context, connCtx C.ConnContext) {
 	// through the same rule-resolved proxy), and handleTCPConnContext closes
 	// it without running the byte-pipe below. A decline returns the conn
 	// with peeked bytes intact and the normal path proceeds.
+	//
+	// dialCtx carries the short TCP dial deadline for the gate/peek phase
+	// only. Once the dispatcher claims the conn it switches to a long-lived
+	// context (values kept, cancellation dropped), and every upstream dial
+	// inside it runs under a fresh DefaultTCPTimeout budget so keep-alive
+	// requests seconds or minutes later still dial.
 	if d := mitm.ActiveDispatcher(); d != nil && d.Enable() {
 		dialCtx, dialCancel := context.WithTimeout(parent, C.DefaultTCPTimeout)
+		// A dedicated metadata copy per dial: metadata.Pure() can alias
+		// the original in some DNS modes, and mutating a shared struct
+		// would corrupt the outer conn's metadata.
 		mitmDial := func(ctx context.Context, host string, port uint16) (net.Conn, error) {
-			dialMeta := metadata.Pure()
-			dialMeta.Host = host
-			dialMeta.DstPort = port
-			dialMeta.DstIP = netip.Addr{}
-			dialMeta.DNSMode = C.DNSNormal
+			dialMeta := &C.Metadata{
+				NetWork: metadata.NetWork,
+				Type:    metadata.Type,
+				SrcIP:   metadata.SrcIP,
+				SrcPort: metadata.SrcPort,
+				InIP:    metadata.InIP,
+				InPort:  metadata.InPort,
+				InName:  metadata.InName,
+				InUser:  metadata.InUser,
+				Host:    host,
+				DstPort: port,
+				DNSMode: C.DNSNormal,
+			}
 			return proxy.DialContext(ctx, dialMeta)
 		}
-		if mitm.TrafficMatch(dialCtx, conn, metadata, mitmDial) {
-			dialCancel()
+		claimed := mitm.TrafficMatch(dialCtx, conn, metadata, mitmDial)
+		dialCancel()
+		if claimed {
+			if N.HandshakePending(conn) {
+				// The interceptor answers inline; the outer proxy
+				// conn is never dialed, so the deferred handshake
+				// resolves as success to whoever waits on it.
+				_ = N.ReportDeferredHandshake(conn, nil)
+			}
+			// Gated conns never reach logMetadata below; leave the
+			// same style of trace so interception is visible.
+			log.Infoln("[%s] %s --> %s intercepted[MITM] using %s",
+				strings.ToUpper(metadata.NetWork.String()), metadata.SourceDetail(), metadata.RemoteAddress(), proxy.Name())
 			return
 		}
-		dialCancel()
 	}
 
 	dialMetadata := metadata

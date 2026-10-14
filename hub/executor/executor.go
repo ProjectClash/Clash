@@ -421,23 +421,36 @@ func updateMITM(mitmConfig *mitm.Config, customTrustCert []string) {
 		log.Infoln("MITM is closed")
 		return
 	}
+	// Interception requires a policy block per connection; gates alone
+	// never intercept. Warn so the user understands the consequence instead
+	// of silently running a no-op interceptor.
+	if len(mitmConfig.HostGates) > 0 && len(mitmConfig.RewritePolicies) == 0 {
+		log.Warnln("[MITM] hosts are configured but no rewrite policies: no traffic will be intercepted because every connection must match a policy")
+	}
 	// Seed the outer-leg verification pool with the user's custom trust
 	// certificates, matching how the core's own CA pool is extended above;
 	// without them, origins behind private CAs fail the outer handshake.
-	if mitmConfig.UpstreamRoots == nil && len(customTrustCert) > 0 {
+	// Parse-append each parseable entry and warn per rejected one; the pool
+	// is used only if at least one certificate parsed.
+	if len(customTrustCert) > 0 {
 		pool := x509.NewCertPool()
-		ok := true
+		parsed := 0
 		for _, certPEM := range customTrustCert {
-			if !pool.AppendCertsFromPEM([]byte(certPEM)) {
-				log.Warnln("mitm: ignoring an unparseable custom trust certificate")
-				ok = false
+			if pool.AppendCertsFromPEM([]byte(certPEM)) {
+				parsed++
+				continue
 			}
+			log.Warnln("[MITM] ignoring an unparseable tls.custom-trust-cert entry: connections to origins signed by that certificate will fail the upstream TLS handshake")
 		}
-		if ok {
+		if parsed > 0 {
 			mitmConfig.UpstreamRoots = pool
 		}
 	}
-	dispatcher, err := mitm.NewDispatcher(mitmConfig)
+	// Reuse the previous engine when the CA is memory-only (no store-dir):
+	// minting a fresh CA on every reload would silently rotate it and
+	// invalidate every installed trust profile. StableDispatcher mints only
+	// on first construction or when a store-dir config demands disk state.
+	dispatcher, err := mitm.StableDispatcher(mitm.ActiveDispatcher(), mitmConfig)
 	if err != nil {
 		// Fail closed: a broken CA state or invalid config must not leave a
 		// half-initialized interceptor in the hot path.

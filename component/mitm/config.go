@@ -30,13 +30,18 @@ type Config struct {
 	HTTPSPorts utils.IntRanges[uint16]
 	HTTPPorts  utils.IntRanges[uint16]
 
-	// HostGates are the intercept prefixes: rules of the form "sub.example.com"
-	// (no leading dot) or ".example.com". A leading-dot rule also matches the
-	// bare domain, mirroring the existing rule engine's suffix semantics.
+	// HostGates are the intercept prefixes. Both accepted forms —
+	// "sub.example.com" and ".example.com" — cover the bare domain AND its
+	// subdomains (suffix semantics, like the rule engine's DOMAIN-SUFFIX);
+	// Normalize lowercases and strips any trailing dot, and rejects
+	// non-ASCII values (use the punycode xn-- form).
 	HostGates []string
 
-	// SkipDomains and SkipDstAddress keep tunnel-sensitive and IP-only hosts
-	// out of interception entirely.
+	// SkipDomains keep tunnel-sensitive hosts out of interception entirely,
+	// taking priority over HostGates. Like HostGates, a bare entry covers
+	// the domain and its subdomains; the "+." config form (stored with a
+	// leading dot) is accepted and behaves identically. SkipDstAddress
+	// keeps IP-only destinations out at gate time.
 	SkipDomains    []string
 	SkipDstAddress []netip.Prefix
 
@@ -52,15 +57,16 @@ type Config struct {
 
 // RewritePolicy rewrites requests within one gate block.
 type RewritePolicy struct {
-	// URLPattern gates the policy on the request path. Supports the same
-	// suffix/keyword syntax as the rule engine: ".example.com/api/" matches
-	// by suffix; "example.com/api/" matches exact path; bare "/api/" matches
-	// the suffix at any host.
+	// URLPattern gates the policy on the request path. The host part uses
+	// suffix semantics: "api.example.com/v2/" matches api.example.com AND
+	// its subdomains (a leading-dot form behaves the same); "/api/" matches
+	// the path prefix at any gated host. The host part is validated at load
+	// like a gate: no wildcards, ports, or spaces.
 	URLPattern string
 
 	// Redirect returns an immediate 302 without contacting the upstream when
-	// set. HostPrefix covers Anywhere's host-only rewrite; Redirect covers
-	// full-location rewrites. Both are allowed on one policy.
+	// set. A bare-host value rewrites the authority and keeps the request
+	// path+query; a full URL replaces the location verbatim.
 	Redirect string
 
 	// Reject answers with a status and no upstream dial when set. Use 403
@@ -81,17 +87,42 @@ type HeaderRule struct {
 	ValuePrefix string
 }
 
-// MaxBodyBuffer caps how much of a request body the rewrite path buffers
-// before it stops inspecting and streams the rest untouched.
-const MaxBodyBuffer = 128 * 1024
-
 // MaxPolicyCount bounds one config so a pathological subscription cannot
 // balloon the gate into a per-connection linear scan over thousands of
 // entries.
 const MaxPolicyCount = 64
 
+// MaxHostGates caps the host/skip lists so MatchHost's linear scans stay
+// bounded no matter what a subscription feeds in.
+const MaxHostGates = 256
+
+// validHeaderFieldName reports whether name is a valid RFC 7230 header field
+// name: a token of ! and 0x23-0x7E characters excluding separators. This
+// keeps CRLF, colons, and spaces out of the wire at load time instead of at
+// request time.
+func validHeaderFieldName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if c <= ' ' || c >= 0x7f {
+			return false
+		}
+		switch c {
+		case '(', ')', '<', '>', '@', ',', ';', ':', '\\', '"', '/', '[', ']', '?', '=', '{', '}':
+			return false
+		}
+	}
+	return true
+}
+
 // Normalize validates and fills defaults. It is called by the config layer
 // after decoding; errors are configuration errors, not runtime states.
+// Gates and skip domains are canonicalized to lowercase without a trailing
+// dot so wire-form SNI always matches, and non-ASCII values are rejected:
+// TLS SNI on the wire is punycode (xn--), so an IDN gate would load fine
+// and then never match.
 func (c *Config) Normalize() error {
 	if !c.Enable {
 		return nil
@@ -99,22 +130,49 @@ func (c *Config) Normalize() error {
 	if len(c.HostGates) == 0 {
 		return errors.New("mitm: enable requires at least one host gate")
 	}
+	if len(c.HostGates) > MaxHostGates {
+		return fmt.Errorf("mitm: too many host gates (max %d)", MaxHostGates)
+	}
 	for i := range c.HostGates {
-		gate := strings.TrimSpace(c.HostGates[i])
-		if gate == "" {
-			return errors.New("mitm: empty host gate")
-		}
-		host, isDomainSuffix := gate, strings.HasPrefix(gate, ".")
-		if isDomainSuffix {
-			host = gate[1:]
-		}
-		if err := validateHost(host); err != nil {
-			return fmt.Errorf("mitm: host gate %q: %w", gate, err)
+		gate, err := normalizeGate(c.HostGates[i], "host gate")
+		if err != nil {
+			return err
 		}
 		c.HostGates[i] = gate
 	}
+	if len(c.SkipDomains) > MaxHostGates {
+		return fmt.Errorf("mitm: too many skip domains (max %d)", MaxHostGates)
+	}
+	for i := range c.SkipDomains {
+		gate, err := normalizeGate(c.SkipDomains[i], "skip domain")
+		if err != nil {
+			return err
+		}
+		c.SkipDomains[i] = gate
+	}
+	if len(c.SkipDstAddress) > MaxHostGates {
+		return fmt.Errorf("mitm: too many skip-dst-address entries (max %d)", MaxHostGates)
+	}
 	if len(c.RewritePolicies) > MaxPolicyCount {
 		return fmt.Errorf("mitm: too many rewrite policies (max %d)", MaxPolicyCount)
+	}
+	// A port in both lists is ambiguous: the gate cannot know whether the
+	// conn is cleartext or TLS, and the dialer picks TLS-vs-plain from the
+	// scheme the gate chose. Reject at load instead of guessing at runtime.
+	// Empty lists are skipped: they mean "standard port only" and never
+	// overlap in practice (IntRanges.Check treats empty as match-all).
+	var overlap uint16
+	if len(c.HTTPPorts) > 0 && len(c.HTTPSPorts) > 0 {
+		c.HTTPPorts.Range(func(p uint16) bool {
+			if c.HTTPSPorts.Check(p) {
+				overlap = p
+				return false
+			}
+			return true
+		})
+	}
+	if overlap != 0 {
+		return fmt.Errorf("mitm: port %d is in both http-ports and https-ports; a port must carry exactly one protocol", overlap)
 	}
 	for i := range c.RewritePolicies {
 		if err := c.RewritePolicies[i].normalize(i); err != nil {
@@ -124,10 +182,34 @@ func (c *Config) Normalize() error {
 	return nil
 }
 
+// normalizeGate canonicalizes one host gate / skip domain: trimmed,
+// lowercased, trailing dot stripped, ASCII-only, and host-valid. The bare
+// and leading-dot forms both carry suffix (host+subdomains) semantics — the
+// form distinction is kept only for readability.
+func normalizeGate(raw, what string) (string, error) {
+	gate := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(raw)), ".")
+	if gate == "" {
+		return "", fmt.Errorf("mitm: empty %s", what)
+	}
+	host := strings.TrimPrefix(gate, ".")
+	if err := validateHost(host); err != nil {
+		return "", fmt.Errorf("mitm: %s %q: %w", what, raw, err)
+	}
+	for i := 0; i < len(host); i++ {
+		if host[i] >= 0x80 {
+			return "", fmt.Errorf("mitm: %s %q contains non-ASCII characters; use the punycode (xn--) form of the IDN, e.g. xn--bcher-kva.example.com", what, raw)
+		}
+	}
+	return gate, nil
+}
+
 func (p *RewritePolicy) normalize(idx int) error {
 	prefix := fmt.Sprintf("mitm: rewrite[%d]", idx)
 	if p.URLPattern == "" {
 		return fmt.Errorf("%s: url-pattern is required", prefix)
+	}
+	if err := validateURLPatternHost(p.URLPattern); err != nil {
+		return fmt.Errorf("%s: %w", prefix, err)
 	}
 	if p.Reject != 0 && (p.Reject < 400 || p.Reject > 499) {
 		return fmt.Errorf("%s: reject must be a 4xx status", prefix)
@@ -156,14 +238,36 @@ func (p *RewritePolicy) normalize(idx int) error {
 		default:
 			return fmt.Errorf("%s: header action %q must be set, add or remove", prefix, r.Action)
 		}
-		if r.Name == "" {
-			return fmt.Errorf("%s: header rule needs a name", prefix)
-		}
-		if r.ValuePrefix != "" && (r.Action == "remove" || r.Value != "") {
-			return fmt.Errorf("%s: value-prefix only applies to header set/add", prefix)
+		if !validHeaderFieldName(r.Name) {
+			return fmt.Errorf("%s: header rule name %q is not a valid HTTP field name (RFC 7230 token)", prefix, r.Name)
 		}
 		if r.Value != "" && r.ValuePrefix != "" {
-			return fmt.Errorf("%s: value and value-prefix are exclusive", prefix)
+			return fmt.Errorf("%s: value and value-prefix are exclusive; value-prefix prepends to the client's header value", prefix)
+		}
+		if r.ValuePrefix != "" && r.Action == "remove" {
+			return fmt.Errorf("%s: value-prefix only applies to header set/add", prefix)
+		}
+	}
+	return nil
+}
+
+// validateURLPatternHost validates the host part of a policy's url-pattern
+// with the same rules as host gates (no wildcards, ports, spaces, or
+// non-ASCII), so a typo cannot install a policy that silently never
+// matches. The path part is enforced on the hot path; a leading-dot host
+// form is accepted and behaves like the bare form.
+func validateURLPatternHost(pattern string) error {
+	host, _, _ := strings.Cut(pattern, "/")
+	if host == "" {
+		return nil // path-only pattern: applies at any gated host
+	}
+	host = strings.TrimPrefix(host, ".")
+	if err := validateHost(host); err != nil {
+		return fmt.Errorf("url-pattern host: %w", err)
+	}
+	for i := 0; i < len(host); i++ {
+		if host[i] >= 0x80 {
+			return fmt.Errorf("url-pattern host %q contains non-ASCII characters; use the punycode (xn--) form of the IDN", host)
 		}
 	}
 	return nil
@@ -199,15 +303,14 @@ func validateHost(host string) error {
 	return nil
 }
 
-// HostPrefix is the inverse of the leading-dot form: it joins the gate to a
-// request path fragment. It exists so the UI composes "gate host" + "path"
-// without concatenation rules leaking into user config.
-const HostPrefix = ""
-
-// MatchHost reports whether host is covered by the gate list. A leading-dot
-// gate (".example.com") covers example.com and every subdomain; a bare gate
-// ("sub.example.com") covers exactly that host and its subdomains, matching
-// the rule engine's DOMAIN and DOMAIN-SUFFIX distinction.
+// MatchHost reports whether host is covered by the gate list. Both gate
+// forms carry suffix semantics: a leading-dot gate (".example.com") and a
+// bare gate ("sub.example.com") each cover that domain AND every subdomain,
+// mirroring the rule engine's DOMAIN-SUFFIX. Gates are stored normalized
+// (lowercase, no trailing dot), and the incoming host is canonicalized the
+// same way before comparison so wire-form SNI cannot miss a valid gate.
+// SkipDomains take priority and use the same suffix semantics; a skip that
+// matches means the host is never intercepted.
 func (c *Config) MatchHost(host string) bool {
 	if !c.Enable {
 		return false
@@ -217,24 +320,22 @@ func (c *Config) MatchHost(host string) bool {
 		return false
 	}
 	for _, gate := range c.SkipDomains {
-		g := strings.TrimSuffix(strings.ToLower(gate), ".")
-		if g == host || (strings.HasPrefix(g, ".") && strings.HasSuffix(host, g)) {
+		if hostSuffixMatch(host, strings.TrimPrefix(gate, ".")) {
 			return false
 		}
 	}
 	for _, gate := range c.HostGates {
-		var base string
-		switch {
-		case strings.HasPrefix(gate, "."):
-			base = gate[1:]
-		default:
-			base = gate
-		}
-		if host == base || strings.HasSuffix(host, "."+base) {
+		if hostSuffixMatch(host, strings.TrimPrefix(gate, ".")) {
 			return true
 		}
 	}
 	return false
+}
+
+// hostSuffixMatch reports whether host equals base or lies underneath it
+// (base or any subdomain of base).
+func hostSuffixMatch(host, base string) bool {
+	return host == base || strings.HasSuffix(host, "."+base)
 }
 
 // MatchPort reports whether dstPort is intercepted under proto ("http" or
@@ -255,12 +356,20 @@ func (c *Config) MatchPort(proto string, dstPort uint16) bool {
 	return list.Check(dstPort)
 }
 
-// TrafficMatch is the single entry point the tunnel asks per connection:
-// should this conn be intercepted, and by which policy block. The bool is
-// false whenever MITM is disabled, the host/port does not gate in, or no
-// policy targets the host. Destination-IP skips are checked by the caller at
-// gate time, before the ClientHello is read.
-func (c *Config) TrafficMatch(host string, proto string, dstPort uint16) (RewritePolicy, bool) {
+// TrafficMatch is the single entry point the tunnel asks per request:
+// should this conn be intercepted, and by which policy block. path is the
+// request path with the query stripped (h1: req.URL.Path, h2: :path minus
+// query). The bool is false whenever MITM is disabled, the host/port does
+// not gate in, or no policy targets the host (a config with hosts but no
+// rewrite policies therefore intercepts nothing — the executor warns at
+// load). Return value contract, changed with the value-prefix semantics:
+// the RewritePolicy is returned BY VALUE as before, and HeaderRules inside
+// it carry the decided prefix semantics — value-prefix PREPENDS to the
+// client's existing header value (set replaces the value with
+// prefix+existing, or just the prefix when the client sent none; add
+// appends prefix+existing as an extra line). Destination-IP skips are
+// checked by the caller at gate time, before the ClientHello is read.
+func (c *Config) TrafficMatch(host string, proto string, dstPort uint16, path string) (RewritePolicy, bool) {
 	var zero RewritePolicy
 	if !c.MatchHost(host) {
 		return zero, false
@@ -270,30 +379,56 @@ func (c *Config) TrafficMatch(host string, proto string, dstPort uint16) (Rewrit
 	}
 	for i := range c.RewritePolicies {
 		policy := &c.RewritePolicies[i]
-		if matchURLPattern(policy.URLPattern, host) {
+		if matchURLPattern(policy.URLPattern, host, path) {
 			return *policy, true
 		}
 	}
 	return zero, false
 }
 
-// matchURLPattern resolves a policy's url-pattern against a request host.
-// The pattern carries no leading dot; the config loader stripped it when
-// copying gate host into each policy. Forms:
+// matchURLPattern resolves a policy's url-pattern against a request host
+// and path. The pattern carries no leading dot; the config loader stripped
+// it when copying gate host into each policy. The host part uses suffix
+// semantics — it matches the bare domain AND its subdomains:
 //
-//	"api.example.com/v2/"  exact host and path prefix
+//	"api.example.com/v2"   api.example.com (+ subdomains) and path prefix
 //	"example.com/api/"     host-suffix and path prefix
 //	"/api/"                path prefix at any gated host
-func matchURLPattern(pattern, host string) bool {
-	patternHost, path, hasPath := strings.Cut(pattern, "/")
-	if !hasPath {
-		// No path component: the pattern is host-only.
-		return matchHostSuffix(patternHost, host)
-	}
+//	"api.example.com"      host-suffix at any path
+//
+// The path part is a prefix match on SEGMENT boundaries: "v2" matches
+// /v2, /v2/ and /v2/x but NOT /v2x. An empty path part ("host" or
+// "host/") covers every path.
+func matchURLPattern(pattern, host, path string) bool {
+	patternHost, patternPath, hasPath := strings.Cut(pattern, "/")
 	if patternHost != "" && !matchHostSuffix(patternHost, host) {
 		return false
 	}
-	return strings.HasPrefix("/"+path, "/")
+	if !hasPath || patternPath == "" {
+		// Host-only (or "host/"): every path.
+		return true
+	}
+	return pathPrefixMatch(path, "/"+patternPath)
+}
+
+// pathPrefixMatch reports whether path is covered by prefix at a segment
+// boundary: "/v2" matches /v2, /v2/ and /v2/x but NOT /v2x; "/v2/" matches
+// /v2 and everything under it (the trailing slash is already a boundary).
+func pathPrefixMatch(path, prefix string) bool {
+	if path == prefix {
+		return true
+	}
+	if !strings.HasPrefix(path, prefix) {
+		if strings.HasSuffix(prefix, "/") && path+"/" == prefix {
+			return true // "/v2" is the bare directory of prefix "/v2/"
+		}
+		return false
+	}
+	if strings.HasSuffix(prefix, "/") {
+		return true // boundary is the trailing slash itself
+	}
+	rest := path[len(prefix):]
+	return rest == "" || rest[0] == '/'
 }
 
 func matchHostSuffix(patternHost, host string) bool {
@@ -301,14 +436,6 @@ func matchHostSuffix(patternHost, host string) bool {
 		return true
 	}
 	patternHost = strings.TrimSuffix(strings.ToLower(patternHost), ".")
-	if host == patternHost || strings.HasSuffix(host, "."+patternHost) {
-		return true
-	}
-	// Leading-dot gate inside a policy pattern: ".api.example.com" means the
-	// bare domain too.
-	if strings.HasPrefix(patternHost, ".") {
-		base := patternHost[1:]
-		return host == base || strings.HasSuffix(host, "."+base)
-	}
-	return false
+	patternHost = strings.TrimPrefix(patternHost, ".")
+	return hostSuffixMatch(host, patternHost)
 }

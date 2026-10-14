@@ -1,8 +1,6 @@
 package clash
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -63,7 +61,7 @@ func ExportMITMCa(caPath string) (string, error) {
 	if err != nil {
 		return "", bridgeSafeError(err)
 	}
-	return fingerprint, nil
+	return bridgeSafeString(fingerprint), nil
 }
 
 func exportMITMCaUnguarded(caPath string) (string, error) {
@@ -74,18 +72,28 @@ func exportMITMCaUnguarded(caPath string) (string, error) {
 	if dispatcher == nil || !dispatcher.Enable() {
 		return "", fmt.Errorf("clash: mitm is not enabled")
 	}
+	engine := dispatcher.Engine()
+	if engine == nil {
+		return "", fmt.Errorf("clash: mitm is not enabled")
+	}
 	pemBytes, err := dispatcher.CaCertificatePEM()
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(filepath.Dir(caPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(caPath), 0o700); err != nil {
 		return "", fmt.Errorf("clash: mitm: create CA directory: %w", err)
 	}
 	if err := os.WriteFile(caPath, pemBytes, 0o644); err != nil {
 		return "", fmt.Errorf("clash: mitm: write CA file: %w", err)
 	}
-	sum := sha256.Sum256(pemBytes)
-	return hex.EncodeToString(sum[:]), nil
+	// Fingerprint the DER, not the PEM bytes: MITMState reports the DER
+	// hash, and the two surfaces must agree or the App cannot verify that
+	// the installed profile matches the displayed fingerprint.
+	fingerprint, err := engine.CaFingerprintHex()
+	if err != nil {
+		return "", err
+	}
+	return bridgeSafeString(fingerprint), nil
 }
 
 // ResetMITMCa regenerates the root certificate. Installed trust profiles

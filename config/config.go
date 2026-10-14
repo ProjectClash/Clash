@@ -49,27 +49,27 @@ import (
 type General struct {
 	Inbound
 	Mode              T.TunnelMode            `json:"mode"`
-	UnifiedDelay        bool                    `json:"unified-delay"`
-	LogLevel            log.LogLevel            `json:"log-level"`
-	IPv6                bool                    `json:"ipv6"`
-	Interface           string                  `json:"interface-name"`
-	RoutingMark         int                     `json:"routing-mark"`
-	GeoXUrl             GeoXUrl                 `json:"geox-url"`
-	GeoAutoUpdate       bool                    `json:"geo-auto-update"`
-	GeoUpdateInterval   int                     `json:"geo-update-interval"`
+	UnifiedDelay      bool                    `json:"unified-delay"`
+	LogLevel          log.LogLevel            `json:"log-level"`
+	IPv6              bool                    `json:"ipv6"`
+	Interface         string                  `json:"interface-name"`
+	RoutingMark       int                     `json:"routing-mark"`
+	GeoXUrl           GeoXUrl                 `json:"geox-url"`
+	GeoAutoUpdate     bool                    `json:"geo-auto-update"`
+	GeoUpdateInterval int                     `json:"geo-update-interval"`
 	GeodataMode       bool                    `json:"geodata-mode"`
-	GeodataLoader       string                  `json:"geodata-loader"`
-	GeositeMatcher      string                  `json:"geosite-matcher"`
-	TCPConcurrent       bool                    `json:"tcp-concurrent"`
+	GeodataLoader     string                  `json:"geodata-loader"`
+	GeositeMatcher    string                  `json:"geosite-matcher"`
+	TCPConcurrent     bool                    `json:"tcp-concurrent"`
 	FindProcessMode   process.FindProcessMode `json:"find-process-mode"`
-	Sniffing            bool                    `json:"sniffing"`
-	GlobalUA            string                  `json:"global-ua"`
-	ETagSupport         bool                    `json:"etag-support"`
-	KeepAliveIdle       int                     `json:"keep-alive-idle"`
-	KeepAliveInterval   int                     `json:"keep-alive-interval"`
-	DisableKeepAlive    bool                    `json:"disable-keep-alive"`
-	NetworkStrategy     string                  `json:"network-strategy"`
-	NetworkType         []string                `json:"network-type"`
+	Sniffing          bool                    `json:"sniffing"`
+	GlobalUA          string                  `json:"global-ua"`
+	ETagSupport       bool                    `json:"etag-support"`
+	KeepAliveIdle     int                     `json:"keep-alive-idle"`
+	KeepAliveInterval int                     `json:"keep-alive-interval"`
+	DisableKeepAlive  bool                    `json:"disable-keep-alive"`
+	NetworkStrategy     string   `json:"network-strategy"`
+	NetworkType         []string `json:"network-type"`
 	FallbackNetworkType []string `json:"fallback-network-type"`
 }
 
