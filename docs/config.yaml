@@ -236,6 +236,45 @@ sniffer:
     - "443"
     # - 8000-9999
 
+mitm:
+  enable: false
+  ## CA 证书与私钥的持久化目录。设置后重启保持同一个 CA，
+  ## 客户端可通过 MITMState / ExportMITMCa 导出安装；留空则每次启动重新生成。
+  # store-dir: "./mitm-ca"
+  ## 拦截的域名，支持 "+." 前缀（含子域）与精确主机
+  hosts:
+    # - +.example.com
+    # - api.example.org
+  ## 强制不拦截的域名（优先级高于 hosts）
+  # skip-domain:
+  #   - auth.example.com
+  ## 强制不拦截的目标地址
+  # skip-dst-address:
+  #   - 10.0.0.0/8
+  ## HTTPS 拦截端口，默认 443；HTTP 拦截端口，默认 80
+  # https-ports: ["443"]
+  # http-ports: ["80"]
+  ## 重写策略，按顺序匹配，首个命中的生效
+  # rewrite:
+  #   ## 精确主机 + 路径前缀
+  #   - url-pattern: "api.example.com/v2/"
+  #     ## 命中后直接 302，不建立上游连接（保留原路径与查询参数）
+  #     redirect: "mirror.example.com"
+  #   ## 仅路径前缀，作用于所有 hosts 内的域名
+  #   - url-pattern: "/api/v1/old/"
+  #     ## 命中后返回该状态码，不建立上游连接
+  #     reject: 404
+  #   - url-pattern: "api.example.com/v1/"
+  #     ## 请求头改写（在请求发往上游之前执行）
+  #     headers:
+  #       - action: set
+  #         name: User-Agent
+  #         value: "ClashMITM/1.0"
+  #       - action: set
+  #         name: Authorization
+  #         value-prefix: "Bearer "
+  #         value: "hardcoded-token"
+
 tunnels: # one line config
   - tcp/udp,127.0.0.1:6553,114.114.114.114:53,proxy
   - tcp,127.0.0.1:6666,rds.mysql.com:3306,vpn

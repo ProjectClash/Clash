@@ -22,6 +22,7 @@ import (
 	mihomoHttp "github.com/ProjectClash/Clash/component/http"
 	"github.com/ProjectClash/Clash/component/iface"
 	"github.com/ProjectClash/Clash/component/keepalive"
+	"github.com/ProjectClash/Clash/component/mitm"
 	"github.com/ProjectClash/Clash/component/profile"
 	"github.com/ProjectClash/Clash/component/profile/cachefile"
 	"github.com/ProjectClash/Clash/component/resolver"
@@ -117,6 +118,8 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	applyProbe("rules")
 	updateSniffer(cfg.Sniffer)
 	applyProbe("sniffer")
+	updateMITM(cfg.MITM)
+	applyProbe("mitm")
 	updateHosts(cfg.Hosts)
 	applyProbe("hosts")
 	updateGeneral(cfg.General, true)
@@ -409,6 +412,40 @@ func updateSniffer(snifferConfig *sniffer.Config) {
 	} else {
 		log.Infoln("Sniffer is closed")
 	}
+}
+
+func updateMITM(mitmConfig *mitm.Config) {
+	if mitmConfig == nil || !mitmConfig.Enable {
+		tunnel.UpdateMITM(nil)
+		log.Infoln("MITM is closed")
+		return
+	}
+	// Seed the outer-leg verification pool with the user's custom trust
+	// certificates, matching how the core's own CA pool is extended above;
+	// without them, origins behind private CAs fail the outer handshake.
+	if mitmConfig.UpstreamRoots == nil && len(cfg.TLS.CustomTrustCert) > 0 {
+		pool := x509.NewCertPool()
+		ok := true
+		for _, certPEM := range cfg.TLS.CustomTrustCert {
+			if !pool.AppendCertsFromPEM([]byte(certPEM)) {
+				log.Warnln("mitm: ignoring an unparseable custom trust certificate")
+				ok = false
+			}
+		}
+		if ok {
+			mitmConfig.UpstreamRoots = pool
+		}
+	}
+	dispatcher, err := mitm.NewDispatcher(mitmConfig)
+	if err != nil {
+		// Fail closed: a broken CA state or invalid config must not leave a
+		// half-initialized interceptor in the hot path.
+		log.Warnln("initial mitm failed, err:%v", err)
+		tunnel.UpdateMITM(nil)
+		return
+	}
+	tunnel.UpdateMITM(dispatcher)
+	log.Infoln("MITM is loaded and working (%d host gates)", len(mitmConfig.HostGates))
 }
 
 func updateTunnels(tunnels []LC.Tunnel) {

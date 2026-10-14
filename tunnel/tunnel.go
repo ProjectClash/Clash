@@ -21,6 +21,7 @@ import (
 	"github.com/ProjectClash/Clash/common/utils"
 	"github.com/ProjectClash/Clash/component/dialer"
 	"github.com/ProjectClash/Clash/component/loopback"
+	"github.com/ProjectClash/Clash/component/mitm"
 	"github.com/ProjectClash/Clash/component/nat"
 	"github.com/ProjectClash/Clash/component/pause"
 	"github.com/ProjectClash/Clash/component/process"
@@ -64,6 +65,8 @@ var (
 
 	snifferDispatcher syncatomic.Pointer[sniffer.Dispatcher]
 	sniffingEnable    syncatomic.Bool
+
+	mitmDispatcher syncatomic.Pointer[mitm.Dispatcher]
 
 	ruleUpdateCallback = utils.NewCallback[P.RuleProvider]()
 )
@@ -343,6 +346,14 @@ func UpdateSniffer(dispatcher *sniffer.Dispatcher) {
 	configMux.Lock()
 	snifferDispatcher.Store(dispatcher)
 	sniffingEnable.Store(dispatcher.Enable())
+	configMux.Unlock()
+}
+
+// UpdateMITM swaps the MITM dispatcher used by the TCP hot path; nil
+// disables interception.
+func UpdateMITM(dispatcher *mitm.Dispatcher) {
+	configMux.Lock()
+	mitmDispatcher.Store(dispatcher)
 	configMux.Unlock()
 }
 
@@ -753,6 +764,28 @@ func handleTCPConnContext(parent context.Context, connCtx C.ConnContext) {
 	if err != nil {
 		log.Warnln("[Metadata] parse failed: %s", err.Error())
 		return
+	}
+
+	// MITM interception: when the dispatcher claims this connection it is
+	// served to completion (TLS terminated, requests rewritten and forwarded
+	// through the same rule-resolved proxy), and handleTCPConnContext closes
+	// it without running the byte-pipe below. A decline returns the conn
+	// with peeked bytes intact and the normal path proceeds.
+	if d := mitm.ActiveDispatcher(); d != nil && d.Enable() {
+		dialCtx, dialCancel := context.WithTimeout(parent, C.DefaultTCPTimeout)
+		mitmDial := func(ctx context.Context, host string, port uint16) (net.Conn, error) {
+			dialMeta := metadata.Pure()
+			dialMeta.Host = host
+			dialMeta.DstPort = port
+			dialMeta.DstIP = netip.Addr{}
+			dialMeta.DNSMode = C.DNSNormal
+			return proxy.DialContext(ctx, dialMeta)
+		}
+		if mitm.TrafficMatch(dialCtx, conn, metadata, mitmDial) {
+			dialCancel()
+			return
+		}
+		dialCancel()
 	}
 
 	dialMetadata := metadata
