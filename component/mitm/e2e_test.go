@@ -448,9 +448,9 @@ func TestE2EHTTP1ClientToH2UpstreamBridge(t *testing.T) {
 func TestE2EIdleLimitDoesNotBusyLoop(t *testing.T) {
 	// Shorten the idle window so the test runs in wall-clock seconds. The
 	// save/restore is process-wide; tests in this package are sequential.
-	oldIdle := idleTimeout
-	idleTimeout = 500 * time.Millisecond
-	defer func() { idleTimeout = oldIdle }()
+	oldIdle := idleTimeoutNow()
+	idleTimeout.Store(int64(500 * time.Millisecond))
+	defer func() { idleTimeout.Store(int64(oldIdle)) }()
 
 	config := &Config{
 		Enable:          true,
@@ -831,11 +831,20 @@ func TestE2EOversizedPostRejected413(t *testing.T) {
 	}
 	chunk := strings.Repeat("x", 65536)
 	// 17×64KiB = 1MiB+64KiB: past maxRequestBody (1 MiB) AND past the
-	// 1 MiB drain bound, so the 413 has been written when we read.
+	// 1 MiB drain bound, so the 413 has been written when we read. The
+	// server may hit its drain bound and answer+close a hair earlier than
+	// the last chunk lands (loopback buffering makes the exact write that
+	// fails a race): a broken pipe / reset on the OVERFLOW writes means
+	// the interceptor already answered — stop writing and go read it.
+	wrote := 0
 	for i := 0; i < 17; i++ {
 		if _, err := tlsConn.Write([]byte(chunk)); err != nil {
-			t.Fatalf("body write %d: %v", i, err)
+			break
 		}
+		wrote++
+	}
+	if wrote < 16 {
+		t.Fatalf("body write stalled early at chunk %d (want >=16 = 1MiB drain bound reached)", wrote)
 	}
 	_ = tlsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	resp, err := http.ReadResponse(bufio.NewReader(tlsConn), nil)

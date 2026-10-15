@@ -325,9 +325,9 @@ func TestFixHpackDecodeErrorIsConnectionError(t *testing.T) {
 // --- R6: a stalled h2 client must release the serve goroutine.
 
 func TestFixStalledClientReleasesServeLoop(t *testing.T) {
-	oldIdle := idleTimeout
-	idleTimeout = 700 * time.Millisecond
-	defer func() { idleTimeout = oldIdle }()
+	oldIdle := idleTimeoutNow()
+	idleTimeout.Store(int64(700 * time.Millisecond))
+	defer func() { idleTimeout.Store(int64(oldIdle)) }()
 
 	tt, srv := startH2ServerLeg(t)
 	tt.writeClientPreface(t)

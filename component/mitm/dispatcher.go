@@ -577,10 +577,17 @@ const (
 	outerHandshakeTimeout = 10 * time.Second
 )
 
-// idleTimeout is the per-operation idle budget on both legs. A var (not a
-// const) purely so tests can shorten the window; the default matches the
-// kernel's TCP keep-alive expectation for an HTTP idle conn.
-var idleTimeout = 120 * time.Second
+// idleTimeout is the per-operation idle budget on both legs. An atomic
+// (not a const) purely so tests can shorten the window: tests mutate it
+// while leg goroutines from earlier tests may still be running, and a
+// plain var race-detector-fails on that benign test-only mutation. The
+// default matches the kernel's TCP keep-alive expectation for an HTTP
+// idle conn.
+var idleTimeout atomic.Int64
+
+func init() { idleTimeout.Store(int64(120 * time.Second)) }
+
+func idleTimeoutNow() time.Duration { return time.Duration(idleTimeout.Load()) }
 
 // ---- tunnel wiring ----
 
@@ -676,7 +683,7 @@ func (l *clientLeg) ReadRequest() (*http.Request, error) {
 		})
 		return l.h2.NextRequest()
 	}
-	_ = l.conn.SetReadDeadline(time.Now().Add(idleTimeout))
+	_ = l.conn.SetReadDeadline(time.Now().Add(idleTimeoutNow()))
 	defer l.conn.SetReadDeadline(time.Time{})
 	l.hdrLimit.clamp(int64(maxHeaderBytes) - int64(l.br.Buffered()))
 	req, err := http.ReadRequest(l.br)
@@ -738,7 +745,7 @@ type deadlineBody struct {
 }
 
 func (b *deadlineBody) Read(p []byte) (int, error) {
-	_ = b.conn.SetReadDeadline(time.Now().Add(idleTimeout))
+	_ = b.conn.SetReadDeadline(time.Now().Add(idleTimeoutNow()))
 	return b.ReadCloser.Read(p)
 }
 
@@ -772,7 +779,7 @@ func (l *clientLeg) WriteResponse(resp *http.Response) error {
 	if l.protocol == "h2" {
 		return l.h2.SubmitResponse(resp)
 	}
-	if err := l.conn.SetWriteDeadline(time.Now().Add(idleTimeout)); err != nil {
+	if err := l.conn.SetWriteDeadline(time.Now().Add(idleTimeoutNow())); err != nil {
 		return err
 	}
 	defer l.conn.SetWriteDeadline(time.Time{})
@@ -790,7 +797,7 @@ func (l *clientLeg) FlushBody(resp *http.Response) bool {
 	buf := bufPool.Get().(*[]byte)
 	defer bufPool.Put(buf)
 	for {
-		if err := l.conn.SetWriteDeadline(time.Now().Add(idleTimeout)); err != nil {
+		if err := l.conn.SetWriteDeadline(time.Now().Add(idleTimeoutNow())); err != nil {
 			return false
 		}
 		n, readErr := resp.Body.Read(*buf)
@@ -880,11 +887,11 @@ func (u *http1Upstream) RoundTrip(ctx context.Context, req *http.Request) (*http
 	// Fresh deadlines per operation: the write and the response-head read
 	// each get a full idle window, so a response arriving after a long
 	// request-body upload is not killed by a deadline set before it.
-	_ = u.conn.SetDeadline(time.Now().Add(idleTimeout))
+	_ = u.conn.SetDeadline(time.Now().Add(idleTimeoutNow()))
 	if err := out.Write(u.conn); err != nil {
 		return nil, err
 	}
-	_ = u.conn.SetReadDeadline(time.Now().Add(idleTimeout))
+	_ = u.conn.SetReadDeadline(time.Now().Add(idleTimeoutNow()))
 	resp, err := readResponseLimited(u.br, out, &u.hdrLimit, maxHeaderBytes)
 	if err != nil {
 		return nil, err
@@ -928,7 +935,7 @@ type upstreamDeadlineBody struct {
 }
 
 func (b *upstreamDeadlineBody) Read(p []byte) (int, error) {
-	_ = b.conn.SetReadDeadline(time.Now().Add(idleTimeout))
+	_ = b.conn.SetReadDeadline(time.Now().Add(idleTimeoutNow()))
 	return b.r.Read(p)
 }
 

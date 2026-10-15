@@ -1042,7 +1042,7 @@ func (s *h2Server) FinishBody(resp *http.Response) bool {
 	for {
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
-			if werr := s.writeDATAWithDeadline(streamID, buf[:n], false, time.Now().Add(idleTimeout)); werr != nil {
+			if werr := s.writeDATAWithDeadline(streamID, buf[:n], false, time.Now().Add(idleTimeoutNow())); werr != nil {
 				return false
 			}
 		}
@@ -1471,7 +1471,7 @@ func (c *h2ClientConn) FinishBody(resp *http.Response) bool {
 	select {
 	case <-c.streamDone:
 		return true
-	case <-time.After(idleTimeout):
+	case <-time.After(idleTimeoutNow()):
 		return false
 	}
 }
