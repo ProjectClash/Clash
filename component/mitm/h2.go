@@ -59,6 +59,7 @@ const (
 	h2ErrorCodeRefused     = 0x7
 	h2ErrorCodeInternal    = 0x2
 	h2ErrorCodeProtocol    = 0x1
+	h2ErrorCodeCompression = 0x9
 
 	// We never emit a payload larger than the spec's default max frame size.
 	h2MaxWriteFrame = 1 << 14
@@ -131,6 +132,7 @@ func writeH2Frame(w io.Writer, typ, flags uint8, streamID uint32, payload []byte
 type h2Flow struct {
 	mu       sync.Mutex
 	cond     *sync.Cond
+	wake     chan struct{} // closed (then rebuilt) on every grant/shutdown; wakes takeWithDeadline
 	conn     int64
 	streams  map[uint32]int64
 	excluded map[uint32]bool // streams closed locally; stop waiting on them
@@ -140,7 +142,18 @@ type h2Flow struct {
 func newH2Flow() *h2Flow {
 	f := &h2Flow{conn: h2InitialSendWindow, streams: make(map[uint32]int64), excluded: make(map[uint32]bool), initial: h2InitialSendWindow}
 	f.cond = sync.NewCond(&f.mu)
+	f.wake = make(chan struct{})
 	return f
+}
+
+// wakeWaiters closes the wake channel (racing waiters observe it) and
+// installs a fresh one for the next generation of parkers. Caller holds
+// f.mu. Both the cond (unbounded take) and the channel (timed take) are
+// signalled so the two wait paths stay in sync.
+func (f *h2Flow) wakeWaitersLocked() {
+	close(f.wake)
+	f.wake = make(chan struct{})
+	f.cond.Broadcast()
 }
 
 func (f *h2Flow) take(streamID uint32, max int64) int64 {
@@ -172,6 +185,58 @@ func (f *h2Flow) take(streamID uint32, max int64) int64 {
 	}
 }
 
+// takeWithDeadline is take with a wait deadline: a peer that stops granting
+// window (or a stalled client that stops reading DATA) must not park the
+// serve goroutine on the cond forever — the h1 legs bound the same hazard
+// with per-chunk write deadlines. Returns 0 when the deadline expired
+// before any window became available; callers treat that as a write failure.
+//
+// Implementation note: sync.Cond has no timed wait, so wakeups are modeled
+// with a closed-channel signal instead of cond.Broadcast. grant/Shutdown/
+// exclude close f.wake (previously cond.Broadcast) and the waiters rebuild
+// the channel under the lock — a plain condvar in channel clothing, with
+// the timer race handled by select.
+func (f *h2Flow) takeWithDeadline(streamID uint32, max int64, deadline time.Time) int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for {
+		if f.excluded[streamID] {
+			return 0
+		}
+		connAvail := f.conn
+		streamAvail, ok := f.streams[streamID]
+		if !ok {
+			streamAvail = f.initial
+		}
+		avail := connAvail
+		if streamAvail < avail {
+			avail = streamAvail
+		}
+		if avail > 0 {
+			n := avail
+			if n > max {
+				n = max
+			}
+			f.conn -= n
+			f.streams[streamID] = streamAvail - n
+			return n
+		}
+		wait := time.Until(deadline)
+		if wait <= 0 {
+			return 0
+		}
+		wake := f.wake
+		timer := time.NewTimer(wait)
+		f.mu.Unlock()
+		select {
+		case <-wake:
+		case <-timer.C:
+		}
+		timer.Stop()
+		f.mu.Lock()
+	}
+}
+
 // grant applies a WINDOW_UPDATE delta. A zero delta is a no-op (a
 // stream grant on an unregistered stream must not materialize a zero
 // window entry, which take() would honor and park on forever).
@@ -185,7 +250,7 @@ func (f *h2Flow) grant(streamID uint32, delta int64) {
 	} else {
 		f.streams[streamID] += delta
 	}
-	f.cond.Broadcast()
+	f.wakeWaitersLocked()
 	f.mu.Unlock()
 }
 
@@ -196,7 +261,7 @@ func (f *h2Flow) registerStream(streamID uint32) {
 	if _, ok := f.streams[streamID]; !ok {
 		f.streams[streamID] = f.initial
 	}
-	f.cond.Broadcast()
+	f.wakeWaitersLocked()
 	f.mu.Unlock()
 }
 
@@ -221,14 +286,14 @@ func (f *h2Flow) applyInitialWindow(value uint32) error {
 	for sid, w := range f.streams {
 		f.streams[sid] = w + delta
 	}
-	f.cond.Broadcast()
+	f.wakeWaitersLocked()
 	return nil
 }
 
 func (f *h2Flow) exclude(streamID uint32) {
 	f.mu.Lock()
 	f.excluded[streamID] = true
-	f.cond.Broadcast()
+	f.wakeWaitersLocked()
 	f.mu.Unlock()
 }
 
@@ -240,7 +305,7 @@ func (f *h2Flow) Shutdown() {
 	for sid := range f.streams {
 		f.excluded[sid] = true
 	}
-	f.cond.Broadcast()
+	f.wakeWaitersLocked()
 	f.mu.Unlock()
 }
 
@@ -348,14 +413,30 @@ func (c *h2Conn) writeHeaderBlock(streamID uint32, endStream bool, encode func(e
 }
 
 func (c *h2Conn) writeDATA(streamID uint32, data []byte, endStream bool) error {
+	return c.writeDATAWithDeadline(streamID, data, endStream, time.Time{})
+}
+
+// writeDATAWithDeadline bounds the window wait per chunk: deadline zero
+// means unbounded (the h2 client leg — the upstream answers or the
+// handshake timeout fires). The server leg always passes a real deadline
+// so a stalled client cannot park the serve goroutine forever.
+func (c *h2Conn) writeDATAWithDeadline(streamID uint32, data []byte, endStream bool, deadline time.Time) error {
 	for len(data) > 0 {
 		want := int64(len(data))
 		if want > h2MaxWriteFrame {
 			want = h2MaxWriteFrame
 		}
-		n := c.flow.take(streamID, want)
+		var n int64
+		if deadline.IsZero() {
+			n = c.flow.take(streamID, want)
+		} else {
+			n = c.flow.takeWithDeadline(streamID, want, deadline)
+		}
 		if n == 0 {
-			return fmt.Errorf("http2 stream %d closed while writing", streamID)
+			if deadline.IsZero() || time.Now().Before(deadline) {
+				return fmt.Errorf("http2 stream %d closed while writing", streamID)
+			}
+			return fmt.Errorf("http2 stream %d stalled past write deadline", streamID)
 		}
 		chunk := data[:n]
 		data = data[n:]
@@ -583,11 +664,16 @@ func (s *h2Server) readLoop() {
 	for {
 		f, err := readH2Frame(s.br)
 		if err != nil {
+			// Wake any DATA writer parked on flow-control window: a client
+			// that stops reading (and then vanishes) would otherwise leave
+			// the serve goroutine parked on the cond forever.
+			s.flow.Shutdown()
 			_ = s.conn.Close()
 			return
 		}
 		if handled, herr := s.handleCommonFrame(f); herr != nil || handled {
 			if herr != nil {
+				s.flow.Shutdown()
 				_ = s.conn.Close()
 				return
 			}
@@ -641,6 +727,15 @@ func (s *h2Server) readLoop() {
 }
 
 func (s *h2Server) handleHeaders(f h2Frame) {
+	if f.streamID == 0 || f.streamID%2 == 0 {
+		// HEADERS never travels on stream 0 (connection control only), and
+		// even IDs are server-initiated (RFC 9113 §5.1.1). Answering such a
+		// block would make US emit HEADERS on stream 0 — a violation — so
+		// reject at the door like handleData does for DATA.
+		_ = s.goawayConn(h2ErrorCodeProtocol, "headers on invalid stream id")
+		_ = s.conn.Close()
+		return
+	}
 	payload := f.payload
 	if f.flags&h2FlagPadded != 0 {
 		if len(payload) < 1 || int(payload[0]) >= len(payload) {
@@ -675,7 +770,12 @@ func (s *h2Server) handleHeaders(f h2Frame) {
 func (s *h2Server) finishHeaders(streamID uint32, endStream bool) {
 	fields, err := s.decodeHeaderBlock(s.hdrBuf, streamID)
 	if err != nil {
-		_ = s.writeFrame(h2FrameRSTStream, 0, streamID, []byte{0, 0, 0, h2ErrorCodeInternal})
+		// A failed block leaves the HPACK dynamic table in an undefined
+		// state; RFC 9113 §4.3 makes this a connection error, not a
+		// stream error — later requests would decode against a possibly
+		// desynced table (cross-stream header confusion).
+		_ = s.goawayConn(h2ErrorCodeCompression, "header decode failure")
+		_ = s.conn.Close()
 		return
 	}
 	var method, path, scheme, authority string
@@ -699,6 +799,9 @@ func (s *h2Server) finishHeaders(streamID uint32, endStream bool) {
 	}
 	if method == "" || path == "" {
 		_ = s.writeFrame(h2FrameRSTStream, 0, streamID, []byte{0, 0, 0, h2ErrorCodeInternal})
+		// This stream never entered the active count unless it had been
+		// registered below — it wasn't (no entry, deliver not reached), so
+		// only the request is dropped.
 		return
 	}
 	u := &url.URL{Scheme: schemeOr(scheme, "https"), Host: authority, Path: path}
@@ -728,6 +831,13 @@ func (s *h2Server) finishHeaders(streamID uint32, endStream bool) {
 	s.active++
 	s.streamsMu.Unlock()
 	if endStream {
+		// Fully delivered on arrival: no stream entry is kept, so the
+		// concurrency slot must be released here or every END_STREAM-
+		// on-HEADERS request (all GETs/HEADs) leaks one unit and the
+		// connection wedges at SETTINGS_MAX_CONCURRENT_STREAMS requests.
+		s.streamsMu.Lock()
+		s.active--
+		s.streamsMu.Unlock()
 		s.deliverRequest(req)
 		return
 	}
@@ -921,7 +1031,8 @@ func (s *h2Server) SubmitResponse(resp *http.Response) error {
 
 // FinishBody streams the response body as DATA frames and closes the stream.
 // It is a no-op when SubmitResponse already closed the stream (bodyless or
-// zero-length responses).
+// zero-length responses). The window wait per chunk is bounded by the idle
+// timeout so a client that stops reading releases the serve goroutine.
 func (s *h2Server) FinishBody(resp *http.Response) bool {
 	streamID := s.current
 	if s.streamEnded {
@@ -931,7 +1042,7 @@ func (s *h2Server) FinishBody(resp *http.Response) bool {
 	for {
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
-			if werr := s.writeDATA(streamID, buf[:n], false); werr != nil {
+			if werr := s.writeDATAWithDeadline(streamID, buf[:n], false, time.Now().Add(idleTimeout)); werr != nil {
 				return false
 			}
 		}
@@ -945,6 +1056,7 @@ func (s *h2Server) FinishBody(resp *http.Response) bool {
 }
 
 func (s *h2Server) Close() {
+	s.flow.Shutdown()
 	_ = s.conn.Close()
 }
 
@@ -974,6 +1086,14 @@ type h2ClientConn struct {
 	h2Conn
 	streamID uint32
 
+	// Round-trip state. rtMu guards respOnce/respReady/respErr/... because
+	// RoundTrip resets them while the readLoop goroutine may be failing the
+	// previous round trip via failStream/abort concurrently — resetting a
+	// sync.Once the reader is inside Do() is a data race and can leave a
+	// closed channel replaced by a fresh one that never closes (hung
+	// RoundTrip). The readLoop takes rtMu to publish errors/status; the
+	// RoundTrip caller takes it to reset and to read.
+	rtMu       sync.Mutex
 	respOnce   sync.Once
 	respReady  chan struct{}
 	respErr    error
@@ -1054,9 +1174,12 @@ func (c *h2ClientConn) readLoop() {
 		case h2FrameRSTStream:
 			// Per-stream error only: fail the in-flight round trip with the
 			// code; the connection itself stays usable unless the peer also
-			// sends GOAWAY (W5).
-			code := uint32(f.payload[0])<<24 | uint32(f.payload[1])<<16 | uint32(f.payload[2])<<8 | uint32(f.payload[3])
+			// sends GOAWAY (W5). The length check MUST gate the payload
+			// read: a 0-length RST_STREAM is malformed but arrives in the
+			// wild, and indexing before checking panicked the read loop
+			// (killing the whole process).
 			if len(f.payload) == 4 {
+				code := uint32(f.payload[0])<<24 | uint32(f.payload[1])<<16 | uint32(f.payload[2])<<8 | uint32(f.payload[3])
 				c.failStream(fmt.Errorf("http2: stream reset by upstream, error code %d", code))
 			} else {
 				c.failStream(fmt.Errorf("http2: stream reset by upstream"))
@@ -1069,12 +1192,15 @@ func (c *h2ClientConn) readLoop() {
 // failStream surfaces a stream-scoped error to the pending RoundTrip without
 // tearing down the whole connection.
 func (c *h2ClientConn) failStream(err error) {
+	c.rtMu.Lock()
 	c.respOnce.Do(func() {
 		c.respErr = err
 		close(c.respReady)
 	})
-	if c.respBodyW != nil {
-		_ = c.respBodyW.CloseWithError(err)
+	w := c.respBodyW
+	c.rtMu.Unlock()
+	if w != nil {
+		_ = w.CloseWithError(err)
 	}
 }
 
@@ -1128,9 +1254,11 @@ func (c *h2ClientConn) finishHeaders() {
 		}
 		header.Add(textproto.CanonicalMIMEHeaderKey(hf.Name), hf.Value)
 	}
+	c.rtMu.Lock()
 	c.respStatus = status
 	c.respHeader = header
 	c.respOnce.Do(func() { close(c.respReady) })
+	c.rtMu.Unlock()
 }
 
 func (c *h2ClientConn) handleData(f h2Frame) {
@@ -1154,63 +1282,83 @@ func (c *h2ClientConn) handleData(f h2Frame) {
 		}
 		payload = payload[:len(payload)-pad]
 	}
-	if len(payload) > 0 && c.respBodyW != nil {
-		if _, err := c.respBodyW.Write(payload); err != nil {
-			// Reader side went away; keep draining so the connection stays
-			// protocol-correct, but do not buffer.
+	if len(payload) > 0 || f.flags&h2FlagEndStream != 0 {
+		c.rtMu.Lock()
+		w := c.respBodyW
+		sd := c.streamDone
+		c.rtMu.Unlock()
+		if len(payload) > 0 && w != nil {
+			if _, err := w.Write(payload); err != nil {
+				// Reader side went away; keep draining so the connection
+				// stays protocol-correct, but do not buffer.
+			}
+		}
+		if f.flags&h2FlagEndStream != 0 {
+			if w != nil {
+				_ = w.Close()
+			}
+			if sd != nil {
+				select {
+				case <-sd:
+				default:
+					close(sd)
+				}
+			}
 		}
 	}
 	if len(payload) > 0 {
 		var wu [4]byte
 		wu[0], wu[1], wu[2], wu[3] = byte(len(payload)>>24)&0x7f, byte(len(payload)>>16), byte(len(payload)>>8), byte(len(payload))
 		_ = c.writeFrame(h2FrameWindowUpdate, 0, 0, wu[:])
-		_ = c.writeFrame(h2FrameWindowUpdate, 0, c.streamID, wu[:])
-	}
-	if f.flags&h2FlagEndStream != 0 {
-		if c.respBodyW != nil {
-			_ = c.respBodyW.Close()
-		}
-		select {
-		case <-c.streamDone:
-		default:
-			close(c.streamDone)
-		}
+		// The in-flight stream is c.streamID - 2: RoundTrip bumps c.streamID
+		// past the active stream before the response arrives, so granting on
+		// c.streamID credited a phantom future stream and the real stream's
+		// receive window never came back — every body over the 64 KiB
+		// default window truncated at exactly 65535 bytes.
+		_ = c.writeFrame(h2FrameWindowUpdate, 0, c.streamID-2, wu[:])
 	}
 }
 
 func (c *h2ClientConn) abort(err error) {
 	c.closeOnce.Do(func() { close(c.done) })
 	c.flow.Shutdown()
+	c.rtMu.Lock()
 	c.respOnce.Do(func() {
 		c.respErr = err
 		if c.respReady != nil {
 			close(c.respReady)
 		}
 	})
-	if c.respBodyW != nil {
-		_ = c.respBodyW.CloseWithError(err)
+	w := c.respBodyW
+	sd := c.streamDone
+	c.rtMu.Unlock()
+	if w != nil {
+		_ = w.CloseWithError(err)
 	}
-	if c.streamDone != nil {
+	if sd != nil {
 		select {
-		case <-c.streamDone:
+		case <-sd:
 		default:
-			close(c.streamDone)
+			close(sd)
 		}
 	}
 	_ = c.conn.Close()
 }
 
 func (c *h2ClientConn) RoundTrip(ctx context.Context, req *http.Request) (*http.Response, error) {
+	c.rtMu.Lock()
 	c.respOnce = sync.Once{}
 	c.respReady = make(chan struct{})
 	// Clear per-round-trip state: a previous stream's error or status must
 	// not leak into this request (W5 keeps the connection alive, so the
-	// struct is reused).
+	// struct is reused). Under rtMu: the readLoop may be publishing the
+	// previous round trip's failure concurrently.
 	c.respErr = nil
 	c.respStatus = 0
 	c.respHeader = nil
 	c.respBodyR, c.respBodyW = io.Pipe()
 	c.streamDone = make(chan struct{})
+	c.rtMu.Unlock()
 	streamID := c.streamID
 	c.flow.registerStream(streamID) // open the stream at the current window
 	c.streamID += 2
@@ -1276,8 +1424,11 @@ func (c *h2ClientConn) RoundTrip(ctx context.Context, req *http.Request) (*http.
 	select {
 	case <-c.respReady:
 	case <-c.done:
-		if c.respErr != nil {
-			return nil, c.respErr
+		c.rtMu.Lock()
+		respErr := c.respErr
+		c.rtMu.Unlock()
+		if respErr != nil {
+			return nil, respErr
 		}
 		return nil, fmt.Errorf("http2: connection closed by upstream")
 	case <-ctx.Done():
@@ -1285,20 +1436,26 @@ func (c *h2ClientConn) RoundTrip(ctx context.Context, req *http.Request) (*http.
 	case <-time.After(h2HeaderTimeout):
 		return nil, fmt.Errorf("http2: upstream response headers timed out")
 	}
-	if c.respErr != nil {
-		return nil, c.respErr
+	c.rtMu.Lock()
+	respErr := c.respErr
+	respStatus := c.respStatus
+	respHeader := c.respHeader
+	respBodyR := c.respBodyR
+	c.rtMu.Unlock()
+	if respErr != nil {
+		return nil, respErr
 	}
-	if c.respStatus == 0 {
+	if respStatus == 0 {
 		return nil, fmt.Errorf("http2: upstream sent no :status")
 	}
 	resp := &http.Response{
-		StatusCode: c.respStatus,
-		Status:     strconv.Itoa(c.respStatus) + " " + http.StatusText(c.respStatus),
+		StatusCode: respStatus,
+		Status:     strconv.Itoa(respStatus) + " " + http.StatusText(respStatus),
 		Proto:      "HTTP/2.0",
 		ProtoMajor: 2,
 		ProtoMinor: 0,
-		Header:     c.respHeader,
-		Body:       c.respBodyR,
+		Header:     respHeader,
+		Body:       respBodyR,
 	}
 	if cl := resp.Header.Get("Content-Length"); cl != "" {
 		if n, perr := strconv.ParseInt(cl, 10, 64); perr == nil {

@@ -66,8 +66,6 @@ var (
 	snifferDispatcher syncatomic.Pointer[sniffer.Dispatcher]
 	sniffingEnable    syncatomic.Bool
 
-	mitmDispatcher syncatomic.Pointer[mitm.Dispatcher]
-
 	ruleUpdateCallback = utils.NewCallback[P.RuleProvider]()
 )
 
@@ -350,11 +348,13 @@ func UpdateSniffer(dispatcher *sniffer.Dispatcher) {
 }
 
 // UpdateMITM swaps the MITM dispatcher used by the TCP hot path; nil
-// disables interception.
+// disables. The hot path reads through mitm.ActiveDispatcher, so this
+// MUST delegate to the component's atomic store: a tunnel-local slot is
+// write-only here, and storing into one left the whole feature dead.
 func UpdateMITM(dispatcher *mitm.Dispatcher) {
 	configMux.Lock()
-	mitmDispatcher.Store(dispatcher)
-	configMux.Unlock()
+	defer configMux.Unlock()
+	mitm.UpdateMITM(dispatcher)
 }
 
 // Mode return current mode

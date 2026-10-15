@@ -159,12 +159,31 @@ func (c *Config) Normalize() error {
 	// A port in both lists is ambiguous: the gate cannot know whether the
 	// conn is cleartext or TLS, and the dialer picks TLS-vs-plain from the
 	// scheme the gate chose. Reject at load instead of guessing at runtime.
-	// Empty lists are skipped: they mean "standard port only" and never
-	// overlap in practice (IntRanges.Check treats empty as match-all).
+	// The comparison uses the EFFECTIVE sets: an empty list means "standard
+	// port only" (443 https / 80 http), so https-ports:["80"] with no
+	// http-ports must collide exactly like an explicit http-ports:["80"] —
+	// otherwise every plaintext :80 conn would fail a TLS handshake.
+	httpsAny := len(c.HTTPSPorts) == 0
+	httpAny := len(c.HTTPPorts) == 0
 	var overlap uint16
-	if len(c.HTTPPorts) > 0 && len(c.HTTPSPorts) > 0 {
+	if !httpsAny && !httpAny {
 		c.HTTPPorts.Range(func(p uint16) bool {
 			if c.HTTPSPorts.Check(p) {
+				overlap = p
+				return false
+			}
+			return true
+		})
+	} else if !httpsAny && httpAny {
+		// http is standard-port-only (80): collide if 80 is claimed for TLS.
+		if c.HTTPSPorts.Check(80) {
+			overlap = 80
+		}
+	} else if httpsAny && !httpAny {
+		// https is standard-port-only (443): collide if 443 is claimed for
+		// cleartext.
+		c.HTTPPorts.Range(func(p uint16) bool {
+			if p == 443 {
 				overlap = p
 				return false
 			}

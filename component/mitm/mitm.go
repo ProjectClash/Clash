@@ -45,9 +45,13 @@ var (
 
 // HostCertificate pairs a minted leaf with the private key and the public
 // fingerprint (SHA-256 of the DER) that the UI can show for trust auditing.
+// caFingerprint is the SHA-256 of the CA that signed the leaf: leaves minted
+// by a previous CA are refused (and re-minted) after Regenerate/LoadState
+// swap the root, instead of being served for up to leafValidity.
 type HostCertificate struct {
-	Certificate tls.Certificate
-	Fingerprint [32]byte
+	Certificate   tls.Certificate
+	Fingerprint   [32]byte
+	caFingerprint [32]byte
 }
 
 // Engine holds the generated CA material and the minted-leaf cache.
@@ -96,7 +100,10 @@ func (e *Engine) CaNotAfter() (time.Time, error) {
 
 // Regenerate discards the current CA and mints a fresh one. Existing leaf
 // certificates and installed trust profiles become invalid, so the client
-// only calls this when the user explicitly resets MITM.
+// only calls this when the user explicitly resets MITM. The cache wipe and
+// the CA swap happen under one lock hold, so a mint that snapshotted the
+// old CA cannot re-insert an old-CA leaf after the reset (its insert is
+// rejected by the caFingerprint ownership check instead).
 func (e *Engine) Regenerate() error {
 	if e == nil {
 		return ErrNotEnabled
@@ -169,7 +176,7 @@ func (e *Engine) MintLeaf(host string) (*HostCertificate, error) {
 		return nil, err
 	}
 	e.mu.Lock()
-	if cached, ok := e.leaves[normalized]; ok && leafFresh(cached) {
+	if cached, ok := e.leaves[normalized]; ok && leafFresh(cached) && e.leafOwnedLocked(cached) {
 		e.mu.Unlock()
 		return cached, nil
 	}
@@ -177,6 +184,7 @@ func (e *Engine) MintLeaf(host string) (*HostCertificate, error) {
 		e.evictLeafCacheLocked()
 	}
 	caCert, caKey := e.caCert, e.caKey
+	caSum := sha256.Sum256(caCert.Raw)
 	e.mu.Unlock()
 	if caCert == nil || caKey == nil {
 		return nil, ErrNotEnabled
@@ -186,16 +194,29 @@ func (e *Engine) MintLeaf(host string) (*HostCertificate, error) {
 	if err != nil {
 		return nil, err
 	}
+	leaf.caFingerprint = caSum
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if cached, ok := e.leaves[normalized]; ok && leafFresh(cached) {
+	if cached, ok := e.leaves[normalized]; ok && leafFresh(cached) && e.leafOwnedLocked(cached) {
 		// A concurrent mint for the same host inserted first: serve the
 		// cached leaf and drop ours so all connections share one identity.
 		return cached, nil
 	}
 	e.insertLeafLocked(normalized, leaf)
 	return leaf, nil
+}
+
+// leafOwnedLocked reports whether a cached leaf was signed by the engine's
+// CURRENT CA. Callers hold e.mu. Without this check a mint racing a
+// Regenerate could insert (and then keep serving) a leaf from the old CA
+// that no installed profile trusts.
+func (e *Engine) leafOwnedLocked(leaf *HostCertificate) bool {
+	if e.caCert == nil {
+		return false
+	}
+	sum := sha256.Sum256(e.caCert.Raw)
+	return leaf.caFingerprint == sum
 }
 
 // insertLeafLocked adds an entry to the cache and the insertion-order index;

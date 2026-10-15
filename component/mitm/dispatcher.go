@@ -167,16 +167,25 @@ func (d *Dispatcher) InnerHandle(ctx context.Context, conn *N.BufferedConn, meta
 
 	if proto == "http" {
 		// Plain HTTP: no handshake to answer; serve the reverse proxy
-		// directly on the cleartext conn.
+		// directly on the cleartext conn. MatchHost keeps IP-named and
+		// ungated hosts out now that the gate no longer requires a
+		// DNS-mapping mode to consider cleartext at all.
 		host := metadata.Host
-		if host == "" {
+		if host == "" || !config.MatchHost(host) {
 			return false
 		}
 		d.serveCleartext(serveCtx, conn, config, host, dial, uint16(metadata.DstPort))
 		return true
 	}
 	// HTTPS: peek the ClientHello to learn the SNI without consuming it.
+	// The peek is bounded: a client that connects and stalls must release
+	// the tunnel's connection slot within one handshake window instead of
+	// pinning it indefinitely (bufio.Peek does not observe ctx, so the
+	// dialCtx deadline never reaches this read). The deadline is cleared
+	// right after, before the real handshake re-reads the buffered bytes.
+	_ = conn.SetReadDeadline(time.Now().Add(innerHandshakeTimeout))
 	host, err := peekClientHelloSNI(conn)
+	_ = conn.SetReadDeadline(time.Time{})
 	if err != nil || host == "" {
 		log.Debugln("[MITM] no ClientHello SNI on port %d: %v", metadata.DstPort, err)
 		return false
@@ -252,7 +261,13 @@ func (d *Dispatcher) gate(config *Config, metadata *C.Metadata) (proto string, o
 			return "", false
 		}
 	}
-	if metadata.DNSMode == C.DNSMapping && metadata.Host != "" && config.MatchPort("http", dstPort) && !config.MatchPort("https", dstPort) {
+	// Plain HTTP is decided by the port alone: fake-ip (the default
+	// enhanced mode) and the sniffer's replaceDomain both leave a DNSMode
+	// other than DNSMapping on the metadata, so the old DNSMapping-only
+	// requirement made port-80 interception unreachable on default
+	// configs. Host quality is enforced downstream: InnerHandle runs
+	// MatchHost (which filters bare IPs) before serving cleartext.
+	if metadata.Host != "" && config.MatchPort("http", dstPort) && !config.MatchPort("https", dstPort) {
 		return "http", true
 	}
 	if config.MatchPort("https", dstPort) {

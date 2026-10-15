@@ -242,6 +242,9 @@ mitm:
   ## 客户端可通过 MITMState / ExportMITMCa 导出安装；留空则 CA 仅存在于
   ## 进程内：重载时保持不变，但核心重启后必须重新安装信任描述文件。
   # store-dir: "./mitm-ca"
+  ## 注意：QUIC/HTTP3 不经过本拦截器（没有 UDP 侧策略）。
+  ## 若被拦截站点升级到 h3，将绕过 MITM 直连；如需保持拦截，
+  ## 请用规则阻断 UDP 443 迫使浏览器回落 h2。
   ## 拦截的域名：裸域与 "+." 前缀形式均覆盖该域及其全部子域，
   ## 需使用 punycode（xn--）ASCII 形式，不支持非 ASCII（IDN）写法
   hosts:
