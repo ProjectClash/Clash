@@ -21,6 +21,7 @@ import (
 	"github.com/ProjectClash/Clash/common/utils"
 	"github.com/ProjectClash/Clash/component/dialer"
 	"github.com/ProjectClash/Clash/component/loopback"
+	"github.com/ProjectClash/Clash/component/mitm"
 	"github.com/ProjectClash/Clash/component/nat"
 	"github.com/ProjectClash/Clash/component/pause"
 	"github.com/ProjectClash/Clash/component/process"
@@ -344,6 +345,16 @@ func UpdateSniffer(dispatcher *sniffer.Dispatcher) {
 	snifferDispatcher.Store(dispatcher)
 	sniffingEnable.Store(dispatcher.Enable())
 	configMux.Unlock()
+}
+
+// UpdateMITM swaps the MITM dispatcher used by the TCP hot path; nil
+// disables. The hot path reads through mitm.ActiveDispatcher, so this
+// MUST delegate to the component's atomic store: a tunnel-local slot is
+// write-only here, and storing into one left the whole feature dead.
+func UpdateMITM(dispatcher *mitm.Dispatcher) {
+	configMux.Lock()
+	defer configMux.Unlock()
+	mitm.UpdateMITM(dispatcher)
 }
 
 // Mode return current mode
@@ -753,6 +764,55 @@ func handleTCPConnContext(parent context.Context, connCtx C.ConnContext) {
 	if err != nil {
 		log.Warnln("[Metadata] parse failed: %s", err.Error())
 		return
+	}
+
+	// MITM interception: when the dispatcher claims this connection it is
+	// served to completion (TLS terminated, requests rewritten and forwarded
+	// through the same rule-resolved proxy), and handleTCPConnContext closes
+	// it without running the byte-pipe below. A decline returns the conn
+	// with peeked bytes intact and the normal path proceeds.
+	//
+	// dialCtx carries the short TCP dial deadline for the gate/peek phase
+	// only. Once the dispatcher claims the conn it switches to a long-lived
+	// context (values kept, cancellation dropped), and every upstream dial
+	// inside it runs under a fresh DefaultTCPTimeout budget so keep-alive
+	// requests seconds or minutes later still dial.
+	if d := mitm.ActiveDispatcher(); d != nil && d.Enable() {
+		dialCtx, dialCancel := context.WithTimeout(parent, C.DefaultTCPTimeout)
+		// A dedicated metadata copy per dial: metadata.Pure() can alias
+		// the original in some DNS modes, and mutating a shared struct
+		// would corrupt the outer conn's metadata.
+		mitmDial := func(ctx context.Context, host string, port uint16) (net.Conn, error) {
+			dialMeta := &C.Metadata{
+				NetWork: metadata.NetWork,
+				Type:    metadata.Type,
+				SrcIP:   metadata.SrcIP,
+				SrcPort: metadata.SrcPort,
+				InIP:    metadata.InIP,
+				InPort:  metadata.InPort,
+				InName:  metadata.InName,
+				InUser:  metadata.InUser,
+				Host:    host,
+				DstPort: port,
+				DNSMode: C.DNSNormal,
+			}
+			return proxy.DialContext(ctx, dialMeta)
+		}
+		claimed := mitm.TrafficMatch(dialCtx, conn, metadata, mitmDial)
+		dialCancel()
+		if claimed {
+			if N.HandshakePending(conn) {
+				// The interceptor answers inline; the outer proxy
+				// conn is never dialed, so the deferred handshake
+				// resolves as success to whoever waits on it.
+				_ = N.ReportDeferredHandshake(conn, nil)
+			}
+			// Gated conns never reach logMetadata below; leave the
+			// same style of trace so interception is visible.
+			log.Infoln("[%s] %s --> %s intercepted[MITM] using %s",
+				strings.ToUpper(metadata.NetWork.String()), metadata.SourceDetail(), metadata.RemoteAddress(), proxy.Name())
+			return
+		}
 	}
 
 	dialMetadata := metadata

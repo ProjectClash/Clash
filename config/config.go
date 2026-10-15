@@ -23,6 +23,7 @@ import (
 	"github.com/ProjectClash/Clash/component/dialer"
 	"github.com/ProjectClash/Clash/component/fakeip"
 	"github.com/ProjectClash/Clash/component/geodata"
+	"github.com/ProjectClash/Clash/component/mitm"
 	"github.com/ProjectClash/Clash/component/process"
 	"github.com/ProjectClash/Clash/component/resolver"
 	"github.com/ProjectClash/Clash/component/sniffer"
@@ -214,6 +215,7 @@ type Config struct {
 	RuleProviders map[string]P.RuleProvider
 	Tunnels       []LC.Tunnel
 	Sniffer       *sniffer.Config
+	MITM          *mitm.Config
 	TLS           *TLS
 }
 
@@ -390,6 +392,41 @@ type RawSniffer struct {
 	Sniff map[string]RawSniffingConfig `yaml:"sniff" json:"sniff"`
 }
 
+// RawMITM is the user-facing mitm: block. Hosts mirror the gate model of the
+// rule engine: "example.com" pins the host, "+.example.com" covers the
+// domain and every subdomain. rewrite entries are ordered; the first match
+// wins.
+type RawMITM struct {
+	Enable   bool   `yaml:"enable" json:"enable"`
+	StoreDir string `yaml:"store-dir" json:"store-dir"`
+
+	Hosts []string `yaml:"hosts" json:"hosts"`
+	Skip  []string `yaml:"skip-domain" json:"skip-domain"`
+
+	HTTPSPorts []string `yaml:"https-ports" json:"https-ports"`
+	HTTPPorts  []string `yaml:"http-ports" json:"http-ports"`
+
+	SkipDstAddress []string `yaml:"skip-dst-address" json:"skip-dst-address"`
+
+	Rewrite []RawMITMRewrite `yaml:"rewrite" json:"rewrite"`
+}
+
+type RawMITMRewrite struct {
+	URLPattern string `yaml:"url-pattern" json:"url-pattern"`
+
+	Redirect string `yaml:"redirect" json:"redirect"`
+	Reject   int    `yaml:"reject" json:"reject"`
+
+	Headers []RawMITMHeader `yaml:"headers" json:"headers"`
+}
+
+type RawMITMHeader struct {
+	Action      string `yaml:"action" json:"action"`
+	Name        string `yaml:"name" json:"name"`
+	Value       string `yaml:"value" json:"value"`
+	ValuePrefix string `yaml:"value-prefix" json:"value-prefix"`
+}
+
 type RawSniffingConfig struct {
 	Ports        []string `yaml:"ports" json:"ports"`
 	OverrideDest *bool    `yaml:"override-destination" json:"override-destination"`
@@ -474,6 +511,7 @@ type RawConfig struct {
 	Profile          RawProfile                `yaml:"profile" json:"profile"`
 	GeoXUrl          RawGeoXUrl                `yaml:"geox-url" json:"geox-url"`
 	Sniffer          RawSniffer                `yaml:"sniffer" json:"sniffer"`
+	MITM             RawMITM                   `yaml:"mitm" json:"mitm"`
 	TLS              RawTLS                    `yaml:"tls" json:"tls"`
 
 	ClashForAndroid RawClashForAndroid `yaml:"clash-for-android" json:"clash-for-android"`
@@ -784,6 +822,12 @@ func ParseRawConfig(rawCfg *RawConfig) (*Config, error) {
 		return nil, err
 	}
 	probe("sniffer")
+
+	config.MITM, err = parseMITM(rawCfg.MITM)
+	if err != nil {
+		return nil, err
+	}
+	probe("mitm")
 
 	elapsedTime := time.Since(startTime) / time.Millisecond                     // duration in ms
 	log.Infoln("Initial configuration complete, total time: %dms", elapsedTime) //Segment finished in xxm
@@ -1949,6 +1993,80 @@ func parseSniffer(snifferRaw RawSniffer, ruleProviders map[string]P.RuleProvider
 	snifferConfig.SkipDomain = skipDomain
 
 	return snifferConfig, nil
+}
+
+// parseMITM converts the user-facing mitm: block into the runtime Config.
+// Hosts accept the rule-engine forms: "example.com" pins the exact host and
+// its subdomains; "+.example.com" covers example.com and every subdomain
+// (stored as the leading-dot form). All validation lives in
+// mitm.Config.Normalize so the package is the single source of truth.
+func parseMITM(raw RawMITM) (*mitm.Config, error) {
+	cfg := &mitm.Config{
+		Enable:   raw.Enable,
+		StoreDir: raw.StoreDir,
+	}
+
+	httpsPorts, err := utils.NewUnsignedRangesFromList[uint16](raw.HTTPSPorts)
+	if err != nil {
+		return nil, fmt.Errorf("mitm https-ports: %w", err)
+	}
+	cfg.HTTPSPorts = httpsPorts
+	httpPorts, err := utils.NewUnsignedRangesFromList[uint16](raw.HTTPPorts)
+	if err != nil {
+		return nil, fmt.Errorf("mitm http-ports: %w", err)
+	}
+	cfg.HTTPPorts = httpPorts
+
+	for _, host := range raw.Hosts {
+		host = strings.TrimSpace(host)
+		if strings.HasPrefix(host, "+.") {
+			cfg.HostGates = append(cfg.HostGates, "."+host[2:])
+			continue
+		}
+		if strings.HasPrefix(host, ".") {
+			cfg.HostGates = append(cfg.HostGates, host)
+			continue
+		}
+		cfg.HostGates = append(cfg.HostGates, host)
+	}
+	for _, host := range raw.Skip {
+		host = strings.TrimSpace(host)
+		if strings.HasPrefix(host, "+.") {
+			cfg.SkipDomains = append(cfg.SkipDomains, "."+host[2:])
+			continue
+		}
+		cfg.SkipDomains = append(cfg.SkipDomains, host)
+	}
+	cfg.SkipDstAddress = make([]netip.Prefix, 0, len(raw.SkipDstAddress))
+	for _, cidr := range raw.SkipDstAddress {
+		prefix, err := netip.ParsePrefix(strings.TrimSpace(cidr))
+		if err != nil {
+			return nil, fmt.Errorf("mitm skip-dst-address %q: %w", cidr, err)
+		}
+		cfg.SkipDstAddress = append(cfg.SkipDstAddress, prefix)
+	}
+
+	for _, rewrite := range raw.Rewrite {
+		policy := mitm.RewritePolicy{
+			URLPattern: rewrite.URLPattern,
+			Redirect:   rewrite.Redirect,
+			Reject:     rewrite.Reject,
+		}
+		for _, header := range rewrite.Headers {
+			policy.HeaderRules = append(policy.HeaderRules, mitm.HeaderRule{
+				Action:      header.Action,
+				Name:        header.Name,
+				Value:       header.Value,
+				ValuePrefix: header.ValuePrefix,
+			})
+		}
+		cfg.RewritePolicies = append(cfg.RewritePolicies, policy)
+	}
+
+	if err := cfg.Normalize(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
 }
 
 func parseIPCIDR(addresses []string, cidrSet *cidr.IpCidrSet, adapterName string, ruleProviders map[string]P.RuleProvider) (matchers []C.IpMatcher, err error) {

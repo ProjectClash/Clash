@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
@@ -22,6 +23,7 @@ import (
 	mihomoHttp "github.com/ProjectClash/Clash/component/http"
 	"github.com/ProjectClash/Clash/component/iface"
 	"github.com/ProjectClash/Clash/component/keepalive"
+	"github.com/ProjectClash/Clash/component/mitm"
 	"github.com/ProjectClash/Clash/component/profile"
 	"github.com/ProjectClash/Clash/component/profile/cachefile"
 	"github.com/ProjectClash/Clash/component/resolver"
@@ -117,6 +119,8 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	applyProbe("rules")
 	updateSniffer(cfg.Sniffer)
 	applyProbe("sniffer")
+	updateMITM(cfg.MITM, cfg.TLS.CustomTrustCert)
+	applyProbe("mitm")
 	updateHosts(cfg.Hosts)
 	applyProbe("hosts")
 	updateGeneral(cfg.General, true)
@@ -409,6 +413,53 @@ func updateSniffer(snifferConfig *sniffer.Config) {
 	} else {
 		log.Infoln("Sniffer is closed")
 	}
+}
+
+func updateMITM(mitmConfig *mitm.Config, customTrustCert []string) {
+	if mitmConfig == nil || !mitmConfig.Enable {
+		tunnel.UpdateMITM(nil)
+		log.Infoln("MITM is closed")
+		return
+	}
+	// Interception requires a policy block per connection; gates alone
+	// never intercept. Warn so the user understands the consequence instead
+	// of silently running a no-op interceptor.
+	if len(mitmConfig.HostGates) > 0 && len(mitmConfig.RewritePolicies) == 0 {
+		log.Warnln("[MITM] hosts are configured but no rewrite policies: no traffic will be intercepted because every connection must match a policy")
+	}
+	// Seed the outer-leg verification pool with the user's custom trust
+	// certificates, matching how the core's own CA pool is extended above;
+	// without them, origins behind private CAs fail the outer handshake.
+	// Parse-append each parseable entry and warn per rejected one; the pool
+	// is used only if at least one certificate parsed.
+	if len(customTrustCert) > 0 {
+		pool := x509.NewCertPool()
+		parsed := 0
+		for _, certPEM := range customTrustCert {
+			if pool.AppendCertsFromPEM([]byte(certPEM)) {
+				parsed++
+				continue
+			}
+			log.Warnln("[MITM] ignoring an unparseable tls.custom-trust-cert entry: connections to origins signed by that certificate will fail the upstream TLS handshake")
+		}
+		if parsed > 0 {
+			mitmConfig.UpstreamRoots = pool
+		}
+	}
+	// Reuse the previous engine when the CA is memory-only (no store-dir):
+	// minting a fresh CA on every reload would silently rotate it and
+	// invalidate every installed trust profile. StableDispatcher mints only
+	// on first construction or when a store-dir config demands disk state.
+	dispatcher, err := mitm.StableDispatcher(mitm.ActiveDispatcher(), mitmConfig)
+	if err != nil {
+		// Fail closed: a broken CA state or invalid config must not leave a
+		// half-initialized interceptor in the hot path.
+		log.Warnln("initial mitm failed, err:%v", err)
+		tunnel.UpdateMITM(nil)
+		return
+	}
+	tunnel.UpdateMITM(dispatcher)
+	log.Infoln("MITM is loaded and working (%d host gates)", len(mitmConfig.HostGates))
 }
 
 func updateTunnels(tunnels []LC.Tunnel) {

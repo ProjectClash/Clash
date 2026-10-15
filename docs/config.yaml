@@ -236,6 +236,55 @@ sniffer:
     - "443"
     # - 8000-9999
 
+mitm:
+  enable: false
+  ## CA 证书与私钥的持久化目录。设置后重启保持同一个 CA，
+  ## 客户端可通过 MITMState / ExportMITMCa 导出安装；留空则 CA 仅存在于
+  ## 进程内：重载时保持不变，但核心重启后必须重新安装信任描述文件。
+  # store-dir: "./mitm-ca"
+  ## 注意：QUIC/HTTP3 不经过本拦截器（没有 UDP 侧策略）。
+  ## 若被拦截站点升级到 h3，将绕过 MITM 直连；如需保持拦截，
+  ## 请用规则阻断 UDP 443 迫使浏览器回落 h2。
+  ## 拦截的域名：裸域与 "+." 前缀形式均覆盖该域及其全部子域，
+  ## 需使用 punycode（xn--）ASCII 形式，不支持非 ASCII（IDN）写法
+  hosts:
+    # - +.example.com
+    # - api.example.org
+  ## 强制不拦截的域名（优先级高于 hosts）：与 hosts 相同，
+  ## 裸域与 "+." 形式均覆盖该域及其全部子域
+  # skip-domain:
+  #   - auth.example.com
+  ## 强制不拦截的目标地址
+  # skip-dst-address:
+  #   - 10.0.0.0/8
+  ## HTTPS 拦截端口，默认 443；HTTP 拦截端口，默认 80
+  # https-ports: ["443"]
+  # http-ports: ["80"]
+  ## 重写策略，按顺序匹配，首个命中的生效。
+  ## 注意：仅配置 hosts 不配置 rewrite 时不会拦截任何流量，
+  ## 因为每个连接必须命中一个策略。
+  # rewrite:
+  #   ## 精确主机 + 路径前缀（主机部分同样是后缀语义，含子域）
+  #   - url-pattern: "api.example.com/v2/"
+  #     ## 命中后直接 302，不建立上游连接（保留原路径与查询参数）
+  #     redirect: "mirror.example.com"
+  #   ## 仅路径前缀，作用于所有 hosts 内的域名
+  #   - url-pattern: "/api/v1/old/"
+  #     ## 命中后返回该状态码，不建立上游连接
+  #     reject: 404
+  #   - url-pattern: "api.example.com/v1/"
+  #     ## 请求头改写（在请求发往上游之前执行）
+  #     headers:
+  #       - action: set
+  #         name: User-Agent
+  #         value: "ClashMITM/1.0"
+  #       ## value-prefix 会把前缀拼接到客户端原有请求头值的前面
+  #       ## （不能与 value 同时配置）；
+  #       ## 客户端未携带该请求头时，结果就是前缀本身
+  #       - action: set
+  #         name: Authorization
+  #         value-prefix: "Bearer "
+
 tunnels: # one line config
   - tcp/udp,127.0.0.1:6553,114.114.114.114:53,proxy
   - tcp,127.0.0.1:6666,rds.mysql.com:3306,vpn
