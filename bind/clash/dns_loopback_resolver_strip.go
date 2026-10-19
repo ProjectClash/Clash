@@ -131,6 +131,9 @@ func stripLoopbackResolvers(raw *config.RawConfig) []string {
 	for _, line := range filterPolicyNameserversWhere("proxy-server-nameserver-policy", raw.DNS.ProxyServerNameserverPolicy, dead) {
 		stripped = append(stripped, line+loopbackStripReason(portOfPolicyLine(line, listen)))
 	}
+	for _, line := range filterPolicyNameserversWhere("x-clash-ssid-nameservers", raw.DNS.ClashSSIDNameservers, dead) {
+		stripped = append(stripped, line+loopbackStripReason(portOfPolicyLine(line, listen)))
+	}
 	return stripped
 }
 

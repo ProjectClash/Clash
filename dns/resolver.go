@@ -529,6 +529,7 @@ type Config struct {
 	FallbackLazyQuery    bool
 	Policy               []Policy
 	ProxyServerPolicy    []Policy
+	SSIDPolicy           []SSIDPolicy
 	CacheAlgorithm       string
 	CacheMaxSize         int
 }
@@ -670,6 +671,10 @@ func NewResolver(config Config) (rs Resolvers) {
 		ipv6Timeout: time.Duration(config.IPv6Timeout) * time.Millisecond,
 		policy:      makePolicy(config.Policy),
 	}
+	for _, policy := range config.SSIDPolicy {
+		r.policy = append(r.policy, ssidPolicy{ssid: policy.SSID, clients: cacheTransform(policy.NameServers)})
+	}
+	ssidPoliciesInForce.Store(len(config.SSIDPolicy) > 0)
 	r.defaultResolver = defaultResolver
 	rs.Resolver = r
 

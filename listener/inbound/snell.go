@@ -16,6 +16,7 @@ type SnellOption struct {
 	Version   int             `inbound:"version,omitempty"`
 	UDP       bool            `inbound:"udp,omitempty"`
 	ObfsOpts  SnellObfsOption `inbound:"obfs-opts,omitempty"`
+	Mode      string          `inbound:"mode,omitempty"`
 	ShadowTLS ShadowTLS       `inbound:"shadow-tls,omitempty"`
 	ResTLS    ResTLS          `inbound:"res-tls,omitempty"`
 	JLSConfig JLSConfig       `inbound:"jls-config,omitempty"`
@@ -45,8 +46,11 @@ func NewSnell(options *SnellOption) (*Snell, error) {
 	if options.Version == 0 {
 		options.Version = 4
 	}
-	if options.Version < 1 || options.Version > 5 {
+	if options.Version < 1 || options.Version > 6 {
 		return nil, fmt.Errorf("snell inbound version %d is not supported", options.Version)
+	}
+	if options.Version != 6 && options.Mode != "" {
+		log.Warnln("Snell[%s] inbound: mode is version 6's; version %d ignores it", options.NameStr, options.Version)
 	}
 
 	return &Snell{
@@ -59,6 +63,7 @@ func NewSnell(options *SnellOption) (*Snell, error) {
 			UDP:       options.UDP,
 			ObfsMode:  options.ObfsOpts.Mode,
 			ObfsHost:  options.ObfsOpts.Host,
+			Mode:      options.Mode,
 			ShadowTLS: options.ShadowTLS.Build(),
 			ResTLS:    options.ResTLS.Build(),
 			JLSConfig: options.JLSConfig.Build(),

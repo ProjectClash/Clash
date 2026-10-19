@@ -9,12 +9,17 @@ import (
 type ClashSequence struct {
 	Key  string
 	Item reflect.Type
+	Discard bool
 }
 
 func ClashUnmarshal(in []byte, out interface{}, s ClashSequence, read func(decode func(v interface{}) error)) error {
-	node, err := clashParse(in, s)
+	return ClashUnmarshalSequences(in, out, read, s)
+}
+
+func ClashUnmarshalSequences(in []byte, out interface{}, read func(decode func(v interface{}) error), s ...ClashSequence) error {
+	node, err := clashParse(in, s...)
 	if errors.Is(err, errClashUnsafe) {
-		node, err = clashParse(in, ClashSequence{})
+		node, err = clashParse(in)
 	}
 	if err != nil {
 		return err
@@ -30,7 +35,7 @@ var errClashUnsafe = errors.New("yaml: the sequence cannot be decoded item by it
 
 type clashAbort struct{}
 
-func clashParse(in []byte, s ClashSequence) (node *Node, err error) {
+func clashParse(in []byte, s ...ClashSequence) (node *Node, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			if _, ok := r.(clashAbort); ok {
@@ -46,8 +51,14 @@ func clashParse(in []byte, s ClashSequence) (node *Node, err error) {
 	}()
 	p := newParser(in)
 	defer p.destroy()
-	if s.Key != "" {
-		p.clash = &clashStreamState{sequence: s, decoder: newDecoder()}
+	var named []ClashSequence
+	for _, sequence := range s {
+		if sequence.Key != "" {
+			named = append(named, sequence)
+		}
+	}
+	if len(named) > 0 {
+		p.clash = &clashStreamState{sequences: named, done: make([]bool, len(named)), decoder: newDecoder()}
 	}
 	return p.parse(), nil
 }
@@ -69,17 +80,20 @@ func clashDecode(node *Node, v interface{}) (err error) {
 }
 
 type clashStreamState struct {
-	sequence ClashSequence
-	decoder  *decoder
-	rootNext bool
-	done     bool
-	aliases  int
+	sequences []ClashSequence
+	decoder   *decoder
+	rootNext  bool
+	done      []bool
+	aliases   int
 }
 
 type clashSequence struct {
 	item    reflect.Type
 	items   reflect.Value
 	decodes []int32
+	lines, columns []int32
+	discard        bool
+	discarded int64
 }
 
 func (p *parser) clashDocument() {
@@ -98,26 +112,39 @@ func (p *parser) clashRoot() bool {
 
 func (p *parser) clashChild(n, k *Node, root bool) *Node {
 	c := p.clash
-	if !root || c.done || k.Kind != ScalarNode || k.ShortTag() != strTag || k.Value != c.sequence.Key {
+	if !root || k.Kind != ScalarNode || k.ShortTag() != strTag {
+		return p.parseChild(n)
+	}
+	which := -1
+	for i, sequence := range c.sequences {
+		if !c.done[i] && sequence.Key == k.Value {
+			which = i
+			break
+		}
+	}
+	if which < 0 {
 		return p.parseChild(n)
 	}
 	if p.peek() != yaml_SEQUENCE_START_EVENT || len(p.event.anchor) != 0 || len(p.event.tag) != 0 {
 		return p.parseChild(n)
 	}
-	c.done = true
+	c.done[which] = true
 	seq := p.node(SequenceNode, seqTag, string(p.event.tag), "")
 	if p.event.sequence_style()&yaml_FLOW_SEQUENCE_STYLE != 0 {
 		seq.Style |= FlowStyle
 	}
 	p.expect(yaml_SEQUENCE_START_EVENT)
-	streamed := &clashSequence{item: c.sequence.Item, items: reflect.MakeSlice(reflect.SliceOf(c.sequence.Item), 0, 64)}
+	streamed := &clashSequence{item: c.sequences[which].Item, items: reflect.MakeSlice(reflect.SliceOf(c.sequences[which].Item), 0, 64), discard: c.sequences[which].Discard}
 	for p.peek() != yaml_SEQUENCE_END_EVENT {
 		aliases := c.aliases
 		item := p.parse()
 		if c.aliases != aliases {
 			panic(clashAbort{})
 		}
-		streamed.items = reflect.Append(streamed.items, c.decodeItem(item, streamed))
+		value := c.decodeItem(item, streamed)
+		if !streamed.discard {
+			streamed.items = reflect.Append(streamed.items, value)
+		}
 	}
 	seq.LineComment = string(p.event.line_comment)
 	seq.FootComment = string(p.event.foot_comment)
@@ -128,7 +155,11 @@ func (p *parser) clashChild(n, k *Node, root bool) *Node {
 }
 
 func (c *clashStreamState) decodeItem(item *Node, streamed *clashSequence) (value reflect.Value) {
-	if item.Kind != MappingNode || !isStringMap(item) {
+	if streamed.item.Kind() == reflect.String {
+		if item.Kind != ScalarNode || item.ShortTag() != strTag || item.Anchor != "" {
+			panic(clashAbort{})
+		}
+	} else if item.Kind != MappingNode || !isStringMap(item) {
 		panic(clashAbort{})
 	}
 	d := c.decoder
@@ -141,12 +172,31 @@ func (c *clashStreamState) decodeItem(item *Node, streamed *clashSequence) (valu
 			panic(r)
 		}
 	}()
-	value = reflect.New(c.sequence.Item).Elem()
+	value = reflect.New(streamed.item).Elem()
 	if !d.unmarshal(item, value) || len(d.terrors) != 0 {
 		panic(clashAbort{})
 	}
+	if streamed.discard {
+		streamed.discarded += int64(d.decodeCount - before)
+		return value
+	}
 	streamed.decodes = append(streamed.decodes, int32(d.decodeCount-before))
+	if streamed.item.Kind() == reflect.String {
+		streamed.lines = append(streamed.lines, int32(item.Line))
+		streamed.columns = append(streamed.columns, int32(item.Column))
+	}
 	return value
+}
+
+func clashTakesNodes(t reflect.Type) bool {
+	for t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	if t == nodeType {
+		return true
+	}
+	p := reflect.PtrTo(t)
+	return p.Implements(reflect.TypeOf((*Unmarshaler)(nil)).Elem()) || p.Implements(reflect.TypeOf((*obsoleteUnmarshaler)(nil)).Elem())
 }
 
 func (d *decoder) clashStreamed(n *Node, out reflect.Value) (good bool) {
@@ -170,8 +220,25 @@ func (d *decoder) clashStreamed(n *Node, out reflect.Value) (good bool) {
 		out = out.Elem()
 	}
 	l := s.items.Len()
+	if s.item.Kind() == reflect.String && !(out.Kind() == reflect.Slice && out.Type().Elem() == s.item) &&
+		!(out.Kind() == reflect.Interface && out.NumMethod() == 0) {
+		if out.Kind() == reflect.Slice || out.Kind() == reflect.Array {
+			if clashTakesNodes(out.Type().Elem()) {
+				failf("the sequence at line %d was decoded item by item and cannot be decoded into %s", n.Line, out.Type())
+			}
+		}
+		synthetic := &Node{Kind: SequenceNode, Tag: n.Tag, Style: n.Style, Line: n.Line, Column: n.Column, Content: make([]*Node, l)}
+		for i := 0; i < l; i++ {
+			synthetic.Content[i] = &Node{Kind: ScalarNode, Tag: strTag, Value: s.items.Index(i).String(), Line: int(s.lines[i]), Column: int(s.columns[i])}
+		}
+		out, unmarshaled, good := d.prepare(synthetic, out)
+		if unmarshaled {
+			return good
+		}
+		return d.sequence(synthetic, out)
+	}
 	handed := (out.Kind() == reflect.Slice || out.Kind() == reflect.Array || out.Kind() == reflect.Interface)
-	if handed && (d.stringMapType != stringMapType || d.generalMapType != generalMapType) {
+	if handed && s.item.Kind() != reflect.String && (d.stringMapType != stringMapType || d.generalMapType != generalMapType) {
 		failf("the sequence at line %d was decoded item by item and cannot be decoded where maps decode as %s and %s", n.Line, d.stringMapType, d.generalMapType)
 	}
 	var iface reflect.Value
@@ -182,7 +249,7 @@ func (d *decoder) clashStreamed(n *Node, out reflect.Value) (good bool) {
 		if l != out.Len() {
 			failf("invalid array: want %d elements but got %d", out.Len(), l)
 		}
-	case out.Kind() == reflect.Interface && out.NumMethod() == 0 && s.item == stringMapType:
+	case out.Kind() == reflect.Interface && out.NumMethod() == 0 && (s.item == stringMapType || s.item.Kind() == reflect.String):
 		iface = out
 		out = settableValueOf(make([]interface{}, l))
 	case handed:
@@ -191,17 +258,23 @@ func (d *decoder) clashStreamed(n *Node, out reflect.Value) (good bool) {
 		d.terror(n, seqTag, out)
 		return false
 	}
+	count := func() {
+		d.decodeCount++
+		if d.aliasDepth > 0 {
+			d.aliasCount++
+		}
+		if d.aliasCount > 100 && d.decodeCount > 1000 && float64(d.aliasCount)/float64(d.decodeCount) > allowedAliasRatio(d.decodeCount) {
+			failf("document contains excessive aliasing")
+		}
+	}
 	for i := 0; i < l; i++ {
 		for k := int32(0); k < s.decodes[i]; k++ {
-			d.decodeCount++
-			if d.aliasDepth > 0 {
-				d.aliasCount++
-			}
-			if d.aliasCount > 100 && d.decodeCount > 1000 && float64(d.aliasCount)/float64(d.decodeCount) > allowedAliasRatio(d.decodeCount) {
-				failf("document contains excessive aliasing")
-			}
+			count()
 		}
 		out.Index(i).Set(s.items.Index(i))
+	}
+	for k := int64(0); k < s.discarded; k++ {
+		count()
 	}
 	if iface.IsValid() {
 		iface.Set(out)
@@ -209,10 +282,10 @@ func (d *decoder) clashStreamed(n *Node, out reflect.Value) (good bool) {
 	return true
 }
 
-func ClashParseDocument(in []byte, s ClashSequence) (*Node, error) {
-	node, err := clashParse(in, s)
+func ClashParseDocument(in []byte, s ...ClashSequence) (*Node, error) {
+	node, err := clashParse(in, s...)
 	if errors.Is(err, errClashUnsafe) {
-		node, err = clashParse(in, ClashSequence{})
+		node, err = clashParse(in)
 	}
 	return node, err
 }

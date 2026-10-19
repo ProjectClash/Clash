@@ -41,6 +41,7 @@ func stripEasyTierNameservers(raw *config.RawConfig) []string {
 	raw.DNS.DefaultNameserver = filter("default-nameserver", raw.DNS.DefaultNameserver)
 	stripped = append(stripped, filterPolicyNameserversWhere("nameserver-policy", raw.DNS.NameServerPolicy, isEasyTierNameserver)...)
 	stripped = append(stripped, filterPolicyNameserversWhere("proxy-server-nameserver-policy", raw.DNS.ProxyServerNameserverPolicy, isEasyTierNameserver)...)
+	stripped = append(stripped, filterPolicyNameserversWhere("x-clash-ssid-nameservers", raw.DNS.ClashSSIDNameservers, isEasyTierNameserver)...)
 	return stripped
 }
 

@@ -219,6 +219,7 @@ var proxyImportQueryFieldLedger = &lazyValue[map[string]map[string]struct{}]{bui
 			"title", "remark", "remarks", "name", "tfo", "fastopen", "psk", "password", "version", "v",
 			"udp", "reuse", "obfs", "obfs-mode", "obfsParam", "obfs-host", "peer", "sni", "plugin",
 			"security", "alpn", "keepalive", "fingerprint", "hpkp", "pbk", "publicKey", "sid", "shortId",
+			"mode", "user-key",
 		),
 		"vless": queryFieldSet(
 			"title", "remark", "remarks", "name", "tfo", "fastopen", "udp", "uot", "padding", "fragment",
@@ -897,7 +898,7 @@ func surgeProxyMapping(name string, fields []string) (map[string]any, error) {
 	case "http", "https", "socks5", "socks":
 		mergeFieldSet(allowed, "username", "password", "tls", "sni", "peer", "server-name", "skip-cert-verify", "allow-insecure")
 	case "snell":
-		mergeFieldSet(allowed, "psk", "version")
+		mergeFieldSet(allowed, "psk", "version", "reuse", "udp-relay", "udp", "mode")
 	}
 	if err := validateStringMapKeys("surge."+kind, options, allowed); err != nil {
 		return nil, err
@@ -937,8 +938,29 @@ func surgeProxyMapping(name string, fields []string) (map[string]any, error) {
 	case "snell":
 		proxy["type"] = "snell"
 		proxy["psk"] = options["psk"]
-		if version, parseErr := strconv.Atoi(options["version"]); parseErr == nil && version != 0 {
+		version := snellDefaultImportVersion
+		if parsed, parseErr := strconv.Atoi(options["version"]); parseErr == nil && parsed != 0 {
+			version = parsed
 			proxy["version"] = version
+		}
+		if stringMapBoolean(options, "reuse") {
+			proxy["reuse"] = true
+		}
+		udp := version >= 3
+		for _, key := range []string{"udp-relay", "udp"} {
+			if value := strings.TrimSpace(options[key]); udp && value != "" {
+				udp = stringMapBoolean(options, key)
+				break
+			}
+		}
+		if udp {
+			proxy["udp"] = true
+		}
+		if mode := options["mode"]; mode != "" {
+			if version != 6 {
+				return nil, unsupportedProxyImportField("surge.snell.mode", "mode is version 6's; a lower version has none")
+			}
+			proxy["mode"] = mode
 		}
 	default:
 		return nil, fmt.Errorf("unsupported proxy type %q", kind)
@@ -975,7 +997,7 @@ func surgeProxyMapping(name string, fields []string) (map[string]any, error) {
 	if stringMapBoolean(options, "tfo", "fast-open") {
 		proxy["tfo"] = true
 	}
-	if stringMapBoolean(options, "udp", "udp-relay") {
+	if kind != "snell" && stringMapBoolean(options, "udp", "udp-relay") {
 		proxy["udp"] = true
 	}
 	return proxy, nil
@@ -2525,6 +2547,8 @@ func applyVMessJSONShareLinkFields(proxy map[string]any, values map[string]any) 
 
 const proxyImportMasqueNoWireGuardFields = "mihomo's masque outbound authenticates with a key pair and has no equivalent for these WireGuard-shaped fields"
 
+const snellDefaultImportVersion = 1
+
 const proxyImportSnellNoTLS = "mihomo's snell outbound has no TLS, so there is nothing for this field to configure"
 
 const proxyImportMieruNoTLS = "mihomo's mieru outbound has no TLS, so there is nothing to configure with it"
@@ -3823,6 +3847,14 @@ func parseSnellShareLink(link string) (map[string]any, error) {
 	}
 	if queryBoolean(query, "reuse") {
 		proxy["reuse"] = true
+	}
+	for _, key := range []string{"mode", "user-key"} {
+		if value := query.Get(key); value != "" {
+			if version, _ := proxy["version"].(int); version != 6 {
+				return nil, unsupportedProxyImportField("snell."+key, key+" is version 6's")
+			}
+			proxy[key] = value
+		}
 	}
 	mode := firstQueryValue(query, "obfs", "obfs-mode")
 	host := firstQueryValue(query, "obfsParam", "obfs-host", "peer", "sni")

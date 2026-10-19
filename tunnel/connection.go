@@ -22,6 +22,8 @@ type packetSender struct {
 	originToTarget map[string]netip.Addr
 	targetToOrigin map[netip.Addr]netip.Addr
 	mappingMutex   sync.RWMutex
+
+	dialRewrite func(flow, dial *C.Metadata) *C.Metadata
 }
 
 // newPacketSender return a chan based C.PacketSender
@@ -81,7 +83,11 @@ func (s *packetSender) processPacket(pc C.PacketConn, packet C.PacketAdapter) {
 		metadata = metadata.Clone() // don't modify PacketAdapter's metadata
 
 		_ = preHandleMetadata(metadata) // error was pre-checked
+		flowMetadata := metadata
 		metadata = metadata.Pure()
+		if s.dialRewrite != nil {
+			metadata = s.dialRewrite(flowMetadata, metadata)
+		}
 		if metadata.Host != "" {
 			// TODO: ResolveUDP may take a long time to block the Process loop
 			//       but we want keep sequence sending so can't open a new goroutine

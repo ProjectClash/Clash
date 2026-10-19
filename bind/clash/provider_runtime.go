@@ -1045,6 +1045,7 @@ func stripProviderSideUpdateMetadata(raw *config.RawConfig) {
 		delete(definition, providerSideUpdateSafeField)
 		delete(definition, providerRefreshField)
 		delete(definition, providerCacheServedField)
+		delete(definition, moduleRuleProviderField)
 	}
 	for _, definition := range raw.ProxyProvider {
 		delete(definition, providerRefreshField)

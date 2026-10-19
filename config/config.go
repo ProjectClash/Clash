@@ -41,6 +41,7 @@ import (
 	RW "github.com/ProjectClash/Clash/rules/wrapper"
 	T "github.com/ProjectClash/Clash/tunnel"
 
+	singtun "github.com/metacubex/sing-tun"
 	"golang.org/x/exp/slices"
 )
 
@@ -176,6 +177,8 @@ type DNS struct {
 	ProxyServerPolicy     []dns.Policy
 	DirectNameServer      []dns.NameServer
 	DirectFollowPolicy    bool
+	SSIDPolicy            []dns.SSIDPolicy
+	QueryTypes            dns.QueryTypes
 }
 
 // Profile config
@@ -205,6 +208,7 @@ type Config struct {
 	Hosts         *trie.DomainTrie[resolver.HostValue]
 	Profile       *Profile
 	Rules         []C.Rule
+	RuleTable     C.RuleTable
 	SubRules      map[string][]C.Rule
 	Users         []auth.AuthUser
 	Proxies       map[string]C.Proxy
@@ -215,6 +219,8 @@ type Config struct {
 	Tunnels       []LC.Tunnel
 	Sniffer       *sniffer.Config
 	TLS           *TLS
+	ClashRouting  C.ClashRouting
+	IPRewrite     []singtun.IPRewriteRule
 }
 
 type RawCors struct {
@@ -250,6 +256,10 @@ type RawDNS struct {
 	ProxyServerNameserverPolicy  *orderedmap.OrderedMap[string, any] `yaml:"proxy-server-nameserver-policy" json:"proxy-server-nameserver-policy"`
 	DirectNameServer             []string                            `yaml:"direct-nameserver" json:"direct-nameserver"`
 	DirectNameServerFollowPolicy bool                                `yaml:"direct-nameserver-follow-policy" json:"direct-nameserver-follow-policy"`
+	ClashSSIDNameservers *orderedmap.OrderedMap[string, any] `yaml:"x-clash-ssid-nameservers" json:"x-clash-ssid-nameservers"`
+
+	ClashAnswerSVCB       *bool `yaml:"x-clash-answer-svcb" json:"x-clash-answer-svcb"`
+	ClashAnswerOtherTypes *bool `yaml:"x-clash-answer-other-types" json:"x-clash-answer-other-types"`
 }
 
 type RawFallbackFilter struct {
@@ -462,6 +472,7 @@ type RawConfig struct {
 	ClashNodeLibrary ClashNodeLibraryRef       `yaml:"x-clash-node-library" json:"x-clash-node-library"`
 	ProxyGroup       []map[string]any          `yaml:"proxy-groups" json:"proxy-groups"`
 	Rule             []string                  `yaml:"rules" json:"rule"`
+	ClashRuleIndex   ClashRuleIndexRef         `yaml:"x-clash-rule-index" json:"x-clash-rule-index"`
 	SubRules         map[string][]string       `yaml:"sub-rules" json:"sub-rules"`
 	Listeners        []map[string]any          `yaml:"listeners" json:"listeners"`
 	Hosts            map[string]any            `yaml:"hosts" json:"hosts"`
@@ -477,6 +488,15 @@ type RawConfig struct {
 	TLS              RawTLS                    `yaml:"tls" json:"tls"`
 
 	ClashForAndroid RawClashForAndroid `yaml:"clash-for-android" json:"clash-for-android"`
+
+	ClashEveryModeRules   []string `yaml:"x-clash-every-mode-rules" json:"x-clash-every-mode-rules"`
+	ClashUDPUnsupported   string   `yaml:"x-clash-udp-unsupported" json:"x-clash-udp-unsupported"`
+	ClashSTUNResponseIP   string   `yaml:"x-clash-stun-response-ip" json:"x-clash-stun-response-ip"`
+	ClashSTUNResponseIPv6 string   `yaml:"x-clash-stun-response-ipv6" json:"x-clash-stun-response-ipv6"`
+	ClashRejectPage       bool     `yaml:"x-clash-show-error-page-for-reject" json:"x-clash-show-error-page-for-reject"`
+	ClashIPRewrite []string `yaml:"x-clash-ip-rewrite" json:"x-clash-ip-rewrite"`
+	ClashBlockQUIC string `yaml:"x-clash-block-quic" json:"x-clash-block-quic"`
+	ClashProxyHosts map[string]any `yaml:"x-clash-proxy-hosts" json:"x-clash-proxy-hosts"`
 }
 
 // Parse config
@@ -733,12 +753,26 @@ func ParseRawConfig(rawCfg *RawConfig) (*Config, error) {
 	config.SubRules = subRules
 	probe("sub-rules")
 
-	rules, err := parseRules(rawCfg.Rule, proxies, library, ruleProviders, subRules, "rules")
-	if err != nil {
+	if table, err := clashRuleIndexTable(rawCfg, proxies, library, ruleProviders, subRules); err != nil {
+		return nil, err
+	} else if table != nil {
+		config.RuleTable = table
+	} else {
+		rules, err := parseRules(rawCfg.Rule, proxies, library, ruleProviders, subRules, "rules")
+		if err != nil {
+			return nil, err
+		}
+		config.Rules = rules
+		config.RuleTable = C.RuleList(rules)
+	}
+	probe("rules")
+
+	if config.ClashRouting, err = parseClashRouting(rawCfg, proxies, library, ruleProviders, subRules); err != nil {
 		return nil, err
 	}
-	config.Rules = rules
-	probe("rules")
+	if config.IPRewrite, err = parseIPRewrite(rawCfg.ClashIPRewrite); err != nil {
+		return nil, err
+	}
 
 	hosts, err := parseHosts(rawCfg)
 	if err != nil {
@@ -1188,38 +1222,52 @@ func parseRules(rulesConfig []string, proxies map[string]C.Proxy, library C.Prox
 
 	// parse rules
 	for idx, line := range rulesConfig {
-		tp, payload, target, params := RC.ParseRulePayload(line, true)
-		if target == "" {
-			return nil, fmt.Errorf("%s[%d] [%s] error: format invalid", format, idx, line)
+		parsed, err := parseRuleLine(idx, line, func(name string) bool { return hasProxy(proxies, library, name) }, func(name string) bool { _, ok := ruleProviders[name]; return ok }, subRules, format)
+		if err != nil {
+			return nil, err
 		}
-
-		if !hasProxy(proxies, library, target) {
-			if tp != "SUB-RULE" {
-				return nil, fmt.Errorf("%s[%d] [%s] error: proxy [%s] not found", format, idx, line, target)
-			} else if _, ok := subRules[target]; !ok {
-				return nil, fmt.Errorf("%s[%d] [%s] error: sub-rule [%s] not found", format, idx, line, target)
-			}
-		}
-
-		parsed, parseErr := R.ParseRule(tp, payload, target, params, subRules)
-		if parseErr != nil {
-			return nil, fmt.Errorf("%s[%d] [%s] error: %s", format, idx, line, parseErr.Error())
-		}
-
-		for _, name := range parsed.ProviderNames() {
-			if _, ok := ruleProviders[name]; !ok {
-				return nil, fmt.Errorf("%s[%d] [%s] error: rule set [%s] not found", format, idx, line, name)
-			}
-		}
-
-		if format == "rules" { // only wrap top level rules
-			parsed = RW.NewRuleWrapper(parsed)
-		}
-
 		rules = append(rules, parsed)
 	}
 
 	return rules, nil
+}
+
+func parseRuleLine(idx int, line string, hasTarget, hasRuleSet func(string) bool, subRules map[string][]C.Rule, format string) (C.Rule, error) {
+	return parseRuleLineWith(idx, line, hasTarget, hasRuleSet, subRules, format, R.ParseRule)
+}
+
+func parseRuleLineWith(idx int, line string, hasTarget, hasRuleSet func(string) bool, subRules map[string][]C.Rule, format string, parse RC.ParseRuleFunc) (C.Rule, error) {
+	tp, payload, target, params := RC.ParseRulePayload(line, true)
+	if target == "" {
+		return nil, fmt.Errorf("%s[%d] [%s] error: format invalid", format, idx, line)
+	}
+
+	if !hasTarget(target) {
+		if tp != "SUB-RULE" {
+			return nil, fmt.Errorf("%s[%d] [%s] error: proxy [%s] not found", format, idx, line, target)
+		} else if _, ok := subRules[target]; !ok {
+			return nil, fmt.Errorf("%s[%d] [%s] error: sub-rule [%s] not found", format, idx, line, target)
+		}
+	}
+
+	parsed, parseErr := parse(tp, payload, target, params, subRules)
+	if parseErr != nil {
+		return nil, fmt.Errorf("%s[%d] [%s] error: %s", format, idx, line, parseErr.Error())
+	}
+
+	for _, name := range parsed.ProviderNames() {
+		if !hasRuleSet(name) {
+			return nil, fmt.Errorf("%s[%d] [%s] error: rule set [%s] not found", format, idx, line, name)
+		}
+	}
+
+	if format == "rules" || format == everyModeRulesFormat {
+		parsed = RW.NewRuleWrapper(parsed)
+		if text, interval, ok := RW.RuleNotification(params); ok {
+			parsed = RW.NewNotifyingRule(parsed.(C.RuleWrapper), text, interval, tp+","+payload)
+		}
+	}
+	return parsed, nil
 }
 
 func parseHosts(cfg *RawConfig) (*trie.DomainTrie[resolver.HostValue], error) {
@@ -1535,6 +1583,11 @@ func parseDNS(rawCfg *RawConfig, ruleProviders map[string]P.RuleProvider) (*DNS,
 	if dnsCfg.NameServerPolicy, err = parseNameServerPolicy(cfg.NameServerPolicy, "dns.nameserver-policy", ruleProviders, cfg.RespectRules, cfg.PreferH3); err != nil {
 		return nil, err
 	}
+
+	if dnsCfg.SSIDPolicy, err = parseSSIDNameservers(cfg.ClashSSIDNameservers, cfg.RespectRules, cfg.PreferH3); err != nil {
+		return nil, err
+	}
+	dnsCfg.QueryTypes = dns.QueryTypes{SVCB: cfg.ClashAnswerSVCB, Others: cfg.ClashAnswerOtherTypes}
 
 	if dnsCfg.ProxyServerNameserver, err = parseNameServer(cfg.ProxyServerNameserver, false, cfg.PreferH3); err != nil {
 		return nil, err

@@ -73,6 +73,28 @@ var guardedAppCalls = map[string]func() (errored bool){
 	"ASNNetworkCount":             func() bool { return ASNNetworkCount("") == -1 },
 	"WidgetGroupJSON":             func() bool { return WidgetGroupJSON("", 0) == "" },
 	"WidgetStatsJSON":             func() bool { return WidgetStatsJSON("") == "" },
+	"ValidateConfigShapeAtPath":   func() bool { return ValidateConfigShapeAtPath("") != nil },
+	"PlanResourcesForProfileAtPath": func() bool {
+		_, err := PlanResourcesForProfileAtPath("", "")
+		return err != nil
+	},
+	"FinalizeForIOSAtPath":     func() bool { _, err := FinalizeForIOSAtPath("", ""); return err != nil },
+	"YamlToJSONOmittingAtPath": func() bool { _, err := YamlToJSONOmittingAtPath("", ""); return err != nil },
+	"PruneRuleIndexesKeeping":  func() bool { return PruneRuleIndexesKeeping("", "") != nil },
+	"OpenRuleCatalogForPublishedAtPath": func() bool {
+		_, err := OpenRuleCatalogForPublishedAtPath("")
+		return err != nil
+	},
+	"ConfigProjectionJSON": func() bool { _, err := ConfigProjectionJSON("", "", ""); return err != nil },
+	"FinalizeForIOSWithOptionsAtPath": func() bool {
+		_, err := FinalizeForIOSWithOptionsAtPath("", "", "")
+		return err != nil
+	},
+	"OpenRuleCatalogForIOSAtPath": func() bool { _, err := OpenRuleCatalogForIOSAtPath(""); return err != nil },
+	"ProviderAgeSecretKeysJSONAtPath": func() bool {
+		_, err := ProviderAgeSecretKeysJSONAtPath("")
+		return err != nil
+	},
 }
 
 func TestEveryGuardedAppCallTurnsAPanicIntoAnError(t *testing.T) {

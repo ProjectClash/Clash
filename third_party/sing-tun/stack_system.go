@@ -397,6 +397,12 @@ func (s *System) batchLoopDarwin(darwinTUN DarwinTUN) {
 }
 
 func (s *System) processPacket(packet []byte) bool {
+	if handled, writeBack, reply := applyIPRewrite(packet); handled {
+		if reply != nil {
+			_, _ = s.tun.Write(ipRewriteFrame(reply))
+		}
+		return writeBack
+	}
 	var (
 		writeBack bool
 		err       error

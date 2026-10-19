@@ -95,6 +95,9 @@ func NewService(platform PlatformInterface) (*BoxService, error) {
 		return nil, bridgeSafeError(errors.New("clash: NewService is unavailable after App-only DisablePersistentCache Setup"))
 	}
 	tunnelProcess.Store(true)
+	if platform.UnderNetworkExtension() {
+		config.ClashRuleIndexesVerified.Store(true)
+	}
 	platform = bridgeSafePlatform(platform)
 	logWriter := redirectLogs(platform)
 	armNEPacingForService(platform)
@@ -627,7 +630,8 @@ func shutdownCore() {
 	proxies := tunnel.Proxies()
 	providers := tunnel.Providers()
 	ruleProviders := tunnel.RuleProviders()
-	tunnel.UpdateProxiesAndRules(map[string]constant.Proxy{}, map[string]provider.ProxyProvider{}, nil, map[string][]constant.Rule{}, map[string]provider.RuleProvider{})
+	tunnel.UpdateProxiesRulesAndRouting(map[string]constant.Proxy{}, map[string]provider.ProxyProvider{}, nil, map[string][]constant.Rule{}, map[string]provider.RuleProvider{}, nil, constant.ClashRouting{})
+	tun.SetIPRewrite(nil)
 
 	executor.Shutdown()
 	closeConfiguredInbounds()

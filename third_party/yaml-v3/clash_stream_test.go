@@ -241,6 +241,42 @@ func TestClashUnmarshalRefusesWhatCannotTakeTheItems(t *testing.T) {
 	}
 }
 
+func TestClashUnmarshalRefusesItemsThatTakeNodes(t *testing.T) {
+	document := "rules:\n  - 'DOMAIN,a.example,DIRECT' # one\n  - MATCH,DIRECT\n"
+	rules := ClashSequence{Key: "rules", Item: reflect.TypeOf("")}
+	var plain struct {
+		Rules []Node `yaml:"rules"`
+	}
+	if err := Unmarshal([]byte(document), &plain); err != nil || plain.Rules[0].Style != SingleQuotedStyle || plain.Rules[0].LineComment != "# one" {
+		t.Fatalf("Unmarshal: %v %#v", err, plain.Rules)
+	}
+	var nodes struct {
+		Rules []Node `yaml:"rules"`
+	}
+	if err := ClashUnmarshal([]byte(document), &nodes, rules, nil); !clashRefusal(err) {
+		t.Fatalf("decoding into []Node: %v", err)
+	}
+	var pointers struct {
+		Rules []*Node `yaml:"rules"`
+	}
+	if err := ClashUnmarshal([]byte(document), &pointers, rules, nil); !clashRefusal(err) {
+		t.Fatalf("decoding into []*Node: %v", err)
+	}
+	var unmarshalers struct {
+		Rules []clashUnmarshaler `yaml:"rules"`
+	}
+	if err := ClashUnmarshal([]byte(document), &unmarshalers, rules, nil); !clashRefusal(err) {
+		t.Fatalf("decoding into []Unmarshaler: %v", err)
+	}
+	type named string
+	var strings2 struct {
+		Rules []named `yaml:"rules"`
+	}
+	if err := ClashUnmarshal([]byte(document), &strings2, rules, nil); err != nil || len(strings2.Rules) != 2 || strings2.Rules[0] != "DOMAIN,a.example,DIRECT" {
+		t.Fatalf("decoding into []named: %v %v", err, strings2.Rules)
+	}
+}
+
 type clashUnmarshaler struct{}
 
 func (*clashUnmarshaler) UnmarshalYAML(*Node) error { return nil }

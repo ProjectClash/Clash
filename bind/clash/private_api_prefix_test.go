@@ -39,6 +39,8 @@ var privateRouteTable = []struct{ method, suffix string }{
 	{http.MethodGet, "/group-members-search"},
 	{http.MethodGet, "/proxy-lookup"},
 	{http.MethodGet, "/proxies-summary"},
+	{http.MethodGet, "/rules-page"},
+	{http.MethodGet, "/rules-hits"},
 	{http.MethodGet, "/provider-nodes"},
 	{http.MethodGet, "/proxies-search"},
 }

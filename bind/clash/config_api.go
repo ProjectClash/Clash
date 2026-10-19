@@ -68,10 +68,20 @@ func ValidateConfigShape(configContent string) error {
 }
 
 func validateConfigShapeUnguarded(configContent string) error {
-	if _, err := config.UnmarshalRawConfig([]byte(configContent)); err != nil {
+	_, err := withCompactHeap(func() (struct{}, error) {
+		return struct{}{}, config.ClashCheckRawConfig(readOnlyBytes(configContent))
+	})
+	if err != nil {
 		return bridgeSafeError(fmt.Errorf("clash: parse config: %w", err))
 	}
 	return nil
+}
+
+func ValidateConfigShapeAtPath(path string) error {
+	return bridgeSafeError(recoverAppCallError("ValidateConfigShapeAtPath", func() error {
+		_, err := withDocumentAt(path, func(text string) (struct{}, error) { return struct{}{}, validateConfigShapeUnguarded(text) })
+		return err
+	}))
 }
 
 func PlatformConfigIntentJSON(configContent string) (*StringBox, error) {

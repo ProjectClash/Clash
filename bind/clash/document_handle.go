@@ -205,7 +205,7 @@ func (h *DocumentHandle) FinalizeWithOptions(resourceMapJSON, optionsJSON string
 		if options.OrderReference == "" {
 			options.OrderReference, orderRoot = state.original, state.originalRoot
 		}
-		finalized, err := finalizeMergedDocument(state.text, state.document(), resourceMapJSON, options.OrderReference, orderRoot)
+		finalized, err := finalizeMergedDocument(state.text, state.document(), resourceMapJSON, options.OrderReference, orderRoot, options.PrependRules, options.AppendRules, options.RuleProviders)
 		if err != nil {
 			return nil, err
 		}

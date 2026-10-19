@@ -3,6 +3,7 @@ package inbound_test
 import (
 	"net"
 	"net/netip"
+	"strings"
 	"testing"
 
 	"github.com/ProjectClash/Clash/adapter/outbound"
@@ -75,6 +76,44 @@ func TestInboundSnell(t *testing.T) {
 			outboundOptions := outbound.SnellOption{Version: tc.version}
 			testInboundSnell(t, inboundOptions, outboundOptions)
 		})
+	}
+}
+
+func TestInboundSnellV1Obfs(t *testing.T) {
+	for _, mode := range []string{"http", "tls"} {
+		mode := mode
+		t.Run(mode, func(t *testing.T) {
+			inboundOptions := inbound.SnellOption{Version: 1, ObfsOpts: inbound.SnellObfsOption{Mode: mode}}
+			outboundOptions := outbound.SnellOption{Version: 1, ObfsOpts: map[string]any{"mode": mode, "host": "bing.com"}}
+			testInboundSnell(t, inboundOptions, outboundOptions)
+		})
+	}
+}
+
+func TestNewSnellRefusesUnknownVersions(t *testing.T) {
+	for _, version := range []int{7, -1} {
+		_, err := inbound.NewSnell(&inbound.SnellOption{
+			BaseOption: inbound.BaseOption{NameStr: "snell_inbound", Listen: "127.0.0.1", Port: "0"},
+			Psk:        userUUID,
+			Version:    version,
+		})
+		if err == nil || !strings.Contains(err.Error(), "version") {
+			t.Fatalf("version %d: %v, want a version error", version, err)
+		}
+	}
+	listener, err := inbound.NewSnell(&inbound.SnellOption{
+		BaseOption: inbound.BaseOption{NameStr: "snell_inbound", Listen: "127.0.0.1", Port: "0"},
+		Psk:        userUUID,
+		Version:    6,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := listener.Listen(NewHttpTestTunnel()); err == nil || !strings.Contains(err.Error(), "version 6 is not in this build") {
+		t.Fatalf("a version-6 listener in a build without v6: %v", err)
+	}
+	if _, err := outbound.NewSnell(outbound.SnellOption{Name: "v6", Server: "127.0.0.1", Port: 1, Psk: userUUID, Version: 6}); err == nil || !strings.Contains(err.Error(), "version 6 is not in this build") {
+		t.Fatalf("a version-6 node in a build without v6: %v", err)
 	}
 }
 

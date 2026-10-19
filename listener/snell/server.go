@@ -31,6 +31,7 @@ type Listener struct {
 	closed    bool
 	config    LC.SnellServer
 	listeners []net.Listener
+	v6        V6ConnHandler
 }
 
 func New(config LC.SnellServer, lc C.InboundListenConfig, tunnel C.Tunnel, additions ...inbound.Addition) (C.MultiAddrListener, error) {
@@ -39,6 +40,7 @@ func New(config LC.SnellServer, lc C.InboundListenConfig, tunnel C.Tunnel, addit
 	}
 	switch config.Version {
 	case snell.Version1, snell.Version2, snell.Version3, snell.Version4, snell.Version5:
+	case versionV6:
 	default:
 		return nil, fmt.Errorf("snell inbound version %d is not supported", config.Version)
 	}
@@ -52,6 +54,13 @@ func New(config LC.SnellServer, lc C.InboundListenConfig, tunnel C.Tunnel, addit
 	}
 
 	l := &Listener{config: config}
+	if config.Version == versionV6 {
+		v6, err := newV6ConnHandler(config, tunnel)
+		if err != nil {
+			return nil, err
+		}
+		l.v6 = v6
+	}
 
 	securityModes := make([]string, 0, 3)
 	if config.ShadowTLS.Enable {
@@ -151,6 +160,10 @@ func (l *Listener) HandleConn(rawConn net.Conn, tunnel C.Tunnel, additions ...in
 	}
 	if loaded {
 		additions = append(append([]inbound.Addition(nil), additions...), inbound.WithInUser(user))
+	}
+	if l.v6 != nil {
+		l.v6(rawConn, additions...)
+		return
 	}
 	conn := rawConn
 	switch l.config.ObfsMode {

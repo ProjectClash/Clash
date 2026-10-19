@@ -274,6 +274,15 @@ func normalizeRawConfigForApple(raw *config.RawConfig, policy appleRuntimePolicy
 			for _, occurrence := range summarizeOccurrenceList(stripUnconstructibleUIDRules(raw)) {
 				log.Warnln("[Apple %s] %s: %s", policy.profile.String(), occurrence, uidRuleExplanation)
 			}
+			if removed := raw.ClashRuleIndex.UIDRemoved; len(removed) > 0 {
+				occurrences := make([]metadataRuleOccurrence, len(removed))
+				for i, at := range removed {
+					occurrences[i] = metadataRuleOccurrence{kind: "UID", location: fmt.Sprintf("rules[%d]", at)}
+				}
+				for _, occurrence := range summarizeOccurrenceList(occurrences) {
+					log.Warnln("[Apple %s] %s: %s", policy.profile.String(), occurrence, uidRuleExplanation)
+				}
+			}
 		}
 		for _, notice := range unguardedControllerNotices(raw) {
 			log.Warnln("[Apple %s] %s", policy.profile.String(), notice)
@@ -492,6 +501,7 @@ func stripNEIncompatibleNameservers(raw *config.RawConfig) []string {
 	raw.DNS.DefaultNameserver = filterBootstrap("default-nameserver", raw.DNS.DefaultNameserver)
 	stripped = append(stripped, filterPolicyNameservers("nameserver-policy", raw.DNS.NameServerPolicy)...)
 	stripped = append(stripped, filterPolicyNameservers("proxy-server-nameserver-policy", raw.DNS.ProxyServerNameserverPolicy)...)
+	stripped = append(stripped, filterPolicyNameservers("x-clash-ssid-nameservers", raw.DNS.ClashSSIDNameservers)...)
 	return stripped
 }
 
@@ -791,9 +801,7 @@ func requirePrestagedFile(kind, path string) error {
 
 func requiredGeodata(raw *config.RawConfig) geodataRequirements {
 	var required geodataRequirements
-	for _, line := range raw.Rule {
-		markRuleGeodata(line, &required)
-	}
+	eachRuleLine(raw, func(_ int, line string) { markRuleGeodata(line, &required) })
 	for _, rules := range raw.SubRules {
 		for _, line := range rules {
 			markRuleGeodata(line, &required)

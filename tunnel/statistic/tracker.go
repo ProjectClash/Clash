@@ -31,6 +31,7 @@ type TrackerInfo struct {
 	ProviderChain C.Chain      `json:"providerChains"`
 	Rule          string       `json:"rule"`
 	RulePayload   string       `json:"rulePayload"`
+	RuleIndex     *int         `json:"ruleIndex,omitempty"`
 }
 
 type tcpTracker struct {
@@ -161,6 +162,9 @@ func NewTCPTracker(conn C.Conn, manager *Manager, metadata *C.Metadata, rule C.R
 	if rule != nil {
 		t.TrackerInfo.Rule = rule.RuleType().String()
 		t.TrackerInfo.RulePayload = rule.Payload()
+		if index, ok := C.RuleIndexOf(rule); ok {
+			t.TrackerInfo.RuleIndex = &index
+		}
 	}
 
 	manager.noteJoin(t.bucket)
@@ -265,6 +269,9 @@ func NewUDPTracker(conn C.PacketConn, manager *Manager, metadata *C.Metadata, ru
 	if rule != nil {
 		ut.TrackerInfo.Rule = rule.RuleType().String()
 		ut.TrackerInfo.RulePayload = rule.Payload()
+		if index, ok := C.RuleIndexOf(rule); ok {
+			ut.TrackerInfo.RuleIndex = &index
+		}
 	}
 
 	manager.noteJoin(ut.bucket)

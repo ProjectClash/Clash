@@ -229,8 +229,7 @@ func TestGVisorCloseDuringTheHandshakeReportsTheClosure(t *testing.T) {
 	if synAck.Flags()&header.TCPFlagSyn == 0 {
 		t.Fatalf("setup: expected the SYN-ACK, got flags %v", synAck.Flags())
 	}
-	closed := make(chan struct{})
-	go func() { _ = deferred.Close(); close(closed) }()
+	_ = deferred.Close()
 	injectACK(t, ep, synAck)
 
 	select {
@@ -241,7 +240,6 @@ func TestGVisorCloseDuringTheHandshakeReportsTheClosure(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the accept must finish")
 	}
-	<-closed
 	if deferred.HandshakeDeferred() {
 		t.Fatal("the flow is decided")
 	}

@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/dlclark/regexp2"
@@ -27,6 +28,8 @@ import (
 )
 
 const nodeLibraryPrefix, nodeLibrarySuffix = "nodes-", ".library"
+
+const nodeLibraryTemporaryPrefix = ".library-"
 
 func clashPrivateKey(key string) bool { return strings.HasPrefix(key, "x-clash-") }
 
@@ -182,6 +185,9 @@ func writeNodeLibrary(root map[string]any, directory string) error {
 	compactGroupMembers(root, libraryIndex)
 	markComputedGroups(root, groups)
 	reference := map[string]any{"path": path, "sha256": hex.EncodeToString(sum)}
+	if defaulted := xhttpReuseDefaultedIn(list, held); defaulted != nil {
+		reference["xhttp-reuse-defaulted"] = defaulted
+	}
 	if len(kept) > 0 {
 		reference["inline-at"] = keptAt
 		root["proxies"] = kept
@@ -193,7 +199,7 @@ func writeNodeLibrary(root map[string]any, directory string) error {
 }
 
 func builtNodeLibrary(path string) ([]byte, error) {
-	file, err := os.Open(path)
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -233,7 +239,7 @@ func writeLibraryFile(path string, data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	file, err := os.CreateTemp(filepath.Dir(path), ".library-")
+	file, err := os.CreateTemp(filepath.Dir(path), nodeLibraryTemporaryPrefix)
 	if err != nil {
 		return err
 	}
@@ -295,6 +301,15 @@ func PruneNodeLibrariesKeeping(directory, keepJSON string) error {
 }
 
 func pruneNodeLibraries(directory string, keeps []string) error {
+	return pruneFiles(directory, keeps, func(name string) bool {
+		if strings.HasPrefix(name, nodeLibraryTemporaryPrefix) {
+			return true
+		}
+		return strings.HasPrefix(name, nodeLibraryPrefix) && (strings.HasSuffix(name, nodeLibrarySuffix) || strings.HasSuffix(name, providerRuntimeIndexStubSuffix))
+	})
+}
+
+func pruneFiles(directory string, keeps []string, staleName func(name string) bool) error {
 	resolved := func(path string) string {
 		if real, err := filepath.EvalSymlinks(path); err == nil {
 			return real
@@ -315,8 +330,7 @@ func pruneNodeLibraries(directory string, keeps []string) error {
 	}
 	for _, entry := range entries {
 		name := entry.Name()
-		stale := strings.HasPrefix(name, nodeLibraryPrefix) && (strings.HasSuffix(name, nodeLibrarySuffix) || strings.HasSuffix(name, providerRuntimeIndexStubSuffix))
-		if !stale || kept[resolved(filepath.Join(realDirectory, name))] {
+		if !staleName(name) || kept[resolved(filepath.Join(realDirectory, name))] {
 			continue
 		}
 		if err := removeUnusedNodeLibrary(filepath.Join(directory, name)); err != nil {

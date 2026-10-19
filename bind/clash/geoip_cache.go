@@ -40,6 +40,9 @@ func geoIPCountryName(name string) (string, bool) {
 	if name == "lan" {
 		return "", false
 	}
+	if name == "unknown" {
+		return "", false
+	}
 	for i := 0; i < len(name); i++ {
 		if !isGeoIPCountryByte(name[i]) {
 			return "", false
@@ -49,6 +52,26 @@ func geoIPCountryName(name string) (string, bool) {
 }
 
 func geoIPCountriesInDocument(content string, document *yaml.Node) []string {
+	seen := make(map[string]struct{})
+	var found []string
+	collect := func(name string) {
+		name, ok := geoIPCountryName(name)
+		if !ok {
+			return
+		}
+		if _, ok := seen[name]; ok {
+			return
+		}
+		seen[name] = struct{}{}
+		found = append(found, name)
+	}
+	scanGeoIPMarkers(content, collect)
+	scanGeoIPMarkers(indexedRuleLinesIn(content, document), collect)
+	collectFallbackFilterGeoIPCodeFrom(content, document, collect)
+	return found
+}
+
+func scanGeoIPMarkers(content string, collect func(string)) {
 	lowered := strings.ToLower(content)
 
 	isCountryByte := isGeoIPCountryByte
@@ -70,20 +93,6 @@ func geoIPCountriesInDocument(content string, document *yaml.Node) []string {
 		return false
 	}
 	isSpace := func(b byte) bool { return b == ' ' || b == '\t' }
-
-	seen := make(map[string]struct{})
-	var found []string
-	collect := func(name string) {
-		name, ok := geoIPCountryName(name)
-		if !ok {
-			return
-		}
-		if _, ok := seen[name]; ok {
-			return
-		}
-		seen[name] = struct{}{}
-		found = append(found, name)
-	}
 
 	const word = "geoip"
 	for offset := 0; ; {
@@ -112,8 +121,6 @@ func geoIPCountriesInDocument(content string, document *yaml.Node) []string {
 		collect(pieces[0])
 		offset = end
 	}
-	collectFallbackFilterGeoIPCodeFrom(content, document, collect)
-	return found
 }
 
 func collectFallbackFilterGeoIPCode(content string, collect func(string)) {

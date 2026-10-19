@@ -24,6 +24,8 @@ type resourceMap struct {
 	ProviderETags            map[string]string `json:"providerETags"`
 	ProviderSubscriptionInfo map[string]string `json:"providerSubscriptionInfo"`
 	NodeLibraryDirectory     string            `json:"nodeLibraryDirectory"`
+	RuleIndexDirectory       string            `json:"ruleIndexDirectory"`
+	RuntimeProfile           string            `json:"runtimeProfile"`
 }
 
 func FinalizeForIOS(mergedYAML string, resourceMapJSON string) (*StringBox, error) {
@@ -35,15 +37,25 @@ func FinalizeForIOS(mergedYAML string, resourceMapJSON string) (*StringBox, erro
 }
 
 func finalizeForIOSUnguarded(mergedYAML string, resourceMapJSON string) (*StringBox, error) {
-	finalized, err := finalizeMerged(mergedYAML, resourceMapJSON, "")
+	finalized, err := withCompactHeap(func() (string, error) { return finalizeMerged(mergedYAML, resourceMapJSON, "") })
 	if err != nil {
 		return nil, bridgeSafeError(err)
 	}
 	return WrapString(finalized), nil
 }
 
+func FinalizeForIOSAtPath(path string, resourceMapJSON string) (*StringBox, error) {
+	out, err := recoverAppCall("FinalizeForIOSAtPath", func() (*StringBox, error) {
+		return withDocumentAt(path, func(text string) (*StringBox, error) { return finalizeForIOSUnguarded(text, resourceMapJSON) })
+	})
+	if err != nil {
+		return nil, bridgeSafeError(err)
+	}
+	return out, nil
+}
+
 func finalizeMerged(mergedYAML string, resourceMapJSON string, orderReference string) (string, error) {
-	finalized, err := finalizeMergedDocument(mergedYAML, nil, resourceMapJSON, orderReference, nil)
+	finalized, err := finalizeMergedDocument(mergedYAML, nil, resourceMapJSON, orderReference, nil, nil, nil, nil)
 	return finalized.text, err
 }
 
@@ -52,15 +64,22 @@ type finalizedDocument struct {
 	document *yaml.Node
 }
 
-func finalizeMergedDocument(mergedYAML string, merged *yaml.Node, resourceMapJSON string, orderReference string, orderRoot *yaml.Node) (finalizedDocument, error) {
+func finalizeMergedDocument(mergedYAML string, merged *yaml.Node, resourceMapJSON string, orderReference string, orderRoot *yaml.Node, before, after []string, ruleProviders map[string]json.RawMessage) (finalizedDocument, error) {
 	var rm resourceMap
 	if resourceMapJSON != "" {
 		if err := json.Unmarshal([]byte(resourceMapJSON), &rm); err != nil {
 			return finalizedDocument{}, err
 		}
 	}
-	if merged == nil && rm.NodeLibraryDirectory != "" {
-		document, err := yaml.ClashParseDocument([]byte(mergedYAML), yaml.ClashSequence{Key: "proxies", Item: reflect.TypeOf(map[string]any{})})
+	var rules *RuleCatalog
+	if merged == nil && rm.RuleIndexDirectory != "" && finalizeReadsRulesInPlace {
+		if catalog, err := openRuleCatalog(mergedYAML); err == nil {
+			rules = catalog
+			defer catalog.Close()
+		}
+	}
+	if merged == nil && (rm.NodeLibraryDirectory != "" || rm.RuleIndexDirectory != "") {
+		document, err := yaml.ClashParseDocument(readOnlyBytes(mergedYAML), streamedSections(rm, reflect.TypeOf(map[string]any{}), rules != nil)...)
 		if err != nil {
 			return finalizedDocument{}, err
 		}
@@ -68,7 +87,7 @@ func finalizeMergedDocument(mergedYAML string, merged *yaml.Node, resourceMapJSO
 	}
 	if merged == nil {
 		var document yaml.Node
-		if err := yaml.Unmarshal([]byte(mergedYAML), &document); err != nil {
+		if err := yaml.Unmarshal(readOnlyBytes(mergedYAML), &document); err != nil {
 			return finalizedDocument{}, err
 		}
 		merged = &document
@@ -78,6 +97,9 @@ func finalizeMergedDocument(mergedYAML string, merged *yaml.Node, resourceMapJSO
 		if err := merged.Decode(&root); err != nil {
 			return finalizedDocument{}, err
 		}
+	}
+	if err := addModuleRuleProviders(root, ruleProviders); err != nil {
+		return finalizedDocument{}, err
 	}
 	canonicalizeProviderDefinitionKeysInDocument(root)
 	routeProviders := routeProviderSpecs(root)
@@ -97,6 +119,26 @@ func finalizeMergedDocument(mergedYAML string, merged *yaml.Node, resourceMapJSO
 	}
 	annotateProviderRefresh(root, "proxy-providers", "proxy", remoteProxyProviders, rm)
 	annotateProviderRefresh(root, "rule-providers", "rule", remoteRuleProviders, rm)
+	var names ruleNames
+	var view ruleView
+	viewed := false
+	ruleReference, ruleCarried := root["x-clash-rule-index"]
+	if ruleCarried || rm.RuleIndexDirectory != "" {
+		view, viewed = ruleViewOf(merged)
+	}
+	written, discarded := ruleLinesOf(view.Rule), false
+	if kept, _ := root["rules"].([]any); rules != nil && len(rules.items) > 0 && len(kept) == 0 {
+		written, discarded = ruleLines{n: len(rules.items), at: rules.value}, true
+	}
+	if ruleCarried && viewed && written.n > 0 {
+		ruleCarried = false
+		delete(root, "x-clash-rule-index")
+	}
+	if viewed {
+		names = ruleNamesOf(root, view)
+		moduleRuleSetNames(names, root, ruleProviders)
+		addLibraryNames(names, root["x-clash-node-library"])
+	}
 	reference, carried := root["x-clash-node-library"]
 	if carried && publishedNodeLibraryHere(reference) != nil && !nodesOnlyInLibrary(root, reference) {
 		carried = false
@@ -112,6 +154,41 @@ func finalizeMergedDocument(mergedYAML string, merged *yaml.Node, resourceMapJSO
 		}
 	} else {
 		dropWrittenNodeFields(root)
+	}
+	if ruleCarried {
+		reference, err := publishedRuleIndexHere(ruleReference, names, viewed, rm, before, after)
+		if err != nil {
+			return finalizedDocument{}, err
+		}
+		root["x-clash-rule-index"] = reference
+	} else if rm.RuleIndexDirectory != "" && viewed {
+		if err := writeRuleIndex(root, rm, names, written, before, after); err != nil {
+			return finalizedDocument{}, err
+		}
+	} else if discarded {
+		values := make([]any, 0, len(before)+written.n+len(after))
+		for _, line := range before {
+			values = append(values, line)
+		}
+		for i := 0; i < written.n; i++ {
+			values = append(values, written.at(i))
+		}
+		for _, line := range after {
+			values = append(values, line)
+		}
+		root["rules"] = values
+	} else if len(before) > 0 || len(after) > 0 {
+		if kept, isList := root["rules"].([]any); isList || root["rules"] == nil {
+			values := make([]any, 0, len(before)+len(kept)+len(after))
+			for _, line := range before {
+				values = append(values, line)
+			}
+			values = append(values, kept...)
+			for _, line := range after {
+				values = append(values, line)
+			}
+			root["rules"] = values
+		}
 	}
 	readPaths := rm.ProviderReadPaths
 	if len(readPaths) == 0 {
@@ -132,14 +209,14 @@ func finalizeMergedDocument(mergedYAML string, merged *yaml.Node, resourceMapJSO
 	references := make([]*yaml.Node, 0, 2)
 	if orderRoot != nil {
 		references = append(references, orderRoot)
-	} else if orderReference != "" && rm.NodeLibraryDirectory != "" {
-		document, err := yaml.ClashParseDocument([]byte(orderReference), yaml.ClashSequence{Key: "proxies", Item: reflect.TypeOf(struct{}{})})
+	} else if orderReference != "" && (rm.NodeLibraryDirectory != "" || rm.RuleIndexDirectory != "") {
+		document, err := yaml.ClashParseDocument(readOnlyBytes(orderReference), streamedSections(rm, reflect.TypeOf(struct{}{}), true)...)
 		if err == nil {
 			references = append(references, document)
 		}
 	} else if orderReference != "" {
 		var document yaml.Node
-		if err := yaml.Unmarshal([]byte(orderReference), &document); err == nil {
+		if err := yaml.Unmarshal(readOnlyBytes(orderReference), &document); err == nil {
 			references = append(references, &document)
 		}
 	}
@@ -452,4 +529,17 @@ func (buffer *boundedBuffer) Write(data []byte) (int, error) {
 		return 0, fmt.Errorf("decoded provider exceeds %d bytes", buffer.maximum)
 	}
 	return buffer.Buffer.Write(data)
+}
+
+var finalizeReadsRulesInPlace = true
+
+func streamedSections(rm resourceMap, node reflect.Type, discardRules bool) []yaml.ClashSequence {
+	var sections []yaml.ClashSequence
+	if rm.NodeLibraryDirectory != "" {
+		sections = append(sections, yaml.ClashSequence{Key: "proxies", Item: node})
+	}
+	if rm.RuleIndexDirectory != "" {
+		sections = append(sections, yaml.ClashSequence{Key: "rules", Item: reflect.TypeOf(""), Discard: discardRules})
+	}
+	return sections
 }

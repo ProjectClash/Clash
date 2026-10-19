@@ -24,12 +24,12 @@ func NewConfigDocument(configContent string) (*ConfigDocument, error) {
 	var root map[string]any
 	var rootErr error
 	read := false
-	raw, err := config.ClashUnmarshalRawConfig([]byte(configContent), func(decode func(any) error) {
+	raw, err := config.ClashUnmarshalRawConfig(readOnlyBytes(configContent), func(decode func(any) error) {
 		read = true
 		rootErr = decode(&root)
 	})
 	if !read {
-		rootErr = yaml.Unmarshal([]byte(configContent), &root)
+		rootErr = yaml.Unmarshal(readOnlyBytes(configContent), &root)
 	}
 	if rootErr != nil {
 		return nil, bridgeSafeError(fmt.Errorf("clash: parse config: %w", rootErr))

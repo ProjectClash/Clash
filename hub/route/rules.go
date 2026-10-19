@@ -38,6 +38,12 @@ type RuleExtra struct {
 }
 
 func getRules(w http.ResponseWriter, r *http.Request) {
+	if table := tunnel.RuleTable(); table != nil {
+		if _, ok := table.(constant.RuleList); !ok {
+			ClashStreamRules(w, r, table)
+			return
+		}
+	}
 	rawRules := tunnel.Rules()
 	rules := make([]Rule, 0, len(rawRules))
 	for index, rule := range rawRules {
@@ -81,12 +87,15 @@ func disableRules(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(payload) != 0 {
-		rules := tunnel.Rules()
+		rules := tunnel.RuleTable()
 		for index, disabled := range payload {
-			if index < 0 || index >= len(rules) {
+			if index < 0 || index >= rules.Len() {
 				continue
 			}
-			rule := rules[index]
+			if table, ok := rules.(constant.RuleTableStatistics); ok && table.SetDisabled(index, disabled) {
+				continue
+			}
+			rule := rules.At(index)
 			if ruleWrapper, ok := rule.(constant.RuleWrapper); ok {
 				ruleWrapper.SetDisabled(disabled)
 			}

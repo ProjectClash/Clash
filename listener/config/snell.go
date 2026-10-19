@@ -9,6 +9,7 @@ type SnellServer struct {
 	UDP       bool
 	ObfsMode  string
 	ObfsHost  string
+	Mode      string    `yaml:"mode,omitempty" json:"mode,omitempty"`
 	ShadowTLS ShadowTLS `yaml:"shadow-tls" json:"shadow-tls,omitempty"`
 	ResTLS    ResTLS    `yaml:"res-tls" json:"res-tls,omitempty"`
 	JLSConfig JLSConfig `yaml:"jls-config" json:"jls-config,omitempty"`

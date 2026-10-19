@@ -210,11 +210,11 @@ func unavailableMetadataRuleOccurrences(raw *config.RawConfig, capability appleP
 	appendOccurrence := func(kind, location string) {
 		occurrences = append(occurrences, metadataRuleOccurrence{kind: kind, location: location})
 	}
-	for index, rule := range raw.Rule {
+	eachRuleLine(raw, func(index int, rule string) {
 		if kind := unavailableMetadataRuleKind(rule, capability); kind != "" {
 			appendOccurrence(kind, fmt.Sprintf("rules[%d]", index))
 		}
-	}
+	})
 	names := make([]string, 0, len(raw.SubRules))
 	for name := range raw.SubRules {
 		names = append(names, name)

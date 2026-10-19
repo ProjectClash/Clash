@@ -33,6 +33,7 @@ import (
 	P "github.com/ProjectClash/Clash/constant/provider"
 	icontext "github.com/ProjectClash/Clash/context"
 	"github.com/ProjectClash/Clash/log"
+	RC "github.com/ProjectClash/Clash/rules/common"
 	"github.com/ProjectClash/Clash/tunnel/statistic"
 
 	"golang.org/x/exp/slices"
@@ -204,6 +205,15 @@ func Rules() []C.Rule {
 	return loadRules()
 }
 
+func loadRules() []C.Rule {
+	list, _ := loadVersion().rules.(C.RuleList)
+	return list
+}
+
+func RuleTable() C.RuleTable {
+	return loadVersion().rules
+}
+
 func Listeners() map[string]C.InboundListener {
 	return loadListeners()
 }
@@ -211,7 +221,7 @@ func Listeners() map[string]C.InboundListener {
 // UpdateRules handle update rules
 func UpdateRules(newRules []C.Rule, newSubRule map[string][]C.Rule, rp map[string]P.RuleProvider) {
 	publish(func(v *runtimeVersion) {
-		v.rules, v.subRules, v.ruleProviders = newRules, newSubRule, rp
+		v.rules, v.subRules, v.ruleProviders = C.RuleList(newRules), newSubRule, rp
 	})
 }
 
@@ -229,12 +239,13 @@ type runtimeVersion struct {
 	mode          TunnelMode
 	proxies       map[string]C.Proxy
 	providers     map[string]P.ProxyProvider
-	rules         []C.Rule
+	rules         C.RuleTable
 	subRules      map[string][]C.Rule
 	ruleProviders map[string]P.RuleProvider
 	listeners     map[string]C.InboundListener
 	proxyTable uint64
 	library C.ProxyLibrary
+	routing C.ClashRouting
 }
 
 func (v *runtimeVersion) lookup(name string) (C.Proxy, bool) {
@@ -272,7 +283,7 @@ func RangeProxies(f func(name string, proxy C.Proxy) bool) {
 	}
 }
 
-var initialVersion = runtimeVersion{mode: Rule, proxies: map[string]C.Proxy{}, listeners: map[string]C.InboundListener{}}
+var initialVersion = runtimeVersion{mode: Rule, proxies: map[string]C.Proxy{}, rules: C.RuleList(nil), listeners: map[string]C.InboundListener{}}
 
 func loadVersion() *runtimeVersion {
 	if v := published.Load(); v != nil {
@@ -296,7 +307,6 @@ func ProxyTable() (map[string]C.Proxy, map[string]P.ProxyProvider, uint64) {
 
 func loadProxies() map[string]C.Proxy              { return loadVersion().proxies }
 func loadProviders() map[string]P.ProxyProvider    { return loadVersion().providers }
-func loadRules() []C.Rule                          { return loadVersion().rules }
 func loadRuleProviders() map[string]P.RuleProvider { return loadVersion().ruleProviders }
 func loadListeners() map[string]C.InboundListener  { return loadVersion().listeners }
 
@@ -328,11 +338,33 @@ func lastLibrary(library []C.ProxyLibrary) C.ProxyLibrary {
 }
 
 func UpdateProxiesAndRules(newProxies map[string]C.Proxy, newProviders map[string]P.ProxyProvider, newRules []C.Rule, newSubRule map[string][]C.Rule, rp map[string]P.RuleProvider, library ...C.ProxyLibrary) {
+	UpdateProxiesAndRuleTable(newProxies, newProviders, C.RuleList(newRules), newSubRule, rp, library...)
+}
+
+func UpdateProxiesAndRuleTable(newProxies map[string]C.Proxy, newProviders map[string]P.ProxyProvider, newRules C.RuleTable, newSubRule map[string][]C.Rule, rp map[string]P.RuleProvider, library ...C.ProxyLibrary) {
+	updateProxiesRulesAndRouting(newProxies, newProviders, newRules, newSubRule, rp, lastLibrary(library), nil)
+}
+
+func UpdateProxiesRulesAndRouting(newProxies map[string]C.Proxy, newProviders map[string]P.ProxyProvider, newRules C.RuleTable, newSubRule map[string][]C.Rule, rp map[string]P.RuleProvider, library C.ProxyLibrary, routing C.ClashRouting) {
+	updateProxiesRulesAndRouting(newProxies, newProviders, newRules, newSubRule, rp, library, &routing)
+}
+
+func updateProxiesRulesAndRouting(newProxies map[string]C.Proxy, newProviders map[string]P.ProxyProvider, newRules C.RuleTable, newSubRule map[string][]C.Rule, rp map[string]P.RuleProvider, library C.ProxyLibrary, routing *C.ClashRouting) {
+	if newRules == nil {
+		newRules = C.RuleList(nil)
+	}
 	publish(func(v *runtimeVersion) {
 		v.proxies, v.providers, v.proxyTable = newProxies, newProviders, v.proxyTable+1
-		v.library = lastLibrary(library)
+		v.library = library
 		v.rules, v.subRules, v.ruleProviders = newRules, newSubRule, rp
+		if routing != nil {
+			v.routing = *routing
+		}
 	})
+}
+
+func UpdateClashRouting(routing C.ClashRouting) {
+	publish(func(v *runtimeVersion) { v.routing = routing })
 }
 
 func UpdateListeners(newListeners map[string]C.InboundListener) {
@@ -488,6 +520,7 @@ func resolveMetadataInVersion(parent context.Context, metadata *C.Metadata, vers
 		metadata:             metadata,
 		version:              version,
 		attemptProcessLookup: metadata.Type != C.INNER && !metadata.SourceIdentityKnown,
+		protocolProbe:        protocolProbeOf(parent),
 	}
 
 	if node, ok := resolver.DefaultHosts.Search(metadata.Host, false); ok {
@@ -558,6 +591,9 @@ func resolveMetadataInVersion(parent context.Context, metadata *C.Metadata, vers
 		},
 		RuleProviders: version.ruleProviders,
 	}
+	if RC.ProtocolReadersParsed() {
+		helper.Protocol = flow.flowProtocol
+	}
 
 	switch FindProcessMode() {
 	case process.FindProcessAlways:
@@ -567,14 +603,23 @@ func resolveMetadataInVersion(parent context.Context, metadata *C.Metadata, vers
 		helper.FindProcess = nil
 	}
 
+	if version.mode != Rule && len(version.routing.EveryModeRules) > 0 {
+		if proxy, rule = matchEveryMode(metadata, helper, version); proxy != nil {
+			return proxy, rule, nil
+		}
+	}
 	switch version.mode {
 	case Direct:
 		proxy, err = version.proxy("DIRECT")
 	case Global:
 		proxy, err = version.proxy("GLOBAL")
+		if err == nil {
+			proxy, err = version.udpFallback(metadata, proxy)
+		}
 	// Rule
 	default:
 		proxy, rule, err = match(metadata, helper, version)
+		notifyRuleMatched(metadata, rule)
 	}
 	return
 }
@@ -607,14 +652,20 @@ func handleUDPConn(packet C.PacketAdapter) {
 	}
 
 	key := packet.Key()
+	var plainSender *packetSender
 	sender, loaded := natTable.GetOrCreate(key, withUDPQuota(func() C.PacketSender {
 		sender := newPacketSender()
+		plainSender, _ = sender.(*packetSender)
 		if dispatcher := snifferDispatcher.Load(); sniffingEnable.Load() && dispatcher.Enable() {
 			return dispatcher.UDPSniff(packet, sender)
 		}
 		return sender
 	}))
 	if !loaded {
+		firstProtocol := ""
+		if routing := loadVersion().routing; RC.ProtocolReadersParsed() || routing.STUNResponseIPv4.IsValid() || routing.STUNResponseIPv6.IsValid() || routing.BlockQUIC != "" {
+			firstProtocol = classifyDatagram(packet.Data())
+		}
 		dial := func() (C.PacketConn, C.WriteBackProxy, error) {
 			originMetadata := metadata  // save origin metadata
 			metadata = metadata.Clone() // don't modify PacketAdapter's metadata
@@ -628,13 +679,27 @@ func handleUDPConn(packet C.PacketAdapter) {
 				return nil, nil, err
 			}
 
-			proxy, rule, err := resolveMetadata(metadata)
+			matchContext := context.Background()
+			if RC.ProtocolReadersParsed() {
+				matchContext = withProtocolProbe(matchContext, func() string { return firstProtocol })
+			}
+			proxy, rule, err := resolveMetadataContext(matchContext, metadata)
 			if err != nil {
 				log.Warnln("[UDP] Parse metadata failed: %s", err.Error())
 				return nil, nil, err
 			}
+			if quicBlocked(firstProtocol, proxy, metadata, loadVersion().routing.BlockQUIC) {
+				logQUICBlocked(metadata, rule, proxy)
+				return nil, nil, errQUICBlocked
+			}
 
 			dialMetadata := metadata.Pure()
+			if hosts := loadVersion().routing.ProxyHosts; hosts != nil {
+				dialMetadata = withProxyHosts(hosts, proxy, metadata, dialMetadata)
+				if plainSender != nil {
+					plainSender.dialRewrite = func(flow, dial *C.Metadata) *C.Metadata { return withProxyHosts(hosts, proxy, flow, dial) }
+				}
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), C.DefaultUDPTimeout)
 			defer cancel()
 			dialMetadata, err = ipStackDialMetadata(ctx, dialMetadata, !proxy.IsL3Protocol(dialMetadata))
@@ -660,7 +725,7 @@ func handleUDPConn(packet C.PacketAdapter) {
 			oAddrPort := dialMetadata.AddrPort()
 			writeBackProxy := nat.NewWriteBackProxy(packet)
 
-			go handleUDPToLocal(writeBackProxy, pc, sender, key, oAddrPort)
+			go handleUDPToLocal(stunWriteBack(writeBackProxy, firstProtocol, loadVersion().routing), pc, sender, key, oAddrPort)
 			return pc, writeBackProxy, nil
 		}
 
@@ -673,7 +738,11 @@ func handleUDPConn(packet C.PacketAdapter) {
 			}
 			pc, proxy, err := dial()
 			if err != nil {
-				reportUDPUnreachable(packet, metadata, "the outbound could not be opened")
+				if errors.Is(err, errQUICBlocked) {
+					reportUDPUnreachable(packet, metadata, "QUIC is blocked (x-clash-block-quic); the client falls back to TCP")
+				} else {
+					reportUDPUnreachable(packet, metadata, "the outbound could not be opened")
+				}
 				sender.Close()
 				natTable.Delete(key)
 				return
@@ -749,7 +818,11 @@ func handleTCPConnContext(parent context.Context, connCtx C.ConnContext) {
 		}()
 	}
 
-	proxy, rule, err := resolveMetadataContext(parent, metadata)
+	matchContext := parent
+	if RC.ProtocolReadersParsed() {
+		matchContext = withProtocolProbe(parent, tcpProtocolProbe(conn, &peekMutex, metadata))
+	}
+	proxy, rule, err := resolveMetadataContext(matchContext, metadata)
 	if err != nil {
 		log.Warnln("[Metadata] parse failed: %s", err.Error())
 		return
@@ -765,6 +838,7 @@ func handleTCPConnContext(parent context.Context, connCtx C.ConnContext) {
 			}
 		}
 	}
+	dialMetadata = withProxyHosts(loadVersion().routing.ProxyHosts, proxy, metadata, dialMetadata)
 
 	var peekBytes []byte
 	var peekLen int
@@ -851,6 +925,13 @@ func handleTCPConnContext(parent context.Context, connCtx C.ConnContext) {
 		}
 	}(remoteConn)
 
+	if loadVersion().routing.RejectPage && terminalAdapterType(proxy, dialMetadata) == C.Reject {
+		if answerRejectWithPage(conn, &peekMutex, metadata) {
+			logMetadata(metadata, rule, remoteConn)
+			return
+		}
+	}
+
 	if N.HandshakePending(conn) && terminalAdapterType(proxy, dialMetadata) == C.Reject {
 		logMetadata(metadata, rule, remoteConn)
 		log.Debugln("[TCP] %s --> %s reset before its handshake: rejected by rule", metadata.SourceDetail(), metadata.RemoteAddress())
@@ -936,6 +1017,9 @@ type flowMatch struct {
 	version              *runtimeVersion
 	resolved             bool
 	attemptProcessLookup bool
+	protocolProbe func() string
+	protocolRead  bool
+	protocol      string
 }
 
 func match(metadata *C.Metadata, helper C.RuleMatchHelper, version *runtimeVersion) (C.Proxy, C.Rule, error) {
@@ -943,35 +1027,44 @@ func match(metadata *C.Metadata, helper C.RuleMatchHelper, version *runtimeVersi
 	for {
 		var rematchProxy C.Proxy
 		var rematchRule C.Rule
-	GetRules:
-		for _, rule := range getRules(metadata, version) {
-			if matched, ada := rule.Match(metadata, helper); matched {
-				adapter, ok := version.lookup(ada)
-				if !ok || adapter == nil {
-					continue
-				}
-
-				// parse multi-layer nesting
-				for adapter := adapter; adapter != nil; adapter = adapter.Unwrap(metadata, false) {
-					if adapter.Type() == C.Pass {
-						log.Debugln("%s match Pass rule", adapter.Name())
-						continue GetRules
-					}
-					if adapter.Type() == C.Rematch {
-						log.Debugln("%s match Rematch rule", adapter.Name())
-						rematchProxy = adapter
-						rematchRule = rule
-						break GetRules
-					}
-				}
-
-				if metadata.NetWork == C.UDP && !adapter.SupportUDP() {
-					log.Debugln("%s UDP is not supported", adapter.Name())
-					continue
-				}
-
-				return adapter, rule, nil
+		var decided C.Proxy
+		var decidedRule C.Rule
+		getRules(metadata, version).Walk(metadata, helper, nil, func(index int, rule C.Rule, ada string) bool {
+			adapter, ok := version.lookup(ada)
+			if !ok || adapter == nil {
+				return false
 			}
+
+			// parse multi-layer nesting
+			for adapter := adapter; adapter != nil; adapter = adapter.Unwrap(metadata, false) {
+				if adapter.Type() == C.Pass {
+					log.Debugln("%s match Pass rule", adapter.Name())
+					return false
+				}
+				if adapter.Type() == C.Rematch {
+					log.Debugln("%s match Rematch rule", adapter.Name())
+					rematchProxy = adapter
+					rematchRule = &C.IndexedRule{Rule: rule, Index: index}
+					return true
+				}
+			}
+
+			if metadata.NetWork == C.UDP && !adapter.SupportUDP() {
+				log.Debugln("%s UDP is not supported", adapter.Name())
+				if fallback := version.routing.UDPUnsupported; fallback != "" {
+					if proxy, ok := version.lookup(fallback); ok && proxy != nil {
+						decided, decidedRule = proxy, &C.IndexedRule{Rule: rule, Index: index}
+						return true
+					}
+				}
+				return false
+			}
+
+			decided, decidedRule = adapter, &C.IndexedRule{Rule: rule, Index: index}
+			return true
+		})
+		if decided != nil {
+			return decided, decidedRule, nil
 		}
 		if rematchProxy != nil {
 			if slices.Contains(rematchChain, rematchProxy.Name()) {
@@ -995,10 +1088,10 @@ func match(metadata *C.Metadata, helper C.RuleMatchHelper, version *runtimeVersi
 	}
 }
 
-func getRules(metadata *C.Metadata, version *runtimeVersion) []C.Rule {
+func getRules(metadata *C.Metadata, version *runtimeVersion) C.RuleTable {
 	if sr, ok := version.subRules[metadata.SpecialRules]; ok {
 		log.Debugln("[Rule] use %s rules", metadata.SpecialRules)
-		return sr
+		return C.RuleList(sr)
 	} else {
 		log.Debugln("[Rule] use default rules")
 		return version.rules

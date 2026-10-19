@@ -102,18 +102,33 @@ func ruleProvidersCatalog(providers map[string]P.RuleProvider) map[string]any {
 type ringBuffer struct {
 	mu    sync.Mutex
 	lines []string
+	bytes int
 	max   int
 }
 
 const defaultLogMaxLines = 400
 
+const recentLogMaxBytes = 512 << 10
+
 func (r *ringBuffer) add(line string) {
 	r.mu.Lock()
 	r.lines = append(r.lines, line)
-	if len(r.lines) > r.max {
-		r.lines = r.lines[len(r.lines)-r.max:]
-	}
+	r.bytes += len(line)
+	r.trim()
 	r.mu.Unlock()
+}
+
+func (r *ringBuffer) trim() {
+	drop := 0
+	for drop < len(r.lines) &&
+		(len(r.lines)-drop > r.max || (r.bytes > recentLogMaxBytes && len(r.lines)-drop > 1)) {
+		r.bytes -= len(r.lines[drop])
+		drop++
+	}
+	if drop > 0 {
+		clear(r.lines[:drop])
+		r.lines = r.lines[drop:]
+	}
 }
 
 func (r *ringBuffer) snapshot() []string {
@@ -131,7 +146,8 @@ func (r *ringBuffer) setMax(max int) {
 	r.mu.Lock()
 	r.max = max
 	if len(r.lines) > max {
-		r.lines = append([]string(nil), r.lines[len(r.lines)-max:]...)
+		r.trim()
+		r.lines = append([]string(nil), r.lines...)
 	}
 	r.mu.Unlock()
 }

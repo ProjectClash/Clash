@@ -15,6 +15,7 @@
 | `github.com/metacubex/tfo-go` | BSD-3 | TCP fast-open |
 | `github.com/metacubex/gvisor` | Apache-2.0 / BSD | userspace TCP/IP stack (gVisor fork) |
 | `github.com/metacubex/quic-go` | MIT | QUIC |
+| `github.com/sagernet/sing-snell`, `github.com/sagernet/sing` | GPLv3 | Snell v6 nodes and listeners; linked by the Apple binding only |
 
 ## Protocol / crypto / util (representative)
 

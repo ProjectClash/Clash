@@ -3,6 +3,8 @@ package clash
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/ProjectClash/Clash/config"
+	"github.com/ProjectClash/Clash/rules/clashindex"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -37,12 +39,16 @@ func MatchRuleForIOS(document, resourceMapJSON, query string) (*StringBox, error
 }
 
 type matchRuleQuery struct {
-	Host    string `json:"host"`
-	IP      string `json:"ip"`
-	Port    uint16 `json:"port"`
-	Network string `json:"network"`
-	SrcIP   string `json:"srcIP"`
-	SrcPort uint16 `json:"srcPort"`
+	Host     string `json:"host"`
+	IP       string `json:"ip"`
+	Port     uint16 `json:"port"`
+	Network  string `json:"network"`
+	SrcIP    string `json:"srcIP"`
+	SrcPort  uint16 `json:"srcPort"`
+	InPort   uint16 `json:"inPort"`
+	InName   string `json:"inName"`
+	InType   string `json:"inType"`
+	Protocol string `json:"protocol"`
 }
 
 type matchRuleResult struct {
@@ -97,7 +103,10 @@ func matchRuleForIOSUnguarded(document, resourceMapJSON, query string) (*StringB
 	geodata.SetGeodataMode(geodataMode)
 
 	RP.SetTunnel(T.Tunnel)
-	walk := &offlineRules{providers: map[string]P.RuleProvider{}}
+	walk := &offlineRules{providers: map[string]P.RuleProvider{}, inPortKnown: q.InPort > 0, inNameKnown: q.InName != ""}
+	if walk.protocol, walk.protocolKnown, err = matchRuleProtocol(q.Protocol); err != nil {
+		return nil, err
+	}
 	defer walk.close()
 	if err := walk.loadProviders(root); err != nil {
 		return nil, err
@@ -133,15 +142,34 @@ func matchRuleForIOSUnguarded(document, resourceMapJSON, query string) (*StringB
 		return nil, err
 	}
 	lines, _ := root["rules"].([]any)
-	texts := make([]string, len(lines))
-	rules := make([]C.Rule, len(lines))
-	for idx, line := range lines {
-		texts[idx], _ = line.(string)
-		rule, err := walk.parseLine(texts[idx], subRules)
-		if err != nil {
-			return nil, fmt.Errorf("rules[%d] [%s] error: %w", idx, texts[idx], err)
+	var count int
+	var at func(i int) (C.Rule, string)
+	var indexed *clashindex.Index
+	var before, after []string
+	if ref, named := documentRuleIndexRef(root); named && len(lines) == 0 {
+		before, after = ref.Prepend, ref.Append
+		var err error
+		if indexed, err = config.ClashOpenRuleIndex(ref); err != nil {
+			return nil, err
 		}
-		rules[idx] = rule
+	}
+	if indexed != nil {
+		var err error
+		if count, at, err = walk.indexedRules(indexed, before, after, subRules); err != nil {
+			return nil, err
+		}
+	} else {
+		texts := make([]string, len(lines))
+		rules := make([]C.Rule, len(lines))
+		for idx, line := range lines {
+			texts[idx], _ = line.(string)
+			rule, err := walk.parseLine(texts[idx], subRules)
+			if err != nil {
+				return nil, fmt.Errorf("rules[%d] [%s] error: %w", idx, texts[idx], err)
+			}
+			rules[idx] = rule
+		}
+		count, at = len(rules), func(i int) (C.Rule, string) { return rules[i], texts[i] }
 	}
 	if metadata.DstIP.IsValid() && !resolver.CurrentIPQueryPolicy().AllowsAddress(metadata.DstIP) {
 		return encodeMatchRuleResult(matchRuleResult{Reason: "ipVersionRefused"})
@@ -164,8 +192,8 @@ func matchRuleForIOSUnguarded(document, resourceMapJSON, query string) (*StringB
 		}
 	}
 	result := matchRuleResult{Policy: "DIRECT"}
-	for idx, rule := range rules {
-		text := texts[idx]
+	for idx := 0; idx < count; idx++ {
+		rule, text := at(idx)
 		matched, policy, undecided := walk.match(rule, metadata)
 		if undecided != "" {
 			index := idx
@@ -220,7 +248,29 @@ func matchRuleMetadata(q matchRuleQuery) (*C.Metadata, error) {
 		metadata.SrcIP = ip.Unmap()
 	}
 	metadata.SrcPort = q.SrcPort
+	metadata.InPort, metadata.InName = q.InPort, q.InName
+	if q.InType != "" {
+		typ, err := C.ParseType(strings.ToUpper(strings.TrimSpace(q.InType)))
+		if err != nil {
+			return nil, fmt.Errorf("clash: match query: inType: %w", err)
+		}
+		metadata.Type = *typ
+	}
 	return metadata, nil
+}
+
+func matchRuleProtocol(protocol string) (answer string, known bool, err error) {
+	switch upper := strings.ToUpper(strings.TrimSpace(protocol)); upper {
+	case "":
+		return "", false, nil
+	case "OTHER":
+		return "", true, nil
+	case "TLS":
+		return RC.ProtocolHTTPS, true, nil
+	case RC.ProtocolHTTP, RC.ProtocolHTTPS, RC.ProtocolQUIC, RC.ProtocolSTUN:
+		return upper, true, nil
+	}
+	return "", false, fmt.Errorf("clash: match query: protocol is HTTP, HTTPS, TLS, QUIC, STUN or other, not %q", protocol)
 }
 
 type offlineRules struct {
@@ -229,14 +279,17 @@ type offlineRules struct {
 	opened      []P.RuleProvider
 	geodataOK   map[string]bool
 
-	hostTree       *trie.DomainTrie[resolver.HostValue]
-	hostsResolved  bool
-	findProcessOff bool
-	policies       map[string]bool
-	activeSets     map[string]bool
-	definedSets    map[string]bool
-	copies         string
-	copied         int
+	hostTree                 *trie.DomainTrie[resolver.HostValue]
+	hostsResolved            bool
+	findProcessOff           bool
+	policies                 map[string]bool
+	activeSets               map[string]bool
+	definedSets              map[string]bool
+	copies                   string
+	copied                   int
+	inPortKnown, inNameKnown bool
+	protocol                 string
+	protocolKnown            bool
 }
 
 func (w *offlineRules) loadDocument(root map[string]any) error {
@@ -303,6 +356,13 @@ func (w *offlineRules) loadDocument(root map[string]any) error {
 			if name, ok := mapping["name"].(string); ok {
 				w.policies[name] = true
 			}
+		}
+	}
+	if reference, ok := root["x-clash-node-library"]; ok {
+		library := ruleNames{targets: map[string]struct{}{}}
+		addLibraryNames(library, reference)
+		for name := range library.targets {
+			w.policies[name] = true
 		}
 	}
 	return nil
@@ -482,6 +542,65 @@ func fileExists(path string) bool {
 	return err == nil && info.Mode().IsRegular()
 }
 
+func (w *offlineRules) indexedRules(index *clashindex.Index, before, after []string, subRules map[string][]C.Rule) (int, func(i int) (C.Rule, string), error) {
+	k := len(before)
+	first := make([]C.Rule, k)
+	for i, line := range before {
+		rule, err := w.parseLine(line, subRules)
+		if err != nil {
+			return 0, nil, fmt.Errorf("rules[%d] [%s] error: %w", i, line, err)
+		}
+		first[i] = rule
+	}
+	var failure error
+	index.Targets(func(name string, at int) bool {
+		if !w.policies[name] {
+			line, _, _ := index.Written(at)
+			failure = fmt.Errorf("rules[%d] [%s] error: proxy [%s] not found", k+at, line, name)
+		}
+		return failure == nil
+	})
+	if failure != nil {
+		return 0, nil, failure
+	}
+	var others []C.Rule
+	index.Others(func(i int, line string) bool {
+		rule, err := w.parseLine(line, subRules)
+		if err != nil {
+			failure = fmt.Errorf("rules[%d] [%s] error: %w", k+i, line, err)
+			return false
+		}
+		others = append(others, rule)
+		return true
+	})
+	if failure != nil {
+		return 0, nil, failure
+	}
+	table, err := index.Table(others)
+	if err != nil {
+		return 0, nil, err
+	}
+	n := k + table.Len()
+	last := make([]C.Rule, len(after))
+	for j, line := range after {
+		rule, err := w.parseLine(line, subRules)
+		if err != nil {
+			return 0, nil, fmt.Errorf("rules[%d] [%s] error: %w", n+j, line, err)
+		}
+		last[j] = rule
+	}
+	return n + len(after), func(i int) (C.Rule, string) {
+		if i < k {
+			return first[i], before[i]
+		}
+		if i >= n {
+			return last[i-n], after[i-n]
+		}
+		line, _, _ := index.Written(i - k)
+		return table.At(i - k), line
+	}, nil
+}
+
 func (w *offlineRules) parseLine(line string, subRules map[string][]C.Rule) (C.Rule, error) {
 	tp, payload, target, params := RC.ParseRulePayload(line, true)
 	if target == "" {
@@ -541,10 +660,20 @@ func (w *offlineRules) parseRule(tp, payload, target string, params []string, su
 			return undecidedRule{ruleType: C.IPASN, adapter: target, reason: "geodataUnavailable"}, nil
 		}
 	case "IN-NAME", "IN-PORT", "IN-USER", "DSCP", "UID":
-		if _, err := R.ParseRule(tp, payload, target, params, subRules); err != nil {
+		rule, err := R.ParseRule(tp, payload, target, params, subRules)
+		if err != nil {
 			return nil, err
 		}
+		if (tp == "IN-PORT" && w.inPortKnown) || (tp == "IN-NAME" && w.inNameKnown) {
+			return rule, nil
+		}
 		return undecidedRule{ruleType: C.InName, adapter: target, reason: "needsInbound"}, nil
+	case "SUBNET", "CELLULAR-RADIO":
+		rule, err := R.ParseRule(tp, payload, target, params, subRules)
+		if err != nil {
+			return nil, err
+		}
+		return undecidedRule{ruleType: rule.RuleType(), adapter: target, reason: "needsNetwork"}, nil
 	}
 	return R.ParseRule(tp, payload, target, params, subRules)
 }
@@ -571,6 +700,12 @@ func (w *offlineRules) match(rule C.Rule, metadata *C.Metadata) (matched bool, p
 			}
 		},
 		CheckPassRule: func(adapterName string) bool { return adapterName == "PASS-RULE" },
+		Protocol: func() string {
+			if !w.protocolKnown {
+				panic(errMatchUndecided{reason: "needsProtocol"})
+			}
+			return w.protocol
+		},
 	}
 	if w.findProcessOff {
 		helper.FindProcess = nil

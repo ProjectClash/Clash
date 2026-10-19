@@ -107,13 +107,25 @@ func planResourcesForProfileUnguarded(mergedYAML string, targetProfile string) (
 	if err != nil {
 		return nil, bridgeSafeError(err)
 	}
-	doc, err := NewConfigDocument(mergedYAML)
+	bridgedValue0, bridgedErr := withCompactHeap(func() (*StringBox, error) {
+		doc, err := NewConfigDocument(mergedYAML)
+		if err != nil {
+			return nil, err
+		}
+		defer doc.Close()
+		return doc.planResourcesJSON(runtimePolicyFor(profile, true))
+	})
+	return bridgedValue0, bridgeSafeError(bridgedErr)
+}
+
+func PlanResourcesForProfileAtPath(path string, targetProfile string) (*StringBox, error) {
+	out, err := recoverAppCall("PlanResourcesForProfileAtPath", func() (*StringBox, error) {
+		return withDocumentAt(path, func(text string) (*StringBox, error) { return planResourcesForProfileUnguarded(text, targetProfile) })
+	})
 	if err != nil {
 		return nil, bridgeSafeError(err)
 	}
-	defer doc.Close()
-	bridgedValue0, bridgedErr := doc.planResourcesJSON(runtimePolicyFor(profile, true))
-	return bridgedValue0, bridgeSafeError(bridgedErr)
+	return out, nil
 }
 
 func (d *ConfigDocument) PlanResourcesJSON() (*StringBox, error) {
@@ -137,6 +149,9 @@ func (d *ConfigDocument) planResourcesJSON(policy appleRuntimePolicy) (*StringBo
 	}
 	root := views.root
 	raw := views.raw
+	if _, err := rawRuleIndexChecked(raw); err != nil {
+		return nil, err
+	}
 	res := planResources{
 		SchemaVersion:     resourcePlanSchemaVersion,
 		Providers:         []planProvider{},
@@ -556,6 +571,7 @@ var dnsResolverFields = []string{
 	"direct-nameserver",
 	"nameserver-policy",
 	"proxy-server-nameserver-policy",
+	"x-clash-ssid-nameservers",
 }
 
 func hardRejectErrors(root map[string]any, raw *config.RawConfig) ([]planError, []planNotice) {

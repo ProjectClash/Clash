@@ -1,6 +1,8 @@
 package common
 
 import (
+	"strings"
+
 	"github.com/ProjectClash/Clash/component/geodata"
 	"github.com/ProjectClash/Clash/component/mmdb"
 	C "github.com/ProjectClash/Clash/constant"
@@ -13,6 +15,7 @@ type ASN struct {
 	adapter     string
 	noResolveIP bool
 	isSourceIP  bool
+	unknown     bool
 }
 
 func (a *ASN) Match(metadata *C.Metadata, helper C.RuleMatchHelper) (bool, string) {
@@ -35,6 +38,9 @@ func (a *ASN) Match(metadata *C.Metadata, helper C.RuleMatchHelper) (bool, strin
 		metadata.DstIPASN = asn + " " + aso
 	}
 
+	if a.unknown {
+		return asn == "" || asn == "0", a.adapter
+	}
 	return a.asn == asn, a.adapter
 }
 
@@ -69,6 +75,7 @@ func NewIPASN(asn string, adapter string, isSrc, noResolveIP bool) (*ASN, error)
 		adapter:     adapter,
 		noResolveIP: noResolveIP,
 		isSourceIP:  isSrc,
+		unknown:     strings.EqualFold(asn, "unknown"),
 	}, nil
 }
 

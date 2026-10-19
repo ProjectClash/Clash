@@ -41,6 +41,8 @@ import (
 	"github.com/ProjectClash/Clash/log"
 	"github.com/ProjectClash/Clash/ntp/ntp"
 	"github.com/ProjectClash/Clash/tunnel"
+
+	singtun "github.com/metacubex/sing-tun"
 )
 
 var mux sync.Mutex
@@ -112,7 +114,8 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	applyProbe("experimental")
 	updateUsers(cfg.Users)
 	applyProbe("users")
-	tunnel.UpdateProxiesAndRules(cfg.Proxies, cfg.Providers, cfg.Rules, cfg.SubRules, cfg.RuleProviders, cfg.ProxyLibrary)
+	tunnel.UpdateProxiesRulesAndRouting(cfg.Proxies, cfg.Providers, ruleTableOf(cfg), cfg.SubRules, cfg.RuleProviders, cfg.ProxyLibrary, cfg.ClashRouting)
+	singtun.SetIPRewrite(cfg.IPRewrite)
 	applyProbe("proxies")
 	applyProbe("rules")
 	updateSniffer(cfg.Sniffer)
@@ -296,6 +299,7 @@ func updateDNS(c *config.DNS, generalIPv6 bool) {
 		ProxyServerPolicy:    c.ProxyServerPolicy,
 		DirectServer:         c.DirectNameServer,
 		DirectFollowPolicy:   c.DirectFollowPolicy,
+		SSIDPolicy:           c.SSIDPolicy,
 		CacheAlgorithm:       c.CacheAlgorithm,
 		CacheMaxSize:         c.CacheMaxSize,
 	})
@@ -307,6 +311,7 @@ func updateDNS(c *config.DNS, generalIPv6 bool) {
 		FakeIPSkipper: c.FakeIPSkipper,
 		FakeIPTTL:     c.FakeIPTTL,
 		UseHosts:      c.UseHosts,
+		QueryTypes:    c.QueryTypes,
 	})
 
 	// reuse cache of old host mapper
@@ -607,4 +612,11 @@ func Shutdown() {
 	resolver.StoreFakePoolState()
 
 	log.Warnln("Mihomo shutting down")
+}
+
+func ruleTableOf(cfg *config.Config) C.RuleTable {
+	if cfg.RuleTable != nil {
+		return cfg.RuleTable
+	}
+	return C.RuleList(cfg.Rules)
 }

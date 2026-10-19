@@ -33,13 +33,17 @@ func FinalizeForIOSWithOptions(mergedYAML, resourceMapJSON, optionsJSON string) 
 }
 
 type finalizeOptions struct {
-	TargetProfile  string   `json:"targetProfile"`
-	Plan           bool     `json:"plan"`
-	Intent         bool     `json:"intent"`
-	GeodataMode    bool     `json:"geodataMode"`
-	TopLevelKeys   []string `json:"topLevelKeys"`
-	OrderReference string   `json:"orderReference"`
-	GeoCategories  bool     `json:"geoCategories"`
+	TargetProfile      string                     `json:"targetProfile"`
+	Plan               bool                       `json:"plan"`
+	Intent             bool                       `json:"intent"`
+	GeodataMode        bool                       `json:"geodataMode"`
+	TopLevelKeys       []string                   `json:"topLevelKeys"`
+	OrderReference     string                     `json:"orderReference"`
+	OrderReferencePath string                     `json:"orderReferencePath"`
+	GeoCategories      bool                       `json:"geoCategories"`
+	PrependRules       []string                   `json:"prependRules"`
+	AppendRules        []string                   `json:"appendRules"`
+	RuleProviders      map[string]json.RawMessage `json:"ruleProviders"`
 }
 
 type finalizeOptionsAnswer struct {
@@ -65,11 +69,38 @@ func finalizeForIOSWithOptionsUnguarded(mergedYAML, resourceMapJSON, optionsJSON
 	if err := decodeSavePathOptions(optionsJSON, &options); err != nil {
 		return nil, bridgeSafeError(err)
 	}
-	finalized, err := finalizeMergedDocument(mergedYAML, nil, resourceMapJSON, options.OrderReference, nil)
+	finalize := func(orderReference string) (*StringBox, error) {
+		return withCompactHeap(func() (*StringBox, error) {
+			finalized, err := finalizeMergedDocument(mergedYAML, nil, resourceMapJSON, orderReference, nil, options.PrependRules, options.AppendRules, options.RuleProviders)
+			if err != nil {
+				return nil, err
+			}
+			return answerFinalized(finalized, options)
+		})
+	}
+	var out *StringBox
+	var err error
+	if options.OrderReferencePath != "" {
+		out, err = withDocumentAt(options.OrderReferencePath, finalize)
+	} else {
+		out, err = finalize(options.OrderReference)
+	}
 	if err != nil {
 		return nil, bridgeSafeError(err)
 	}
-	return answerFinalized(finalized, options)
+	return out, nil
+}
+
+func FinalizeForIOSWithOptionsAtPath(path, resourceMapJSON, optionsJSON string) (*StringBox, error) {
+	out, err := recoverAppCall("FinalizeForIOSWithOptionsAtPath", func() (*StringBox, error) {
+		return withDocumentAt(path, func(text string) (*StringBox, error) {
+			return finalizeForIOSWithOptionsUnguarded(text, resourceMapJSON, optionsJSON)
+		})
+	})
+	if err != nil {
+		return nil, bridgeSafeError(err)
+	}
+	return out, nil
 }
 
 func answerFinalized(finalized finalizedDocument, options finalizeOptions) (*StringBox, error) {

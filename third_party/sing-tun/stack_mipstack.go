@@ -258,6 +258,16 @@ func (s *Mipstack) processPackets(packets [][]byte, offset int) {
 	stackCount, packetCount := 0, 0
 	for _, packet := range packets {
 		ipPacket := packet[offset:]
+		if handled, writeBack, reply := applyIPRewrite(ipPacket); handled {
+			if reply != nil {
+				_, _ = s.tun.Write(ipRewriteFrame(reply))
+			}
+			if writeBack {
+				packets[packetCount] = packet
+				packetCount++
+			}
+			continue
+		}
 		destination, ok := mipsPacketDestination(ipPacket)
 		if !ok {
 			continue

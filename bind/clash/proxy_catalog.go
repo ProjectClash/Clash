@@ -25,6 +25,7 @@ type detachedLoader interface {
 var catalogIgnoredSections = []string{
 	"rules", "sub-rules", "rule-providers", "dns", "hosts", "sniffer",
 	"tun", "listeners", "tunnels", "ntp", "experimental",
+	"x-clash-rule-index",
 }
 
 func ProxyCatalogForIOS(configContent, resourceMapJSON, selectionsJSON string) (*StringBox, error) {

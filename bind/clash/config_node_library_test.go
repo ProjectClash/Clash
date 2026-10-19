@@ -160,6 +160,36 @@ func TestPruneNodeLibrariesKeepsTheOneNamed(t *testing.T) {
 	}
 }
 
+func TestAPruneRemovesTheTemporaryFilesOfAnInterruptedWrite(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{".library-1", ".index-2", "other.txt"} {
+		agedFile(t, filepath.Join(dir, name), time.Hour)
+	}
+	for _, name := range []string{".library-3", ".index-4"} {
+		agedFile(t, filepath.Join(dir, name), time.Minute)
+	}
+	left := func() string {
+		entries, _ := os.ReadDir(dir)
+		var names []string
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		return strings.Join(names, ",")
+	}
+	if err := PruneNodeLibraries(dir, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := left(); got != ".index-2,.index-4,.library-3,other.txt" {
+		t.Fatalf("a library prune left %v", got)
+	}
+	if err := PruneRuleIndexesKeeping(dir, "[]"); err != nil {
+		t.Fatal(err)
+	}
+	if got := left(); got != ".index-4,.library-3,other.txt" {
+		t.Fatalf("an index prune left %v", got)
+	}
+}
+
 func TestTheLibraryReferenceIsFinalizesOwn(t *testing.T) {
 	document := "x-clash-node-library: {path: /etc/hosts, sha256: 00}\nproxies:\n  - {name: a, type: ss, server: a.example.net, port: 8388, cipher: aes-128-gcm, password: p}\nrules: [MATCH,DIRECT]\n"
 	finalized, err := FinalizeForIOS(document, "{}")

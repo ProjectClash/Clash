@@ -164,6 +164,7 @@ type fakeIPEnhancerStub struct {
 	skipped  map[string]bool
 	useHosts bool
 	ipv6     bool
+	svcb     bool
 }
 
 func (s fakeIPEnhancerStub) FakeIPEnabled() bool                    { return s.enabled }
@@ -178,6 +179,7 @@ func (s fakeIPEnhancerStub) StoreFakePoolState()                    {}
 func (s fakeIPEnhancerStub) UseHosts() bool                         { return s.useHosts }
 func (s fakeIPEnhancerStub) ShouldSkipFakeIP(host string) bool      { return s.skipped[host] }
 func (s fakeIPEnhancerStub) IPv6() bool                             { return s.ipv6 }
+func (s fakeIPEnhancerStub) AnswersSVCB() bool                      { return s.svcb }
 
 var _ middlewareAware = fakeIPEnhancerStub{}
 

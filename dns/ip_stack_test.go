@@ -46,7 +46,7 @@ func TestFakeIPWithoutIPv6PoolAnswersAAAAEmptyInEveryQueryMode(t *testing.T) {
 	for _, p := range []resolver.IPQueryPolicy{resolver.IPQueryLegacy, resolver.IPQueryDualStack, resolver.IPQueryPreferIPv4, resolver.IPQueryPreferIPv6, resolver.IPQueryIPv6Only} {
 		resolver.SetIPQueryPolicy(p)
 		called := false
-		h := withFakeIP(&fakeip.Skipper{}, nil, nil, 60)(func(_ *icontext.DNSContext, r *D.Msg) (*D.Msg, error) { called = true; return r, nil })
+		h := withFakeIP(&fakeip.Skipper{}, nil, nil, 60, false)(func(_ *icontext.DNSContext, r *D.Msg) (*D.Msg, error) { called = true; return r, nil })
 		msg := new(D.Msg)
 		msg.SetQuestion("stack.example.", D.TypeAAAA)
 		answer, err := h(nil, msg)

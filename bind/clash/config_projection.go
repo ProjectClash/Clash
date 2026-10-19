@@ -164,16 +164,20 @@ func buildConfigProjection(doc *ConfigDocument, kind string, packages []string) 
 		out.Resources = resources
 	}
 	if wanted[projectionPackageRuleFacts] {
+		index, err := rawRuleIndexChecked(views.raw)
+		if err != nil {
+			return configProjection{}, err
+		}
 		facts := &projectionRuleFacts{
-			RuleCount:    len(views.raw.Rule),
+			RuleCount:    ruleCountOfIndex(views.raw, index),
 			SubRuleNames: make([]string, 0, len(views.raw.SubRules)),
 		}
-		for _, rule := range views.raw.Rule {
+		eachRuleLineOf(views.raw, index, func(_ int, rule string) {
 			parts := strings.Split(rule, ",")
 			if len(parts) >= 2 && strings.EqualFold(strings.TrimSpace(parts[0]), "MATCH") {
 				facts.LastMatchTarget = strings.TrimSpace(parts[1])
 			}
-		}
+		})
 		for name := range views.raw.SubRules {
 			facts.SubRuleNames = append(facts.SubRuleNames, name)
 		}

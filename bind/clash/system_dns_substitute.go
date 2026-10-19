@@ -197,5 +197,6 @@ func substituteSystemResolvers(raw *config.RawConfig, usable []string) []systemR
 	}
 	replacePolicy("nameserver-policy", raw.DNS.NameServerPolicy)
 	replacePolicy("proxy-server-nameserver-policy", raw.DNS.ProxyServerNameserverPolicy)
+	replacePolicy("x-clash-ssid-nameservers", raw.DNS.ClashSSIDNameservers)
 	return changes
 }

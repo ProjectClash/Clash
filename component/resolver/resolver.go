@@ -297,6 +297,10 @@ func ClearCache() {
 	eachConfiguredResolver(func(r Resolver) { go r.ClearCache() })
 }
 
+func ClearCacheNow() {
+	eachConfiguredResolver(func(r Resolver) { r.ClearCache() })
+}
+
 func ResetConnection() {
 	eachConfiguredResolver(func(r Resolver) { go r.ResetConnection() })
 }

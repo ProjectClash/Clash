@@ -422,6 +422,24 @@ func readersRuleIndex(document string, index int, message string) (int, bool) {
 		return 0, false
 	}
 	rules, _ := root["rules"].([]any)
+	if len(rules) == 0 {
+		ref, named := documentRuleIndexRef(root)
+		if !named {
+			return 0, false
+		}
+		if before := len(ref.Prepend); index < before {
+			return index, strings.TrimSpace(ref.Prepend[index]) == quoted[1]
+		}
+		if indexed := documentRuleIndex(root); indexed != nil {
+			if first := len(ref.Prepend) + indexed.Len(); index >= first && index-first < len(ref.Append) {
+				return writtenPlace(index, ref.UIDRemoved), strings.TrimSpace(ref.Append[index-first]) == quoted[1]
+			}
+			if line, _, ok := indexed.Written(index - len(ref.Prepend)); ok && strings.TrimSpace(line) == quoted[1] {
+				return writtenPlace(index, ref.UIDRemoved), true
+			}
+		}
+		return 0, false
+	}
 	text := func(i int) string {
 		rule, _ := rules[i].(string)
 		return strings.TrimSpace(rule)

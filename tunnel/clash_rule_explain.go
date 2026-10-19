@@ -130,11 +130,18 @@ func ExplainRule(input RuleExplainInput) RuleExplanation {
 	}
 
 	var proxy C.Proxy
-	switch version.mode {
-	case Direct:
+	if version.mode != Rule && len(version.routing.EveryModeRules) > 0 {
+		proxy, _ = matchEveryMode(metadata, helper, version)
+	}
+	switch {
+	case proxy != nil:
+	case version.mode == Direct:
 		proxy = version.proxies["DIRECT"]
-	case Global:
+	case version.mode == Global:
 		proxy = version.proxies["GLOBAL"]
+		if proxy != nil {
+			proxy, _ = version.udpFallback(metadata, proxy)
+		}
 	default:
 		var rule *ExplainedRule
 		proxy, rule = explainMatch(metadata, helper, version)
@@ -170,16 +177,17 @@ func explainMatch(metadata *C.Metadata, helper C.RuleMatchHelper, version *runti
 		if _, ok := version.subRules[metadata.SpecialRules]; ok {
 			subRules = metadata.SpecialRules
 		}
-	GetRules:
-		for index, rule := range rules {
-			before := *metadata
-			matched, ada := rule.Match(metadata, helper)
-			if !matched {
-				continue
+		var before C.Metadata
+		var decided C.Proxy
+		var decidedRule *ExplainedRule
+		rules.Walk(metadata, helper, func(_ int, rule C.Rule) {
+			if rule.RuleType() == C.SubRules {
+				before = *metadata
 			}
+		}, func(index int, rule C.Rule, ada string) bool {
 			adapter, ok := version.lookup(ada)
 			if !ok || adapter == nil {
-				continue
+				return false
 			}
 			explained := &ExplainedRule{Index: index, Type: rule.RuleType().String(), Payload: rule.Payload(), SubRules: subRules}
 			if rule.RuleType() == C.SubRules {
@@ -187,17 +195,27 @@ func explainMatch(metadata *C.Metadata, helper C.RuleMatchHelper, version *runti
 			}
 			for a := adapter; a != nil; a = a.Unwrap(metadata, false) {
 				if a.Type() == C.Pass {
-					continue GetRules
+					return false
 				}
 				if a.Type() == C.Rematch {
 					rematchProxy, rematchRule = a, explained
-					break GetRules
+					return true
 				}
 			}
 			if metadata.NetWork == C.UDP && !adapter.SupportUDP() {
-				continue
+				if fallback := version.routing.UDPUnsupported; fallback != "" {
+					if proxy, ok := version.lookup(fallback); ok && proxy != nil {
+						decided, decidedRule = proxy, explained
+						return true
+					}
+				}
+				return false
 			}
-			return adapter, explained
+			decided, decidedRule = adapter, explained
+			return true
+		})
+		if decided != nil {
+			return decided, decidedRule
 		}
 		if rematchProxy != nil {
 			if slices.Contains(rematchChain, rematchProxy.Name()) {

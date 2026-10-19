@@ -188,6 +188,12 @@ func (m *Mixed) batchLoopDarwin(darwinTUN DarwinTUN) {
 }
 
 func (m *Mixed) processPacket(packet []byte) bool {
+	if handled, writeBack, reply := applyIPRewrite(packet); handled {
+		if reply != nil {
+			_, _ = m.tun.Write(ipRewriteFrame(reply))
+		}
+		return writeBack
+	}
 	var (
 		writeBack bool
 		err       error

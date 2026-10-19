@@ -36,6 +36,9 @@ type networkDispatcherFilter struct {
 }
 
 func (w *networkDispatcherFilter) DeliverNetworkPacket(protocol tcpip.NetworkProtocolNumber, pkt *stack.PacketBuffer) {
+	if gvisorIPRewrite(w.writer, protocol, pkt) {
+		return
+	}
 	var network header.Network
 	if protocol == header.IPv4ProtocolNumber {
 		if headerPackets, loaded := pkt.Data().PullUp(header.IPv4MinimumSize); loaded {

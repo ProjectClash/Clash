@@ -124,3 +124,9 @@ func bridgeSafeLogBatch(writer LogBatchWriter) LogBatchWriter {
 	}
 	return bridgeSafeLogBatchDecorator{writer}
 }
+
+type bridgeSafeRuleNotificationDecorator struct{ RuleNotificationHandler }
+
+func (h bridgeSafeRuleNotificationDecorator) RuleMatched(text string, rule string) {
+	h.RuleNotificationHandler.RuleMatched(bridgeSafeString(text), bridgeSafeString(rule))
+}

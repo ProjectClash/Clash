@@ -48,6 +48,9 @@ func (g *GEOIP) Match(metadata *C.Metadata, helper C.RuleMatchHelper) (bool, str
 	if g.country == "lan" {
 		return g.isLan(ip), g.adapter
 	}
+	if g.country == geoIPUnknown {
+		return g.isUnknown(metadata, ip), g.adapter
+	}
 
 	if geodata.GeodataMode() {
 		if g.isSourceIP {
@@ -103,6 +106,9 @@ func (g *GEOIP) MatchIp(ip netip.Addr) bool {
 
 	if g.country == "lan" {
 		return g.isLan(ip)
+	}
+	if g.country == geoIPUnknown {
+		return unknownCountry(mmdb.IPInstance().LookupCode(ip.AsSlice()))
 	}
 
 	if geodata.GeodataMode() {
@@ -188,8 +194,7 @@ func (g *GEOIP) getIPMatcher() (router.IPMatcher, error) {
 }
 
 func (g *GEOIP) GetRecodeSize() int {
-	// skip pseudorule lan
-	if g.country == "lan" {
+	if g.country == "lan" || g.country == geoIPUnknown {
 		return 0
 	}
 
@@ -213,6 +218,9 @@ func NewGEOIP(country string, adapter string, isSrc, noResolveIP bool) (*GEOIP, 
 	if country == "lan" {
 		return geoip, nil
 	}
+	if country == geoIPUnknown && geodata.GeodataMode() {
+		return nil, errors.New("GEOIP,UNKNOWN reads the MMDB, which geodata-mode does not use")
+	}
 
 	if err := geodata.InitGeoIP(); err != nil {
 		log.Errorln("can't initial GeoIP: %s", err)
@@ -231,3 +239,30 @@ func NewGEOIP(country string, adapter string, isSrc, noResolveIP bool) (*GEOIP, 
 }
 
 var _ C.Rule = (*GEOIP)(nil)
+
+const geoIPUnknown = "unknown"
+
+func (g *GEOIP) isUnknown(metadata *C.Metadata, ip netip.Addr) bool {
+	codes := metadata.DstGeoIP
+	if g.isSourceIP {
+		codes = metadata.SrcGeoIP
+	}
+	if codes == nil {
+		codes = mmdb.IPInstance().LookupCode(ip.AsSlice())
+		if g.isSourceIP {
+			metadata.SrcGeoIP = codes
+		} else {
+			metadata.DstGeoIP = codes
+		}
+	}
+	return unknownCountry(codes)
+}
+
+func unknownCountry(codes []string) bool {
+	for _, code := range codes {
+		if code != "" && code != "private" {
+			return false
+		}
+	}
+	return true
+}

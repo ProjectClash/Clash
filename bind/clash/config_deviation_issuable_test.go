@@ -108,6 +108,10 @@ func issuanceProbeDocument(t *testing.T) string {
 	root := map[string]any{"proxies": []any{map[string]any{
 		"name": "walled-easytier", "type": "easytier", "network-name": "probe",
 		"peers": []any{"tcp://203.0.113.10:11010"},
+	}, map[string]any{
+		"name": "xhttp-node", "type": "vless", "server": "203.0.113.11", "port": 443,
+		"uuid": "b831381d-6324-4d53-ad4f-8cda48b30811", "network": "xhttp",
+		"xhttp-opts": map[string]any{"path": "/"},
 	}}}
 	rules := []any{"UID,501,DIRECT", "MATCH,DIRECT"}
 	for _, rule := range deviationRules {

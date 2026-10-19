@@ -124,7 +124,7 @@ func fieldListenerTypes() []fieldTypeEntry {
 		{"tuic", IN.TuicOption{}},
 		{"shadowquic", IN.ShadowQuicOption{}}, {"anytls", IN.AnyTLSOption{}},
 		{"mieru", IN.MieruOption{}}, {"sudoku", IN.SudokuOption{}},
-		{"trusttunnel", IN.TrustTunnelOption{}},
+		{"trusttunnel", IN.TrustTunnelOption{}}, {"mtproto", IN.MTProtoOption{}},
 	}
 }
 

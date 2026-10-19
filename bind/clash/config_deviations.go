@@ -219,6 +219,7 @@ var deviationRules = []deviationRule{
 		},
 	},
 	easyTierPlaceholderRule,
+	xhttpTunnelReuseRule,
 	{
 		field:     "tun.route-address-set",
 		category:  deviationUnavailable,
@@ -707,7 +708,10 @@ var deviationRules = []deviationRule{
 
 func collectConfigDeviations(mergedYAML string, policy appleRuntimePolicy) ([]configDeviation, error) {
 	var root map[string]any
-	if err := yaml.Unmarshal([]byte(mergedYAML), &root); err != nil {
+	if err := yaml.Unmarshal(readOnlyBytes(mergedYAML), &root); err != nil {
+		return nil, err
+	}
+	if err := documentRuleIndexError(root); err != nil {
 		return nil, err
 	}
 	return configDeviationRows(root, policy), nil
@@ -728,15 +732,23 @@ func deviationDocumentOf(root map[string]any) map[string]any {
 		keep(top)
 	}
 	keep("rules")
+	keep("x-clash-rule-index")
 	keep("sub-rules")
 	if proxies, isList := root["proxies"].([]any); isList {
 		entries := make([]any, len(proxies))
 		for index, entry := range proxies {
 			if proxy, isMap := entry.(map[string]any); isMap && isEasyTierProxyType(proxy) {
 				entries[index] = map[string]any{"type": proxy["type"], "name": proxy["name"]}
+			} else if isMap && isXHTTPReuseDefaulted(proxy) {
+				entries[index] = xhttpReuseKept(proxy)
 			}
 		}
 		kept["proxies"] = entries
+	}
+	if library, isMap := root["x-clash-node-library"].(map[string]any); isMap {
+		if defaulted, recorded := library["xhttp-reuse-defaulted"]; recorded {
+			kept["x-clash-node-library"] = map[string]any{"xhttp-reuse-defaulted": defaulted}
+		}
 	}
 	return kept
 }
@@ -790,6 +802,7 @@ func configDeviationRows(root map[string]any, policy appleRuntimePolicy) []confi
 	}
 	deviations = append(deviations, ownerMetadataRuleDeviations(root, policy)...)
 	deviations = append(deviations, easyTierPlaceholderDeviations(root, policy)...)
+	deviations = append(deviations, xhttpTunnelReuseDeviations(root, policy)...)
 	return deviations
 }
 
@@ -797,20 +810,15 @@ func ownerMetadataRuleDeviations(root map[string]any, policy appleRuntimePolicy)
 	if !policy.networkExtension {
 		return nil
 	}
-	rules, _ := root["rules"].([]any)
 	capability := policy.processMetadata()
 
 	reported := make([]configDeviation, 0)
 	inertKinds := make(map[string]int)
 	firstInert := make(map[string]string)
-	for index, entry := range rules {
-		text, isString := entry.(string)
-		if !isString {
-			continue
-		}
+	eachDocumentRuleLine(root, func(index int, text string) {
 		kind, _ := splitRuleKindAndPattern(text)
 		if matchesMetadataRuleKindName(kind) == "" || capability.resolves(kind) {
-			continue
+			return
 		}
 		switch ownerMetadataRuleEffect(text) {
 		case RuleEffectMatchesEverything:
@@ -835,7 +843,7 @@ func ownerMetadataRuleDeviations(root map[string]any, policy appleRuntimePolicy)
 			}
 			inertKinds[kind]++
 		}
-	}
+	})
 	for kind, count := range inertKinds {
 		field := "rules"
 		given := fmt.Sprintf("%d rule(s), first at %s", count, firstInert[kind])
@@ -921,6 +929,12 @@ func uidRuleOccurrences(root map[string]any) (count int, first string) {
 	}
 	rules, _ := root["rules"].([]any)
 	scan(rules, func(i int) string { return fmt.Sprintf("rules[%d]", i) })
+	if ref, ok := documentRuleIndexRef(root); ok && len(rules) == 0 && len(ref.UIDRemoved) > 0 {
+		if count == 0 {
+			first = fmt.Sprintf("rules[%d]", ref.UIDRemoved[0])
+		}
+		count += len(ref.UIDRemoved)
+	}
 	if subRules, ok := root["sub-rules"].(map[string]any); ok {
 		names := make([]string, 0, len(subRules))
 		for name := range subRules {

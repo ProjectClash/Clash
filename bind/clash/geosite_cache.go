@@ -45,13 +45,6 @@ func geoSiteCategoryName(name string) (string, bool) {
 }
 
 func geoSiteCategoriesInDocument(content string, document *yaml.Node) []string {
-	lowered := strings.ToLower(content)
-
-	isCategoryByte := isGeoSiteCategoryByte
-	atBoundary := func(index int) bool {
-		return index == 0 || !isCategoryByte(lowered[index-1])
-	}
-
 	seen := make(map[string]struct{})
 	var found []string
 	collect := func(name string) {
@@ -64,6 +57,19 @@ func geoSiteCategoriesInDocument(content string, document *yaml.Node) []string {
 		}
 		seen[name] = struct{}{}
 		found = append(found, name)
+	}
+	scanGeoSiteMarkers(content, collect)
+	scanGeoSiteMarkers(indexedRuleLinesIn(content, document), collect)
+	collectFallbackFilterGeoSiteFrom(content, document, collect)
+	return found
+}
+
+func scanGeoSiteMarkers(content string, collect func(string)) {
+	lowered := strings.ToLower(content)
+
+	isCategoryByte := isGeoSiteCategoryByte
+	atBoundary := func(index int) bool {
+		return index == 0 || !isCategoryByte(lowered[index-1])
 	}
 
 	endsSegment := func(b byte) bool {
@@ -116,8 +122,6 @@ func geoSiteCategoriesInDocument(content string, document *yaml.Node) []string {
 		}
 		offset = end
 	}
-	collectFallbackFilterGeoSiteFrom(content, document, collect)
-	return found
 }
 
 func collectFallbackFilterGeoSite(content string, collect func(string)) {

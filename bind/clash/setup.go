@@ -239,6 +239,7 @@ func Setup(options *SetupOptions) error {
 	setIPStackSettings(requestedIPStack)
 	setTunMTU(requestedTunMTU)
 	setupRuntimeProfile.Store(uint32(requestedRuntimeProfile))
+	applyXHTTPTunnelReuse(requestedRuntimeProfile)
 	armMemoryPressureMonitorForRuntime(
 		requestedRuntimeProfile,
 		options.DisablePersistentCache,
@@ -313,6 +314,8 @@ func clashLocalTime(value time.Time) time.Time {
 
 const logChannelSize = 1024
 
+const logQueueMaxBytes = 4 << 20
+
 type logLine struct {
 	message   string
 	delivered chan struct{}
@@ -327,6 +330,7 @@ type platformLogWriter struct {
 	stopped         chan struct{}
 	close           sync.Once
 	dropped         atomic.Int64
+	queuedBytes     atomic.Int64
 	startingUp      atomic.Bool
 	platformStalled atomic.Bool
 }
@@ -343,10 +347,18 @@ func (w *platformLogWriter) Write(p []byte) (int, error) {
 			w.writeStartup(msg)
 			return len(p), nil
 		}
+		size := int64(len(msg))
+		if queued := w.queuedBytes.Load(); queued > 0 && queued+size > logQueueMaxBytes {
+			w.dropped.Add(1)
+			return len(p), nil
+		}
+		w.queuedBytes.Add(size)
 		select {
 		case w.ch <- logLine{message: msg}:
 		case <-w.done:
+			w.queuedBytes.Add(-size)
 		default:
+			w.queuedBytes.Add(-size)
 			w.dropped.Add(1)
 		}
 	}
@@ -357,13 +369,17 @@ func (w *platformLogWriter) writeStartup(msg string) {
 	delivered := make(chan struct{})
 	budget := time.NewTimer(startupDeliveryBudget)
 	defer budget.Stop()
+	size := int64(len(msg))
+	w.queuedBytes.Add(size)
 	select {
 	case w.ch <- logLine{message: msg, delivered: delivered}:
 	case <-budget.C:
+		w.queuedBytes.Add(-size)
 		w.platformStalled.Store(true)
 		w.dropped.Add(1)
 		return
 	case <-w.done:
+		w.queuedBytes.Add(-size)
 		return
 	}
 	select {
@@ -380,6 +396,7 @@ func (w *platformLogWriter) drain() {
 	for {
 		select {
 		case line := <-w.ch:
+			w.queuedBytes.Add(-int64(len(line.message)))
 			if sink := logBatchWriter.Load(); sink != nil {
 				batch = append(batch[:0], line)
 				size := len(line.message)
@@ -387,6 +404,7 @@ func (w *platformLogWriter) drain() {
 				for len(batch) < logBatchMax && size < logBatchBytes {
 					select {
 					case next := <-w.ch:
+						w.queuedBytes.Add(-int64(len(next.message)))
 						batch = append(batch, next)
 						size += len(next.message)
 					default:

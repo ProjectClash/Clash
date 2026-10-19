@@ -36,6 +36,7 @@ type middlewareAware interface {
 	UseHosts() bool
 	ShouldSkipFakeIP(string) bool
 	IPv6() bool
+	AnswersSVCB() bool
 }
 
 var _ middlewareAware = (*ResolverEnhancer)(nil)
@@ -61,7 +62,7 @@ func shortCircuitedAboveTheResolver(m *D.Msg) string {
 	if resolver.FakeIPEnabled() {
 		switch q.Qtype {
 		case D.TypeSVCB, D.TypeHTTPS:
-			if aware == nil || !aware.ShouldSkipFakeIP(host) {
+			if aware == nil || (!aware.ShouldSkipFakeIP(host) && !aware.AnswersSVCB()) {
 				return ExplainSourceFakeIP
 			}
 		case D.TypeA, D.TypeAAAA:

@@ -10,7 +10,25 @@ import (
 )
 
 func YamlToJSONOmitting(rawYAML, keysJSON string) (*StringBox, error) {
-	out, err := recoverAppCall("YamlToJSONOmitting", func() (*StringBox, error) {
+	out, err := recoverAppCall("YamlToJSONOmitting", func() (*StringBox, error) { return yamlToJSONOmitting(rawYAML, keysJSON) })
+	if err != nil {
+		return nil, bridgeSafeError(err)
+	}
+	return out, nil
+}
+
+func YamlToJSONOmittingAtPath(path, keysJSON string) (*StringBox, error) {
+	out, err := recoverAppCall("YamlToJSONOmittingAtPath", func() (*StringBox, error) {
+		return withDocumentAt(path, func(text string) (*StringBox, error) { return yamlToJSONOmitting(text, keysJSON) })
+	})
+	if err != nil {
+		return nil, bridgeSafeError(err)
+	}
+	return out, nil
+}
+
+func yamlToJSONOmitting(rawYAML, keysJSON string) (*StringBox, error) {
+	return withCompactHeap(func() (*StringBox, error) {
 		var keys []string
 		if strings.TrimSpace(keysJSON) != "" {
 			if err := json.Unmarshal([]byte(keysJSON), &keys); err != nil {
@@ -28,10 +46,6 @@ func YamlToJSONOmitting(rawYAML, keysJSON string) (*StringBox, error) {
 		}
 		return omitTopLevelJSONKeys(answer, keys)
 	})
-	if err != nil {
-		return nil, bridgeSafeError(err)
-	}
-	return out, nil
 }
 
 func withoutTopLevelSections(text string, keys []string) (string, bool) {

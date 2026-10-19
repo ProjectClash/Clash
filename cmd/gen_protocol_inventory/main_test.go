@@ -94,7 +94,7 @@ func TestProxyRootsAreReadFromTheParserSwitch(t *testing.T) {
 
 func TestListenerRootsAreReadFromTheParserSwitch(t *testing.T) {
 	gen, roots := testSurface(t, "listeners")
-	for _, typeName := range []string{"socks", "http", "mixed", "tun", "tuic", "hysteria2", "shadowquic", "anytls"} {
+	for _, typeName := range []string{"socks", "http", "mixed", "tun", "tuic", "hysteria2", "shadowquic", "anytls", "mtproto"} {
 		if _, ok := roots[typeName]; !ok {
 			t.Errorf("listener type %q missing from the derived roots", typeName)
 		}
@@ -102,8 +102,8 @@ func TestListenerRootsAreReadFromTheParserSwitch(t *testing.T) {
 	if got := roots["hysteria2-realm"]; got != "Hysteria2RealmServerOption" {
 		t.Fatalf("hysteria2-realm maps to %q, want Hysteria2RealmServerOption via the constructor shape", got)
 	}
-	if len(roots) != 20 {
-		t.Fatalf("expected 20 listener types at v1.19.30, derived %d: %v", len(roots), sortedKeys(roots))
+	if len(roots) != 21 {
+		t.Fatalf("expected 21 listener types, derived %d: %v", len(roots), sortedKeys(roots))
 	}
 	for typeName, structName := range roots {
 		if _, ok := gen.structs[structName]; !ok {
@@ -278,7 +278,7 @@ func TestAllSurfacesRenderDeterministically(t *testing.T) {
 	if err := json.Unmarshal(first, &doc); err != nil {
 		t.Fatal(err)
 	}
-	if len(doc["proxies"]) != 28 || len(doc["listeners"]) != 20 {
+	if len(doc["proxies"]) != 28 || len(doc["listeners"]) != 21 {
 		t.Fatalf("all-surface document has %d proxies / %d listeners", len(doc["proxies"]), len(doc["listeners"]))
 	}
 }

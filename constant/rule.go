@@ -42,6 +42,9 @@ const (
 	NOT
 	SourceAppSigningID
 	SourceAppTeamID
+	Protocol
+	Subnet
+	CellularRadio
 )
 
 type RuleType int
@@ -124,6 +127,12 @@ func (rt RuleType) String() string {
 		return "SourceAppSigningID"
 	case SourceAppTeamID:
 		return "SourceAppTeamID"
+	case Protocol:
+		return "Protocol"
+	case Subnet:
+		return "Subnet"
+	case CellularRadio:
+		return "CellularRadio"
 	default:
 		return "Unknown"
 	}
@@ -163,6 +172,7 @@ type RuleMatchHelper struct {
 	FindProcess   func()
 	CheckPassRule func(adapterName string) bool
 	RuleProviders any
+	Protocol func() string
 }
 
 type RuleGroup interface {

@@ -1,11 +1,16 @@
 package clash
 
 func ConfigProjectionJSON(configContent, kind, packagesJSON string) (*StringBox, error) {
-	doc, err := NewConfigDocument(configContent)
+	out, err := recoverAppCall("ConfigProjectionJSON", func() (*StringBox, error) {
+		doc, err := NewConfigDocument(configContent)
+		if err != nil {
+			return nil, err
+		}
+		defer doc.Close()
+		return doc.ProjectionJSON(kind, packagesJSON)
+	})
 	if err != nil {
 		return nil, bridgeSafeError(err)
 	}
-	defer doc.Close()
-	bridgedValue0, bridgedErr := doc.ProjectionJSON(kind, packagesJSON)
-	return bridgedValue0, bridgeSafeError(bridgedErr)
+	return out, nil
 }

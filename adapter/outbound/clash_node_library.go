@@ -12,6 +12,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"unsafe"
 
 	C "github.com/ProjectClash/Clash/constant"
@@ -352,7 +353,7 @@ func OpenNodeLibraryFile(path string, want [sha256.Size]byte) (*NodeLibrary, err
 			return library, nil
 		}
 	}
-	file, err := os.Open(path)
+	file, err := openLibraryFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -401,14 +402,18 @@ func libraryMappingKeyOf(sum [sha256.Size]byte, info os.FileInfo) libraryMapping
 	return key
 }
 
+func openLibraryFile(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+}
+
 func fileHashes(path string, want [sha256.Size]byte) bool {
-	file, err := os.Open(path)
+	file, err := openLibraryFile(path)
 	if err != nil {
 		return false
 	}
 	defer file.Close()
 	info, err := file.Stat()
-	if err != nil || info.Size() < sha256.Size {
+	if err != nil || !info.Mode().IsRegular() || info.Size() < sha256.Size {
 		return false
 	}
 	hash := sha256.New()
@@ -461,7 +466,7 @@ func CatalogNodeHoldsNothing(a C.ProxyAdapter) bool {
 }
 
 func CheckNodeLibraryFile(path string, want [sha256.Size]byte) error {
-	file, err := os.Open(path)
+	file, err := openLibraryFile(path)
 	if err != nil {
 		return err
 	}

@@ -15,6 +15,7 @@ var dnsFieldClassification = map[string]string{
 	"direct-nameserver":               "resolver",
 	"nameserver-policy":               "resolver",
 	"proxy-server-nameserver-policy":  "resolver",
+	"x-clash-ssid-nameservers":        "resolver",
 	"default-nameserver":              "bootstrap",
 	"enable":                          "not-a-resolver",
 	"prefer-h3":                       "not-a-resolver",
@@ -36,6 +37,8 @@ var dnsFieldClassification = map[string]string{
 	"cache-algorithm":                 "not-a-resolver",
 	"cache-max-size":                  "not-a-resolver",
 	"direct-nameserver-follow-policy": "not-a-resolver",
+	"x-clash-answer-svcb":             "not-a-resolver",
+	"x-clash-answer-other-types":      "not-a-resolver",
 }
 
 func rawDNSYAMLKeys(t *testing.T) []string {

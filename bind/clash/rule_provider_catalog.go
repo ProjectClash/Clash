@@ -21,6 +21,7 @@ type detachedRuleLoader interface {
 
 var ruleCatalogDroppedSections = []string{
 	"rules", "sub-rules", "dns", "hosts", "sniffer", "tun", "listeners", "tunnels", "ntp", "experimental",
+	"x-clash-rule-index",
 }
 
 func RuleProviderCatalogForIOS(configContent, resourceMapJSON string, compileRuleSets bool) (*StringBox, error) {
