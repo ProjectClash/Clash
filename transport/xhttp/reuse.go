@@ -130,6 +130,10 @@ func (entry *reuseEntry) release() {
 	}
 
 	if remaining == 0 {
+		if entry.isClosed() {
+			httputils.CloseTransport(entry.transport)
+			return
+		}
 		now := time.Now()
 		if entry.leftRequests.Load() <= 0 ||
 			(entry.maxReuseTimes > 0 && entry.reuseCount.Load() >= entry.maxReuseTimes) ||

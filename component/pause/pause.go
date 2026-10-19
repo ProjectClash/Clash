@@ -55,11 +55,16 @@ func RegisterTicker(ticker *time.Ticker, duration time.Duration, resume func()) 
 	return release(func() { manager.UnregisterCallback(element) })
 }
 
-func RegisterTickerResumingOnDeviceWake(ticker *time.Ticker, duration time.Duration, resume func()) func() {
+func RegisterTickerResumingOnDeviceWake(ticker *time.Ticker, next func() time.Duration, resume func()) (stop func(), tick func(interval time.Duration) bool) {
+	var mu sync.Mutex
+	mu.Lock()
 	if manager.IsPaused() {
 		ticker.Stop()
 	}
+	mu.Unlock()
 	element := manager.RegisterCallback(func(event int) {
+		mu.Lock()
+		defer mu.Unlock()
 		switch event {
 		case EventDevicePaused, EventNetworkPause:
 			ticker.Stop()
@@ -67,11 +72,29 @@ func RegisterTickerResumingOnDeviceWake(ticker *time.Ticker, duration time.Durat
 			if event == EventDeviceWake && resume != nil {
 				resume()
 			}
-			ticker.Reset(duration)
+			if manager.IsPaused() {
+				ticker.Stop()
+				return
+			}
+			if duration := next(); duration > 0 {
+				ticker.Reset(duration)
+			} else {
+				ticker.Reset(time.Millisecond)
+			}
 		}
 	})
 	outstanding.Add(1)
-	return release(func() { manager.UnregisterCallback(element) })
+	tick = func(interval time.Duration) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		if manager.IsDevicePaused() || manager.IsNetworkPaused() {
+			ticker.Stop()
+			return false
+		}
+		ticker.Reset(interval)
+		return true
+	}
+	return release(func() { manager.UnregisterCallback(element) }), tick
 }
 
 func RegisterCallback(callback Callback) func() {

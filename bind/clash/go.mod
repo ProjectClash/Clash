@@ -29,6 +29,8 @@ require (
 	github.com/miekg/dns v1.1.63
 	github.com/oschwald/maxminddb-golang v1.12.0
 	github.com/sagernet/gomobile v0.1.13
+	github.com/sagernet/sing v0.8.12-0.20260727003324-d096a164bc7f
+	github.com/sagernet/sing-snell v0.0.0-20260904135315-bc5a12ac736f
 	github.com/samber/lo v1.53.0
 	github.com/sirupsen/logrus v1.9.4
 	github.com/yosida95/uritemplate/v3 v3.0.2
@@ -177,3 +179,8 @@ replace github.com/metacubex/gvisor => ../../third_party/gvisor
 
 // Keep gomobile on the same HY2 UDP fragment-cache fix; replacements are not inherited.
 replace github.com/metacubex/sing-quic => ../../third_party/sing-quic
+
+// A closed HTTP/2 client connection stays reachable from its own idle and
+// health-check timers in v0.1.8, so every closed XHTTP stream without
+// reuse-settings holds its connection for up to 300 s.
+replace github.com/metacubex/http => ../../third_party/metacubex-http

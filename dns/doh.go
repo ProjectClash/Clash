@@ -132,6 +132,7 @@ func (doh *dnsOverHTTPS) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.
 
 	// Make the first attempt to send the DNS query.
 	msg, err = doh.exchangeHTTPS(ctx, client, m)
+	answered := client
 
 	// Make up to 2 attempts to re-create the HTTP client and send the request
 	// again.  There are several cases (mostly, with QUIC) where this workaround
@@ -139,17 +140,22 @@ func (doh *dnsOverHTTPS) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.
 	// the case when the connection was closed (due to inactivity for example)
 	// AND the server refuses to open a 0-RTT connection.
 	for i := 0; isCached && doh.shouldRetry(err) && i < 2; i++ {
-		client, err = doh.resetClient(ctx, err)
-		if err != nil {
-			return nil, fmt.Errorf("failed to reset http client: %w", err)
+		var resetErr error
+		client, resetErr = doh.resetClient(ctx, client, err)
+		if resetErr != nil {
+			return nil, fmt.Errorf("failed to reset http client: %w", resetErr)
+		}
+		if ctx.Err() != nil {
+			break
 		}
 
 		msg, err = doh.exchangeHTTPS(ctx, client, m)
+		answered = client
 	}
 
 	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 		// If the request failed anyway, make sure we don't use this client.
-		_, resErr := doh.resetClient(ctx, err)
+		_, resErr := doh.resetClient(ctx, answered, err)
 
 		return nil, fmt.Errorf("%w (resErr:%v)", err, resErr)
 	}
@@ -289,13 +295,18 @@ func (doh *dnsOverHTTPS) shouldRetry(err error) (ok bool) {
 // resetClient triggers re-creation of the *http.Client that is used by this
 // upstream.  This method accepts the error that caused resetting client as
 // depending on the error we may also reset the QUIC config.
-func (doh *dnsOverHTTPS) resetClient(ctx context.Context, resetErr error) (client *http.Client, err error) {
+//
+func (doh *dnsOverHTTPS) resetClient(ctx context.Context, failed *http.Client, resetErr error) (client *http.Client, err error) {
 	doh.clientMu.Lock()
 	defer doh.clientMu.Unlock()
 
 	if errors.Is(resetErr, quic.Err0RTTRejected) {
 		// Reset the TokenStore only if 0-RTT was rejected.
 		doh.resetQUICConfig()
+	}
+
+	if doh.client != nil && doh.client != failed {
+		return doh.client, nil
 	}
 
 	oldClient := doh.client
@@ -385,8 +396,14 @@ func (doh *dnsOverHTTPS) createClient(ctx context.Context) (*http.Client, error)
 func (doh *dnsOverHTTPS) createTransport(ctx context.Context) (t http.RoundTripper, err error) {
 	transport := &http.Transport{
 		DisableCompression: true,
-		DialContext:        doh.dialer.DialContext,
-		IdleConnTimeout:    transportDefaultIdleConnTimeout,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			ctx, cancel := context.WithTimeout(ctx, dialTimeout)
+			defer cancel()
+			return doh.dialer.DialContext(ctx, network, addr)
+		},
+		IdleConnTimeout:     transportDefaultIdleConnTimeout,
+		TLSHandshakeTimeout: dialTimeout,
+		MaxConnsPerHost: 2,
 	}
 
 	if doh.url.Scheme == "http" {

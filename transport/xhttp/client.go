@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ProjectClash/Clash/common/contextutils"
@@ -175,6 +176,7 @@ func NewTransport(dialRaw DialRawFunc, wrapTLS WrapTLSFunc, dialQUIC DialQUICFun
 			},
 		}
 	}
+	closed := new(atomic.Bool)
 	if len(alpn) == 1 && alpn[0] == "http/1.1" { // `alpn: [http/1.1]` means using http/1.1 mode
 		dialContext := func(ctx context.Context, network, addr string) (net.Conn, error) {
 			raw, err := dialRaw(ctx)
@@ -186,14 +188,14 @@ func NewTransport(dialRaw DialRawFunc, wrapTLS WrapTLSFunc, dialQUIC DialQUICFun
 				_ = raw.Close()
 				return nil, err
 			}
-			return wrapped, nil
+			return openUnlessClosed(closed, wrapped)
 		}
-		return &http.Transport{
+		return closableTransport(closed, &http.Transport{
 			DialContext:       dialContext,
 			DialTLSContext:    dialContext,
 			IdleConnTimeout:   ConnIdleTimeout,
 			ForceAttemptHTTP2: false, // only http/1.1
-		}
+		})
 	}
 	if keepAlivePeriod == 0 {
 		keepAlivePeriod = ChromeH2KeepAlivePeriod
@@ -208,7 +210,7 @@ func NewTransport(dialRaw DialRawFunc, wrapTLS WrapTLSFunc, dialQUIC DialQUICFun
 	// see: https://github.com/golang/go/issues/79293#issuecomment-4426393534
 	protocols := new(http.Protocols)
 	protocols.SetUnencryptedHTTP2(true)
-	return &http.Transport{
+	return closableTransport(closed, &http.Transport{
 		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			raw, err := dialRaw(ctx)
 			if err != nil {
@@ -219,14 +221,14 @@ func NewTransport(dialRaw DialRawFunc, wrapTLS WrapTLSFunc, dialQUIC DialQUICFun
 				_ = raw.Close()
 				return nil, err
 			}
-			return wrapped, nil
+			return openUnlessClosed(closed, wrapped)
 		},
 		IdleConnTimeout: ConnIdleTimeout,
 		Protocols:       protocols,
 		HTTP2: &http.HTTP2Config{
 			SendPingTimeout: keepAlivePeriod,
 		},
-	}
+	})
 }
 
 type Client struct {

@@ -12,6 +12,13 @@ type NetworkResetter interface {
 
 var errNetworkChanged = errors.New("network changed")
 
+func keepsOwnSessions(a any) bool {
+	if keeper, ok := a.(interface{ keepsOwnSessions() bool }); ok {
+		return keeper.keepsOwnSessions()
+	}
+	return true
+}
+
 func AsNetworkResetter(a C.ProxyAdapter) (NetworkResetter, bool) {
 	if wrapped, ok := a.(*autoCloseProxyAdapter); ok {
 		a = wrapped.ProxyAdapter
@@ -23,7 +30,7 @@ func AsNetworkResetter(a C.ProxyAdapter) (NetworkResetter, bool) {
 		return node, true
 	}
 	resetter, ok := a.(NetworkResetter)
-	return resetter, ok
+	return resetter, ok && keepsOwnSessions(a)
 }
 
 func (h *Hysteria2) ResetNetwork() {

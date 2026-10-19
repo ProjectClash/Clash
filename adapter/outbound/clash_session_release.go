@@ -195,6 +195,7 @@ func releasable(a C.ProxyAdapter) (*autoCloseProxyAdapter, NetworkResetter, bool
 		return wrapped, node, node.keepsSessions()
 	}
 	resetter, ok := wrapped.ProxyAdapter.(NetworkResetter)
+	ok = ok && keepsOwnSessions(wrapped.ProxyAdapter)
 	if !ok {
 		_, ok = wrapped.ProxyAdapter.(SessionReleaser)
 	}

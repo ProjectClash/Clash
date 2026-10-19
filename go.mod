@@ -173,3 +173,8 @@ replace github.com/metacubex/gvisor => ./third_party/gvisor
 // The pinned revision keeps every reassembled HY2 UDP packet in its fragment cache for
 // ten seconds; the snapshot lets go of a packet once it is whole.
 replace github.com/metacubex/sing-quic => ./third_party/sing-quic
+
+// A closed HTTP/2 client connection stays reachable from its own idle and
+// health-check timers in v0.1.8, so every closed XHTTP stream without
+// reuse-settings holds its connection for up to 300 s.
+replace github.com/metacubex/http => ./third_party/metacubex-http

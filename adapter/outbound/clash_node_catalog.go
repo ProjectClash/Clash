@@ -94,7 +94,7 @@ func catalogFacts(built ProxyAdapter, config string, storeProvider string) (reco
 			traits |= trait.bit
 		}
 	}
-	if _, ok := built.(NetworkResetter); ok {
+	if _, ok := built.(NetworkResetter); ok && keepsOwnSessions(built) {
 		traits |= catalogResetter
 	}
 	if _, ok := built.(SessionReleaser); ok {

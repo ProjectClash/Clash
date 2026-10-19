@@ -119,6 +119,7 @@ func TestWakeRunsAHealthCheckInsteadOfOnlyRestartingTheClock(t *testing.T) {
 	time.Sleep(1200 * time.Millisecond)
 	initial := probe.urlTests.Load()
 
+	healthCheck.lastScheduled.Store(time.Now().Add(-2 * time.Hour).UnixNano())
 	pause.DevicePause()
 	pause.DeviceWake()
 

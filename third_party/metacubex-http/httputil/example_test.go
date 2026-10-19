@@ -1,0 +1,120 @@
+// Copyright 2015 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package httputil_test
+
+import (
+	"fmt"
+	"github.com/metacubex/http"
+	"github.com/metacubex/http/httptest"
+	"github.com/metacubex/http/httputil"
+	"io"
+	"log"
+	"net/url"
+	"strings"
+)
+
+func ExampleDumpRequest() {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		dump, err := httputil.DumpRequest(r, true)
+		if err != nil {
+			http.Error(w, fmt.Sprint(err), http.StatusInternalServerError)
+			return
+		}
+
+		fmt.Fprintf(w, "%q", dump)
+	}))
+	defer ts.Close()
+
+	const body = "Go is a general-purpose language designed with systems programming in mind."
+	req, err := http.NewRequest("POST", ts.URL, strings.NewReader(body))
+	if err != nil {
+		log.Fatal(err)
+	}
+	req.Host = "www.example.org"
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Printf("%s", b)
+
+}
+
+func ExampleDumpRequestOut() {
+	const body = "Go is a general-purpose language designed with systems programming in mind."
+	req, err := http.NewRequest("PUT", "http://www.example.org", strings.NewReader(body))
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	dump, err := httputil.DumpRequestOut(req, true)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Printf("%q", dump)
+
+}
+
+func ExampleDumpResponse() {
+	const body = "Go is a general-purpose language designed with systems programming in mind."
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Date", "Wed, 19 Jul 1972 19:00:00 GMT")
+		fmt.Fprintln(w, body)
+	}))
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	dump, err := httputil.DumpResponse(resp, true)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Printf("%q", dump)
+
+}
+
+func ExampleReverseProxy() {
+	backendServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, "this call was relayed by the reverse proxy")
+	}))
+	defer backendServer.Close()
+
+	rpURL, err := url.Parse(backendServer.URL)
+	if err != nil {
+		log.Fatal(err)
+	}
+	frontendProxy := httptest.NewServer(&httputil.ReverseProxy{
+		Rewrite: func(r *httputil.ProxyRequest) {
+			r.SetXForwarded()
+			r.SetURL(rpURL)
+		},
+	})
+	defer frontendProxy.Close()
+
+	resp, err := http.Get(frontendProxy.URL)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Printf("%s", b)
+
+}

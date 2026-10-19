@@ -627,15 +627,15 @@ func NewVless(option VlessOption) (*Vless, error) {
 		var hKeepAlivePeriod time.Duration
 
 		var reuseCfg *xhttp.ReuseConfig
-		if option.XHTTPOpts.ReuseSettings != nil {
+		if reuse := xhttpReuseSettings(option.XHTTPOpts.ReuseSettings); reuse != nil {
 			reuseCfg = &xhttp.ReuseConfig{
-				MaxConcurrency:   option.XHTTPOpts.ReuseSettings.MaxConcurrency,
-				MaxConnections:   option.XHTTPOpts.ReuseSettings.MaxConnections,
-				CMaxReuseTimes:   option.XHTTPOpts.ReuseSettings.CMaxReuseTimes,
-				HMaxRequestTimes: option.XHTTPOpts.ReuseSettings.HMaxRequestTimes,
-				HMaxReusableSecs: option.XHTTPOpts.ReuseSettings.HMaxReusableSecs,
+				MaxConcurrency:   reuse.MaxConcurrency,
+				MaxConnections:   reuse.MaxConnections,
+				CMaxReuseTimes:   reuse.CMaxReuseTimes,
+				HMaxRequestTimes: reuse.HMaxRequestTimes,
+				HMaxReusableSecs: reuse.HMaxReusableSecs,
 			}
-			hKeepAlivePeriod = time.Duration(option.XHTTPOpts.ReuseSettings.HKeepAlivePeriod) * time.Second
+			hKeepAlivePeriod = time.Duration(reuse.HKeepAlivePeriod) * time.Second
 		}
 
 		cfg := &xhttp.Config{

@@ -27,7 +27,23 @@ func measuredAliveSince(proxy C.Proxy, url string, expected string, timeout time
 }
 
 func (hc *HealthCheck) checkScheduled() {
+	if !hc.scheduledHeld.CompareAndSwap(false, true) {
+		return
+	}
+	defer hc.scheduledHeld.Store(false)
 	hc.scheduledRound(time.Now())
+}
+
+func (hc *HealthCheck) scheduledOverdue() bool {
+	last := hc.lastScheduled.Load()
+	return last == 0 || time.Since(time.Unix(0, last)) >= hc.interval
+}
+
+func (hc *HealthCheck) untilScheduled() time.Duration {
+	if hc.scheduledOverdue() {
+		return hc.interval
+	}
+	return hc.interval - time.Since(time.Unix(0, hc.lastScheduled.Load()))
 }
 
 func (hc *HealthCheck) scheduledRound(began time.Time) {
@@ -35,5 +51,6 @@ func (hc *HealthCheck) scheduledRound(began time.Time) {
 	if !ok {
 		return
 	}
+	hc.lastScheduled.Store(began.UnixNano())
 	hc.round(hc.scheduledDo, began, true)
 }

@@ -48,17 +48,22 @@ type HealthCheck struct {
 	windowNext     map[string]int
 	failedFirst    failedNames
 	forcedDo       *singledo.Single[struct{}]
+	scheduledHeld  atomic.Bool
+	lastScheduled  atomic.Int64
 }
 
 func (hc *HealthCheck) process() {
 	ticker := time.NewTicker(hc.interval)
 
-	stopPauseTracking := pause.RegisterTickerResumingOnDeviceWake(ticker, hc.interval, func() {
+	stopPauseTracking, tick := pause.RegisterTickerResumingOnDeviceWake(ticker, hc.untilScheduled, func() {
 		if pause.IsDevicePaused() || pause.IsNetworkPaused() {
 			return
 		}
 		if hc.lazy && time.Since(hc.lastTouch.Load()) >= hc.interval {
 			log.Debugln("Skip the resume health check because we are lazy")
+			return
+		}
+		if !hc.scheduledOverdue() {
 			return
 		}
 		go hc.checkScheduled()
@@ -69,7 +74,7 @@ func (hc *HealthCheck) process() {
 	for {
 		select {
 		case <-ticker.C:
-			if pause.IsDevicePaused() || pause.IsNetworkPaused() {
+			if !tick(hc.interval) {
 				continue
 			}
 			lastTouch := hc.lastTouch.Load()
