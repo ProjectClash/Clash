@@ -71,6 +71,14 @@ type proxyImportReport struct {
 	NotHonoured  []proxyImportIssue       `json:"notHonoured"`
 	Identities   []string                 `json:"identities"`
 	PayloadShape *proxyImportPayloadShape `json:"payloadShape,omitempty"`
+
+	// DNSNameServerPolicy and DNSProxyServerNameserverPolicy carry the split-DNS
+	// routing tables lifted from a mihomo configuration payload
+	// (dns.nameserver-policy / dns.proxy-server-nameserver-policy). They are surfaced
+	// so the client can append-merge them into the user's main configuration instead
+	// of discarding the airport's DNS routing policy when only nodes are extracted.
+	DNSNameServerPolicy            map[string]any `json:"dnsNameServerPolicy,omitempty"`
+	DNSProxyServerNameserverPolicy map[string]any `json:"dnsProxyServerNameserverPolicy,omitempty"`
 }
 
 type proxyImportPayloadShape struct {
@@ -612,6 +620,28 @@ func validateProxyImportRequiredFields(proxy map[string]any) error {
 	return nil
 }
 
+// extractProxyImportDNSPolicy lifts the split-DNS routing tables (dns.nameserver-policy
+// and dns.proxy-server-nameserver-policy) from a decoded mihomo document. It returns nil
+// maps when the document has no dns section or no policy, so callers can rely on a nil
+// result meaning "nothing to carry over".
+func extractProxyImportDNSPolicy(document map[string]any) (map[string]any, map[string]any) {
+	if document == nil {
+		return nil, nil
+	}
+	dns, ok := document["dns"].(map[string]any)
+	if !ok {
+		return nil, nil
+	}
+	var nameServerPolicy, proxyServerNameserverPolicy map[string]any
+	if policy, ok := dns["nameserver-policy"].(map[string]any); ok {
+		nameServerPolicy = policy
+	}
+	if policy, ok := dns["proxy-server-nameserver-policy"].(map[string]any); ok {
+		proxyServerNameserverPolicy = policy
+	}
+	return nameServerPolicy, proxyServerNameserverPolicy
+}
+
 func inspectProxyContainer(payload []byte, context string, construct bool) (proxyImportReport, bool, error) {
 	trimmed := bytes.TrimSpace(payload)
 	if len(trimmed) == 0 {
@@ -670,6 +700,16 @@ func inspectProxyContainer(payload []byte, context string, construct bool) (prox
 		proxies, containerNotHonoured, ssdSkipped, err = parseSSDSubscription(text)
 		containerSkipped = append(containerSkipped, ssdSkipped...)
 	}
+	// The YAML branch already decoded the document into `decoded`. A JSON configuration
+	// container is only inspected for `proxies`, so decode it here to reach its dns section.
+	document := decoded
+	if document == nil && format == "mihomo-json" {
+		if doc, decodeErr := decodeMihomoDocument(trimmed); decodeErr == nil {
+			document = doc
+		}
+	}
+	dnsNameServerPolicy, dnsProxyServerNameserverPolicy := extractProxyImportDNSPolicy(document)
+
 	var shape *proxyImportPayloadShape
 	if decoded != nil {
 		shape = describeProxyImportPayloadShape(decoded)
@@ -719,6 +759,9 @@ func inspectProxyContainer(payload []byte, context string, construct bool) (prox
 		Skipped:     append(make([]proxyImportIssue, 0, len(containerSkipped)), containerSkipped...),
 		NotHonoured: make([]proxyImportIssue, 0),
 		Identities:  make([]string, 0, len(proxies)),
+
+		DNSNameServerPolicy:            dnsNameServerPolicy,
+		DNSProxyServerNameserverPolicy: dnsProxyServerNameserverPolicy,
 	}
 	seenNames := make(map[string]int)
 	for index, proxy := range proxies {
