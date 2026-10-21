@@ -138,14 +138,14 @@ func NewWithConfig(config LC.AuthServer, lc C.InboundListenConfig, tunnel C.Tunn
 					store = authStore.Nil
 				}
 			}
-			go handleConn(c, tunnel, store, additions...)
+			go handleConn(c, tunnel, store, config.OutboundHeader, additions...)
 		}
 	}()
 
 	return ml, nil
 }
 
-func handleConn(conn net.Conn, tunnel C.Tunnel, store auth.AuthStore, additions ...inbound.Addition) {
+func handleConn(conn net.Conn, tunnel C.Tunnel, store auth.AuthStore, namesOutbound bool, additions ...inbound.Addition) {
 	bufConn := N.NewBufferedConn(conn)
 	head, err := bufConn.Peek(1)
 	if err != nil {
@@ -159,6 +159,10 @@ func handleConn(conn net.Conn, tunnel C.Tunnel, store auth.AuthStore, additions 
 	case socks5.Version:
 		socks.HandleSocks5(bufConn, tunnel, store, additions...)
 	default:
+		if namesOutbound {
+			http.HandleConnNamingOutbound(bufConn, tunnel, store, additions...)
+			return
+		}
 		http.HandleConn(bufConn, tunnel, store, additions...)
 	}
 }

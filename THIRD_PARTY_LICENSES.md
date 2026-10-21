@@ -45,6 +45,10 @@
 - `SagerNet/sing-box/common/dialer/default.go` and `default_parallel_interface.go` at `5ee65a5ca9e6a448a5fa2f47b55b51fe2fcf578d` — the network_strategy multi-interface dial algorithm and its two timings adapted into `component/dialer/network_strategy.go` and statically linked; GPL-3.0-or-later.
 - `SagerNet/sing-box-for-apple` at `8ce05ea68cd6fe8b7aa71e279c7404274b4c5d24` — referenced for the Network Extension's socket-scoping posture; no code adapted.
 
+## Module scripts' DOM (the app and the network extension)
+
+- The HTML Standard's named character references (`https://html.spec.whatwg.org/entities.json`, sha256 `d741d877ac77…`, fetched 2026-10-20) — carried as data in the Apple client's DOM parser that module scripts use. Copyright © WHATWG (Apple, Google, Mozilla, Microsoft); the Standard is CC BY 4.0, and portions incorporated into source code are licensed under the BSD 3-Clause License instead. Credited in the Apple client's third-party license list (`whatwg/html`). The parser, DOM and selector engine around it are this project's own code.
+
 ## Generate the authoritative complete bundle
 
 ```sh

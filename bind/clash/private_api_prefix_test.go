@@ -43,6 +43,7 @@ var privateRouteTable = []struct{ method, suffix string }{
 	{http.MethodGet, "/rules-hits"},
 	{http.MethodGet, "/provider-nodes"},
 	{http.MethodGet, "/proxies-search"},
+	{http.MethodPost, "/dns/script-query"},
 }
 
 func TestPrivateRoutesAnswerUnderClashPrefix(t *testing.T) {

@@ -22,6 +22,7 @@ type MixedOption struct {
 	ClientAuthCert string        `inbound:"client-auth-cert,omitempty"`
 	EchKey         string        `inbound:"ech-key,omitempty"`
 	RealityConfig  RealityConfig `inbound:"reality-config,omitempty"`
+	OutboundHeader bool `inbound:"x-clash-outbound-header,omitempty"`
 }
 
 func (o MixedOption) Equal(config C.InboundConfig) bool {
@@ -76,6 +77,7 @@ func (m *Mixed) Listen(tunnel C.Tunnel) error {
 			ClientAuthCert: m.config.ClientAuthCert,
 			EchKey:         m.config.EchKey,
 			RealityConfig:  m.config.RealityConfig.Build(),
+			OutboundHeader: m.config.OutboundHeader,
 		}
 		l, err := mixed.NewWithConfig(config, lc, tunnel, m.Additions()...)
 		if err != nil {

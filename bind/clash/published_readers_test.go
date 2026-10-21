@@ -56,3 +56,28 @@ rules:
 		}
 	}
 }
+
+func TestTheNodeCatalogsReadADocumentWhoseEveryModeRulesNameARuleSet(t *testing.T) {
+	setupForMatch(t)
+	source := `mode: global
+proxies:
+  - {name: HK, type: ss, server: hk.example.net, port: 8388, cipher: aes-128-gcm, password: p}
+proxy-groups:
+  - {name: Proxy, type: select, proxies: [HK, DIRECT]}
+rule-providers:
+  Hosts: {type: inline, behavior: domain, payload: ['+.zhihu.com']}
+rules:
+  - RULE-SET,Hosts,Proxy
+  - MATCH,Proxy
+x-clash-every-mode-rules:
+  - RULE-SET,Hosts,Proxy
+`
+	catalog, err := OpenNodeCatalogForIOS(source, "{}", "")
+	if err != nil {
+		t.Fatalf("node catalog: %v", err)
+	}
+	catalog.Close()
+	if _, err := ProxyCatalogForIOS(source, "{}", ""); err != nil {
+		t.Fatalf("proxy catalog: %v", err)
+	}
+}

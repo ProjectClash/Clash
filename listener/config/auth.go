@@ -16,4 +16,5 @@ type AuthServer struct {
 	ClientAuthCert string
 	EchKey         string
 	RealityConfig  reality.Config
+	OutboundHeader bool
 }

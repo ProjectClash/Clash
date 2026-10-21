@@ -39,6 +39,12 @@ func TestNoNewLogPrefixArrivesUnnoticed(t *testing.T) {
 			"is the whole evidence for it; \"failed\" means the daemon answered and did not " +
 			"resolve the name, which is a result. Also the concurrency-cap refusal. NOT " +
 			"selected by the app: a user has nothing to do about either"},
+		"script-dns|Infoln": {"Infoln", "developer-facing: one line per module script's $dns.query " +
+			" -- protocol, server, name, types, answer count and elapsed time. " +
+			"Instrumentation, NOT selected by the app: the script has its answer"},
+		"script-dns|Warnln": {"Warnln", "developer-facing: a script's DNS query that failed, with " +
+			"Loon's code and the transport's message verbatim. NOT selected by the app: the script " +
+			"receives the same error and decides what to tell the reader"},
 		"App|Errorln": {"Errorln", "developer-facing: an export the containing App called panicked " +
 			"and was recovered into an error. Written in the App process with its stack; the " +
 			"App shows the returned error where the call was made, so the line is the diagnosis, " +

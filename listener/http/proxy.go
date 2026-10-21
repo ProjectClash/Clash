@@ -32,6 +32,10 @@ func (b *bodyWrapper) Read(p []byte) (n int, err error) {
 }
 
 func HandleConn(c net.Conn, tunnel C.Tunnel, store auth.AuthStore, additions ...inbound.Addition) {
+	handleConn(c, tunnel, store, false, additions...)
+}
+
+func handleConn(c net.Conn, tunnel C.Tunnel, store auth.AuthStore, namesOutbound bool, additions ...inbound.Addition) {
 	additions = append(additions, inbound.Placeholder) // Add a placeholder for InUser
 	inUserIdx := len(additions) - 1
 	client := newClient(c, tunnel, additions)
@@ -66,6 +70,13 @@ func HandleConn(c net.Conn, tunnel C.Tunnel, store auth.AuthStore, additions ...
 
 		if trusted {
 			if request.Method == http.MethodConnect {
+				if namesOutbound {
+					var refusal *http.Response
+					if additions, refusal = namedOutbound(request, tunnel, additions); refusal != nil {
+						_ = refusal.Write(conn)
+						break // close connection
+					}
+				}
 				// Manual writing to support CONNECT for http 1.0 (workaround for uplay client)
 				if _, err = fmt.Fprintf(conn, "HTTP/%d.%d %03d %s\r\n\r\n", request.ProtoMajor, request.ProtoMinor, http.StatusOK, "Connection established"); err != nil {
 					break // close connection
@@ -98,6 +109,9 @@ func HandleConn(c net.Conn, tunnel C.Tunnel, store auth.AuthStore, additions ...
 
 			removeHopByHopHeaders(request.Header)
 			removeExtraHTTPHostPort(request)
+			if namesOutbound {
+				request.Header.Del(OutboundHeader)
+			}
 
 			if request.URL.Scheme == "" || request.URL.Host == "" {
 				resp = responseWith(request, http.StatusBadRequest)

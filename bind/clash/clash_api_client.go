@@ -652,6 +652,38 @@ func (c *APIClient) QueryDNS(name, qType string) (string, error) {
 	return bridgeSafeString(bridgedValue0), bridgeSafeError(bridgedErr)
 }
 
+func (c *APIClient) ScriptDNSQuery(requestJSON string) (string, error) {
+	if len(requestJSON) > scriptDNSRequestLimit {
+		return "", bridgeSafeError(fmt.Errorf("clash: script DNS query request exceeds %d bytes", scriptDNSRequestLimit))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), scriptDNSLongestCall+5*time.Second)
+	defer cancel()
+	path := c.privatePath("/dns/script-query")
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://localhost"+path, strings.NewReader(requestJSON))
+	if err != nil {
+		return "", bridgeSafeError(fmt.Errorf("clash: build Clash API request %s: %w", path, err))
+	}
+	request.Host = "localhost"
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Content-Type", "application/json")
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		return "", bridgeSafeError(fmt.Errorf("clash: Clash API %s %s: %w", http.MethodPost, path, err))
+	}
+	defer response.Body.Close()
+	payload, err := io.ReadAll(io.LimitReader(response.Body, clashAPIMaxMessageSize+1))
+	if err != nil {
+		return "", bridgeSafeError(fmt.Errorf("clash: read Clash API %s: %w", path, err))
+	}
+	if len(payload) > clashAPIMaxMessageSize {
+		return "", bridgeSafeError(fmt.Errorf("clash: Clash API %s response exceeds %d bytes", path, clashAPIMaxMessageSize))
+	}
+	if response.StatusCode != http.StatusOK {
+		return "", bridgeSafeError(fmt.Errorf("clash: Clash API %s %s: HTTP %d: %s", http.MethodPost, path, response.StatusCode, strings.TrimSpace(string(payload))))
+	}
+	return bridgeSafeString(string(payload)), nil
+}
+
 func (c *APIClient) FlushDNSCache() error {
 	_, err := c.request(http.MethodPost, "/cache/dns/flush", nil)
 	return bridgeSafeError(err)

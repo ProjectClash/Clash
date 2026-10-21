@@ -26,6 +26,7 @@ var catalogIgnoredSections = []string{
 	"rules", "sub-rules", "rule-providers", "dns", "hosts", "sniffer",
 	"tun", "listeners", "tunnels", "ntp", "experimental",
 	"x-clash-rule-index",
+	"x-clash-every-mode-rules",
 }
 
 func ProxyCatalogForIOS(configContent, resourceMapJSON, selectionsJSON string) (*StringBox, error) {
