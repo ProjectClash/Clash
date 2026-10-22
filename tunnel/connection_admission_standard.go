@@ -6,6 +6,12 @@ func acquireTCPConnectionSlot() bool { return true }
 
 func tryAcquireTCPConnectionSlot() bool { return true }
 
+func reserveTCPConnectionSlot() {}
+
+func cancelTCPConnectionSlotReservation() {}
+
+func tryTakeReservedTCPConnectionSlot() bool { return true }
+
 func noteTCPConnectionRejected() {}
 
 func noteTCPConnectionEvicted() {}

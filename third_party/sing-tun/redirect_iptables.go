@@ -8,7 +8,6 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/metacubex/sing/common"
 	E "github.com/metacubex/sing/common/exceptions"
 	F "github.com/metacubex/sing/common/format"
 )
@@ -132,22 +131,18 @@ func (r *autoRedirect) setupIPTablesForFamily(iptablesPath string) error {
 			return err
 		}
 	}
-	if !r.tunOptions.EXP_DisableDNSHijack {
-		dnsServer := common.Find(r.tunOptions.DNSServers, func(it netip.Addr) bool {
-			return it.Is4() == (iptablesPath == r.iptablesPath)
-		})
-		if !dnsServer.IsValid() {
-			if iptablesPath == r.iptablesPath {
-				if HasNextAddress(r.tunOptions.Inet4Address[0], 1) {
-					dnsServer = r.tunOptions.Inet4Address[0].Addr().Next()
-				}
-			} else {
-				if HasNextAddress(r.tunOptions.Inet6Address[0], 1) {
-					dnsServer = r.tunOptions.Inet6Address[0].Addr().Next()
-				}
-			}
+	if r.tunOptions.DNSModeOrDefault() == DNSModeHijack {
+		var dnsServers []netip.Addr
+		if iptablesPath == r.iptablesPath {
+			dnsServers, err = r.tunOptions.Inet4DNSAddress()
+		} else {
+			dnsServers, err = r.tunOptions.Inet6DNSAddress()
 		}
-		if dnsServer.IsValid() {
+		if err != nil {
+			return err
+		}
+		if len(dnsServers) > 0 {
+			dnsServer := dnsServers[0]
 			if len(routeAddress) > 0 {
 				for _, address := range routeAddress {
 					err = r.runShell(iptablesPath, "-t nat -A", tableNamePreRouteing,

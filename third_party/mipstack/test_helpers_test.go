@@ -24,6 +24,23 @@ func mustCodecVector(t testing.TB, wire string) []byte {
 	return decoded
 }
 
+func setPacketECN(packet []byte, ecn byte) {
+	if len(packet) < 1 {
+		return
+	}
+	if packet[0]>>4 == 4 && len(packet) >= 20 {
+		headerSize := int(packet[0]&0x0f) * 4
+		if headerSize < 20 || headerSize > len(packet) {
+			return
+		}
+		packet[1] = packet[1]&^3 | ecn&3
+		packet[10], packet[11] = 0, 0
+		binary.BigEndian.PutUint16(packet[10:12], checksum(packet[:headerSize]))
+	} else if packet[0]>>4 == 6 && len(packet) >= 40 {
+		packet[1] = packet[1]&0xcf | (ecn&3)<<4
+	}
+}
+
 func testPacketQueueTicketAt(epoch, value time.Time) packetQueueTicket {
 	return packetQueueTicket{queuedAt: monotonicStampAt(epoch, value)}
 }
@@ -137,6 +154,7 @@ type testPacketLink struct {
 	sendTCPECE            bool
 	partialTCPACK         int
 	delayTCPACK           time.Duration
+	delayTCPResponse      time.Duration
 
 	mu                     sync.Mutex
 	tcp                    map[uint16]*testTCPPeer
@@ -963,7 +981,11 @@ func (l *testPacketLink) deliverTCP(sourcePort, targetPort uint16, sequence, ack
 	if l.sendTCPECE && flags&TCPFlagACK != 0 {
 		flags |= TCPFlagECE
 	}
+	delay := l.delayTCPResponse
 	l.mu.Unlock()
+	if delay > 0 {
+		time.Sleep(delay)
+	}
 	packet := buildTestTCP(l.remote, l.local, sourcePort, targetPort, sequence, acknowledgement, flags, window, options, payload)
 	if markCE {
 		setPacketECN(packet, 3)

@@ -68,6 +68,7 @@ func overrideTunForIOS(tun *LC.Tun) {
 	tun.RecvMsgX = false
 	tun.SendMsgX = false
 	tun.DisableICMPForwarding = true
+	tun.DNSMode = ""
 
 }
 

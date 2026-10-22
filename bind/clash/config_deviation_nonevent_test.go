@@ -78,6 +78,7 @@ func TestEveryForcedRuleNamesItsValueOrIsExempt(t *testing.T) {
 		"tun.mtu": "chosen at startup, not a constant",
 		"proxies": "a list scan; the placeholder stands in for a whole node, not a scalar the reader could have written",
 		"proxies[vless].xhttp-opts.reuse-settings": "an object of five ranges, not a scalar; the scan reports only nodes that write none",
+		"tun.dns-mode": "forced to empty, which is also the unwritten value: a file that writes the key wrote something else",
 	}
 	for _, rule := range deviationRules {
 		if rule.category != deviationForced {

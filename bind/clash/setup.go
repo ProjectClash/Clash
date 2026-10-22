@@ -30,23 +30,24 @@ import (
 )
 
 type SetupOptions struct {
-	IPQueryMode            string
-	TunIPv6Mode            string
-	BasePath               string
-	WorkingPath            string
-	TempPath               string
-	TimeZone               string
-	RuntimeProfile         string
-	LogMaxLines            int
-	MemoryLimit            int64
-	TunMTU                 int
-	StartupPhaseLogPath    string
-	DisablePersistentCache bool
-	MaxProcs               int
-	CertificateStore       string
-	IncludeAllNetworks     bool
-	MemoryPressureShed     bool
-	SystemDNSServerLines   string
+	IPQueryMode              string
+	TunIPv6Mode              string
+	BasePath                 string
+	WorkingPath              string
+	TempPath                 string
+	TimeZone                 string
+	RuntimeProfile           string
+	LogMaxLines              int
+	MemoryLimit              int64
+	TunMTU                   int
+	StartupPhaseLogPath      string
+	DisablePersistentCache   bool
+	PersistentCacheDirectory string
+	MaxProcs                 int
+	CertificateStore         string
+	IncludeAllNetworks       bool
+	MemoryPressureShed       bool
+	SystemDNSServerLines     string
 }
 
 var (
@@ -87,6 +88,7 @@ func Setup(options *SetupOptions) error {
 	defer appParseMu.Unlock()
 	setupMu.Lock()
 	defer setupMu.Unlock()
+	defer holdSetupLogs()()
 
 	if options == nil {
 		return bridgeSafeError(errors.New("clash: Setup called with nil options"))
@@ -224,6 +226,10 @@ func Setup(options *SetupOptions) error {
 		}
 	}
 
+	if err := placePersistentCache(options); err != nil {
+		return bridgeSafeError(err)
+	}
+
 	startupPhase("setup:dirs-probed")
 	if err := armGoCrashOutputAt(options.BasePath, setupGoCrashReportRole); err != nil {
 		logrus.Warnf("[iOS] Go crash output unavailable, a panic will leave no readable traceback: %v", err)
@@ -270,6 +276,78 @@ func effectiveMaxProcs(options *SetupOptions) int {
 		procs = n
 	}
 	return procs
+}
+
+func placePersistentCache(options *SetupOptions) error {
+	if options.PersistentCacheDirectory == "" || options.DisablePersistentCache {
+		return nil
+	}
+	if err := probeDir(options.PersistentCacheDirectory); err != nil {
+		return err
+	}
+	target := filepath.Join(options.PersistentCacheDirectory, "cache.db")
+	if err := cachefile.SetPersistentCachePath(target); err != nil {
+		return fmt.Errorf("clash: persistent cache at %s: %w", target, err)
+	}
+	moveLegacyPersistentCache(filepath.Join(options.WorkingPath, "cache.db"), target)
+	return nil
+}
+
+func moveLegacyPersistentCache(legacy, target string) {
+	info, err := os.Lstat(legacy)
+	if err != nil {
+		return
+	}
+	if !info.Mode().IsRegular() {
+		log.Warnln("[Apple] %s is not a regular file; left where it is", legacy)
+		return
+	}
+	if _, err := os.Lstat(target); err == nil {
+		if err := os.Remove(legacy); err != nil {
+			log.Warnln("[Apple] remove stale %s: %v", legacy, err)
+		}
+		return
+	}
+	renameErr := os.Rename(legacy, target)
+	if renameErr == nil {
+		log.Infoln("[Apple] cache.db moved from %s to %s", legacy, target)
+		return
+	}
+	if err := copyLegacyPersistentCache(legacy, target); err != nil {
+		log.Warnln("[Apple] cache.db not moved from %s (rename: %v, copy: %v); starting from an empty one", legacy, renameErr, err)
+		return
+	}
+	if err := os.Remove(legacy); err != nil {
+		log.Warnln("[Apple] remove %s after copying it: %v", legacy, err)
+	}
+	log.Infoln("[Apple] cache.db copied from %s to %s", legacy, target)
+}
+
+func copyLegacyPersistentCache(legacy, target string) error {
+	source, err := os.Open(legacy)
+	if err != nil {
+		return err
+	}
+	defer source.Close()
+	partial := target + ".moving"
+	destination, err := os.OpenFile(partial, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(destination, source)
+	if syncErr := destination.Sync(); err == nil {
+		err = syncErr
+	}
+	if closeErr := destination.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = os.Rename(partial, target)
+	}
+	if err != nil {
+		_ = os.Remove(partial)
+	}
+	return err
 }
 
 func probeDir(dir string) error {
@@ -440,7 +518,67 @@ var (
 	logRedirectMu         sync.Mutex
 	activeLogWriter       *platformLogWriter
 	localLogFormatterOnce sync.Once
+	heldSetupLogs         *setupLogHold
 )
+
+const setupLogHoldMax = 64
+
+type setupLogHold struct {
+	mu       sync.Mutex
+	previous io.Writer
+	lines    [][]byte
+}
+
+func (hold *setupLogHold) Write(p []byte) (int, error) {
+	hold.mu.Lock()
+	if len(hold.lines) < setupLogHoldMax {
+		hold.lines = append(hold.lines, append([]byte(nil), p...))
+	}
+	hold.mu.Unlock()
+	return hold.previous.Write(p)
+}
+
+func holdSetupLogs() (release func()) {
+	logRedirectMu.Lock()
+	defer logRedirectMu.Unlock()
+	if activeLogWriter != nil {
+		return func() {}
+	}
+	useLocalLogFormatter()
+	logger := logrus.StandardLogger()
+	hold := &setupLogHold{previous: logger.Out}
+	heldSetupLogs = hold
+	logger.SetOutput(hold)
+	return func() {
+		logRedirectMu.Lock()
+		defer logRedirectMu.Unlock()
+		if activeLogWriter == nil {
+			logger.SetOutput(hold.previous)
+		}
+	}
+}
+
+func takeSetupLogs() [][]byte {
+	logRedirectMu.Lock()
+	hold := heldSetupLogs
+	heldSetupLogs = nil
+	logRedirectMu.Unlock()
+	if hold == nil {
+		return nil
+	}
+	hold.mu.Lock()
+	defer hold.mu.Unlock()
+	lines := hold.lines
+	hold.lines = nil
+	return lines
+}
+
+func useLocalLogFormatter() {
+	localLogFormatterOnce.Do(func() {
+		logger := logrus.StandardLogger()
+		logger.SetFormatter(&localLogFormatter{delegate: logger.Formatter})
+	})
+}
 
 type localLogFormatter struct {
 	delegate logrus.Formatter
@@ -461,10 +599,10 @@ func redirectLogs(platform PlatformInterface) *platformLogWriter {
 	}
 	w.startingUp.Store(true)
 	go w.drain()
-	localLogFormatterOnce.Do(func() {
-		logger := logrus.StandardLogger()
-		logger.SetFormatter(&localLogFormatter{delegate: logger.Formatter})
-	})
+	useLocalLogFormatter()
+	for _, line := range takeSetupLogs() {
+		_, _ = w.Write(line)
+	}
 
 	logRedirectMu.Lock()
 	previous := activeLogWriter

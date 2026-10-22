@@ -61,6 +61,14 @@ const (
 	bbr3ACKsProbeStopping
 )
 
+type bbr3UndoState uint8
+
+const (
+	bbr3UndoNone bbr3UndoState = iota
+	bbr3UndoStartup
+	bbr3UndoProbeUp
+)
+
 type bbr3PacketSnapshot struct {
 	inflight           uint32
 	lost               uint32
@@ -118,6 +126,7 @@ type bbr3CongestionControl struct {
 	lossRecovery         bool
 	packetConservation   bool
 	undoBounds           bool
+	undoState            bbr3UndoState
 
 	inflightLow        uint32
 	inflightHigh       uint32
@@ -261,6 +270,13 @@ func (b *bbr3CongestionControl) syncDeliveryState(state *CongestionState) {
 
 func (b *bbr3CongestionControl) handleRecoveryEvent(event *CongestionEvent) {
 	switch event.Recovery.Stage {
+	case CongestionRecoveryCheckpoint:
+		b.undoBounds = true
+		b.undoState = bbr3UndoNone
+		b.undoBandwidthLow = b.bandwidthLow
+		b.undoInflightLow = b.inflightLow
+		b.undoInflightHigh = b.inflightHigh
+		b.saveWindow(event.State.CongestionWindow)
 	case CongestionRecoverySelectFlight:
 		event.Recovery.Flight = event.Recovery.OrdinaryFlight
 	case CongestionRecoveryEnter:
@@ -272,10 +288,23 @@ func (b *bbr3CongestionControl) handleRecoveryEvent(event *CongestionEvent) {
 	case CongestionRecoveryPRR, CongestionRecoveryExit, CongestionRecoveryPartialACK, CongestionRecoveryDuplicateACK:
 		event.State.CongestionWindow = event.Recovery.PreviousWindow
 	case CongestionRecoveryUndo:
-		b.undoRecovery()
+		b.undoRecovery(event.Time)
 		if event.State.CongestionWindow < b.priorWindow {
 			event.State.CongestionWindow = b.priorWindow
 		}
+		mss := event.State.MaximumSegmentSize
+		window := b.boundWindow(uint64(event.State.CongestionWindow), mss)
+		if b.mode == bbrProbeRTT {
+			probeTarget := b.modelWindowForBandwidth(b.effectiveBandwidth(), bbr3ProbeRTTWindowGain, mss)
+			if minimum := uint64(bbrMinimumCongestionMSS * mss); probeTarget < minimum {
+				probeTarget = minimum
+			}
+			if window > probeTarget {
+				window = probeTarget
+			}
+		}
+		event.State.CongestionWindow = clampCongestionUint32(window)
+		b.setPacingRate(event.State.CongestionWindow, event.State.SmoothedRTT)
 	}
 }
 
@@ -294,14 +323,11 @@ func (b *bbr3CongestionControl) handlePacingEvent(event *CongestionEvent) {
 }
 
 func (b *bbr3CongestionControl) onRateSample(window uint32, mss int, sample *tcpDeliveryRateSample) (uint32, uint32) {
-	packet := bbr3DecodePacketState(sample.packetState)
-	if packet.inflight == 0 {
-		packet.inflight = sample.priorInFlight
-	}
 	rate := b.updateBandwidth(sample)
 	b.updateLatestDeliverySignals(sample, rate)
 	b.updateCongestionSignals(sample, rate, window)
 	b.updateACKAggregation(sample, window, mss)
+	packet := bbr3DecodePacketState(sample.packetState)
 	b.checkStartupLoss(sample, packet, mss)
 	b.checkFullBandwidth(sample, rate)
 	threshold := b.checkDrain(sample, mss)
@@ -418,7 +444,10 @@ func (b *bbr3CongestionControl) checkStartupLoss(sample *tcpDeliveryRateSample, 
 	if sample.losses != 0 && b.lossEventsInRound < 15 {
 		b.lossEventsInRound++
 	}
-	if b.lossRoundStart && sample.fastRecovery && b.lossEventsInRound >= bbr3FullLossEvents && b.inflightTooHigh(b.lossesSince(packet), packet.inflight) {
+	if sample.PacketLossEvidenceValid() && b.lossRoundStart && sample.fastRecovery && b.lossEventsInRound >= bbr3FullLossEvents && b.inflightTooHigh(b.lossesSince(packet), packet.inflight) {
+		if b.undoBounds && b.undoState == bbr3UndoNone {
+			b.undoState = bbr3UndoStartup
+		}
 		b.fullBandwidthReached = true
 		upper := b.quantizeWindowAt(b.modelWindowForBandwidth(b.maximumBandwidth(), 1, mss), mss, false)
 		if uint64(b.latestInflight) > upper {
@@ -561,7 +590,7 @@ func (b *bbr3CongestionControl) adaptUpperBounds(sample *tcpDeliveryRateSample, 
 			return true
 		}
 	}
-	if b.inflightTooHigh(b.lossesSince(packet), packet.inflight) {
+	if sample.PacketLossEvidenceValid() && b.inflightTooHigh(b.lossesSince(packet), packet.inflight) {
 		if b.probeSamples {
 			b.handleInflightTooHigh(packet.inflight, packet.applicationLimited, window, mss, sample.ackTime)
 		}
@@ -696,7 +725,7 @@ func (b *bbr3CongestionControl) lossesSince(packet bbr3PacketSnapshot) uint64 {
 func (b *bbr3CongestionControl) onPacketLost(event *CongestionEvent) {
 	b.syncDeliveryState(event.State)
 	b.noteLossRound()
-	if event.PacketBytes <= 0 || !b.probeSamples {
+	if !event.PacketLossEvidenceValid || event.PacketBytes <= 0 || !b.probeSamples {
 		return
 	}
 	packet := bbr3DecodePacketState(event.PacketState)
@@ -755,6 +784,9 @@ func (b *bbr3CongestionControl) handleInflightTooHigh(inflight uint32, applicati
 		b.inflightHigh = clampCongestionUint32(upper)
 	}
 	if b.mode == bbrProbeBandwidth && b.probePhase == bbr3ProbeUp {
+		if b.undoBounds && b.undoState == bbr3UndoNone {
+			b.undoState = bbr3UndoProbeUp
+		}
 		b.enterProbePhase(bbr3ProbeDown, now)
 	}
 }
@@ -810,14 +842,14 @@ func (b *bbr3CongestionControl) updateMinimumRTT(window uint32, sample *tcpDeliv
 		if window < b.priorWindow {
 			window = b.priorWindow
 		}
-		b.bandwidthLow = 0
-		b.inflightLow = 0
 		b.exitProbeRTT(sample.ackTime)
 	}
 	return window
 }
 
 func (b *bbr3CongestionControl) exitProbeRTT(now time.Time) {
+	b.bandwidthLow = 0
+	b.inflightLow = 0
 	if b.fullBandwidthReached {
 		b.mode = bbrProbeBandwidth
 		b.enterProbePhase(bbr3ProbeDown, now)
@@ -1241,12 +1273,6 @@ func (b *bbr3CongestionControl) onDeliverySend(now time.Time, packetsOut, window
 }
 
 func (b *bbr3CongestionControl) saveWindow(window uint32) {
-	if !b.recovery && !b.lossRecovery {
-		b.undoBounds = true
-		b.undoBandwidthLow = b.bandwidthLow
-		b.undoInflightLow = b.inflightLow
-		b.undoInflightHigh = b.inflightHigh
-	}
 	if !b.recovery && !b.lossRecovery && b.mode != bbrProbeRTT {
 		b.priorWindow = window
 	} else if window > b.priorWindow {
@@ -1254,7 +1280,7 @@ func (b *bbr3CongestionControl) saveWindow(window uint32) {
 	}
 }
 
-func (b *bbr3CongestionControl) undoRecovery() {
+func (b *bbr3CongestionControl) undoRecovery(now time.Time) {
 	b.resetFullBandwidth()
 	b.recovery = false
 	b.lossRecovery = false
@@ -1267,6 +1293,20 @@ func (b *bbr3CongestionControl) undoRecovery() {
 		b.inflightHigh = bbr3WiderBound(b.inflightHigh, b.undoInflightHigh)
 		b.undoBounds = false
 	}
+	switch b.undoState {
+	case bbr3UndoStartup:
+		b.fullBandwidthReached = false
+		if b.mode != bbrProbeRTT {
+			b.mode = bbrStartup
+		}
+	case bbr3UndoProbeUp:
+		b.previousProbeTooHigh = false
+		if b.mode != bbrProbeRTT && (b.mode != bbrProbeBandwidth || b.probePhase != bbr3ProbeUp) {
+			b.mode = bbrProbeBandwidth
+			b.enterProbePhase(bbr3ProbeRefill, now)
+		}
+	}
+	b.undoState = bbr3UndoNone
 }
 
 func bbr3WiderBound(left, right uint32) uint32 {

@@ -189,20 +189,22 @@ func validateDialerProxies(proxies map[string]C.Proxy, library ...C.ProxyLibrary
 		}
 	}
 
-	const walking, walked = 1, 2
+	// every proxy has at most one dialer-proxy, so walk each chain once: reaching a proxy
+	// of the current walk means a cycle, reaching one an earlier walk finished does not
+	const onPath, acyclic = 1, 2
 	state := make(map[string]uint8, len(graph))
-	var walk []string
+	var path []string
 	for name := range graph {
-		walk = walk[:0]
-		for current, ok := name, true; ok && state[current] != walked; current, ok = graph[current] {
-			if state[current] == walking {
+		path = path[:0]
+		for current, ok := name, true; ok && state[current] != acyclic; current, ok = graph[current] {
+			if state[current] == onPath {
 				return fmt.Errorf("proxy [%s] has circular dialer-proxy dependency", name)
 			}
-			state[current] = walking
-			walk = append(walk, current)
+			state[current] = onPath
+			path = append(path, current)
 		}
-		for _, node := range walk {
-			state[node] = walked
+		for _, p := range path {
+			state[p] = acyclic
 		}
 	}
 

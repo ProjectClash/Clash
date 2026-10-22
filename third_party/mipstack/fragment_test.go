@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"reflect"
@@ -1830,45 +1831,115 @@ func FuzzIPPayloadFragmentationRoundTrip(f *testing.F) {
 }
 
 func TestFragmentECNReassembly(t *testing.T) {
-	link, stack := newTestStack(t, netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("192.0.2.2"))
-	defer stack.Close()
-	fragments := buildIPv4Fragments(link.remote, link.local, ProtocolUDP, make([]byte, 2000), 1280, 91)
-	if len(fragments) != 2 {
-		t.Fatalf("fragment count = %d, want 2", len(fragments))
+	wantMerge := [...]int{-1, 0, 0, -1, 0, -1, 0, -1, 3, -1, 3, -1, 3, -1, 3, -1}
+	for mask, want := range wantMerge {
+		merge, valid := fragmentECN(byte(mask))
+		if valid != (want >= 0) || valid && int(merge) != want {
+			t.Fatalf("ECN mask %04b = merge %d valid %t, want %d", mask, merge, valid, want)
+		}
 	}
-	setPacketECN(fragments[0], 2)
-	setPacketECN(fragments[1], 3)
-	if packet := stack.reassemblePacket(fragments[0], time.Now()); packet != nil {
-		t.Fatal("first fragment completed a datagram")
-	}
-	packet := stack.reassemblePacket(fragments[1], time.Now())
-	parsed, ok := parseIPPacket(packet, false)
-	if !ok || parsed.ecn != 3 {
-		t.Fatalf("reassembled ECN = %d, valid = %v, want CE", parsed.ecn, ok)
-	}
-
-	fragments = buildIPv4Fragments(link.remote, link.local, ProtocolUDP, make([]byte, 2000), 1280, 92)
-	setPacketECN(fragments[0], 0)
-	setPacketECN(fragments[1], 2)
-	_ = stack.reassemblePacket(fragments[0], time.Now())
-	if packet = stack.reassemblePacket(fragments[1], time.Now()); packet != nil {
-		t.Fatal("mixed Not-ECT/ECT fragment set was accepted")
-	}
-
-	fragments = buildIPv4Fragments(link.remote, link.local, ProtocolUDP, make([]byte, 3000), 1280, 93)
-	setPacketECN(fragments[0], 1)
-	setPacketECN(fragments[1], 2)
-	setPacketECN(fragments[2], 3)
-	_ = stack.reassemblePacket(fragments[0], time.Now())
-	_ = stack.reassemblePacket(fragments[1], time.Now())
-	packet = stack.reassemblePacket(fragments[2], time.Now())
-	parsed, ok = parseIPPacket(packet, false)
-	if !ok || parsed.ecn != 3 {
-		t.Fatalf("mixed ECT(0)/ECT(1)/CE reassembly = %d, valid = %v, want CE", parsed.ecn, ok)
-	}
-
-	if ecn, valid := fragmentECN(1<<1 | 1<<2); valid {
-		t.Fatalf("mixed ECT(0)/ECT(1) result = %d, valid = true, want invalid", ecn)
+	for _, ipv6 := range []bool{false, true} {
+		source, target := netip.MustParseAddr("192.0.2.2"), netip.MustParseAddr("192.0.2.1")
+		if ipv6 {
+			source, target = netip.MustParseAddr("2001:db8::2"), netip.MustParseAddr("2001:db8::1")
+		}
+		stack, err := New(Config{LocalAddresses: []netip.Prefix{netip.PrefixFrom(target, target.BitLen())}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = stack.Close() })
+		for first := byte(0); first < 4; first++ {
+			for second := byte(0); second < 4; second++ {
+				for _, reverse := range []bool{false, true} {
+					t.Run(fmt.Sprintf("ipv6-%t/%d-%d/reverse-%t", ipv6, first, second, reverse), func(t *testing.T) {
+						payload := bytes.Repeat([]byte{0x5b}, 2000)
+						packet := IPPacket{Source: source, Destination: target, Protocol: 253, HopLimit: 64, TrafficClass: int(0x28 | first), Payload: payload}
+						fragments, err := packet.MarshalFragments(1280, 91)
+						if err != nil || len(fragments) != 2 {
+							t.Fatalf("fragmentation = %d fragments, %v", len(fragments), err)
+						}
+						setPacketECN(fragments[1], second)
+						original := [][]byte{append([]byte(nil), fragments[0]...), append([]byte(nil), fragments[1]...)}
+						if reverse {
+							fragments[0], fragments[1] = fragments[1], fragments[0]
+						}
+						valid := first == second || first != 0 && second != 0
+						want := first
+						if first == 3 || second == 3 {
+							want = 3
+						}
+						var reassembly IPPacketReassembly
+						var wire []byte
+						var public IPPacket
+						var complete bool
+						for index, fragment := range fragments {
+							wire = stack.reassemblePacket(fragment, time.Now())
+							parsed, parseErr := ParseIPPacket(fragment)
+							if parseErr != nil {
+								t.Fatal(parseErr)
+							}
+							public, complete, err = reassembly.Add(parsed)
+							if index == 0 && (len(wire) != 0 || complete || err != nil) {
+								t.Fatal("first-arriving fragment completed or rejected a datagram")
+							}
+						}
+						if !valid {
+							if len(wire) != 0 || complete || err == nil {
+								t.Fatal("mixed Not-ECT/ECT fragments were accepted")
+							}
+							return
+						}
+						parsed, ok := parseIPPacket(wire, false)
+						if !ok || parsed.ecn != want || parsed.trafficClass != 0x28|want || !bytes.Equal(parsed.payload, payload) || err != nil || !complete || public.TrafficClass != int(0x28|want) || !bytes.Equal(public.Payload, payload) {
+							t.Fatalf("ECN reassembly = wire valid %t class %d, public class %d complete %t err %v; want %d", ok, parsed.trafficClass, public.TrafficClass, complete, err, 0x28|want)
+						}
+						if reverse {
+							fragments[0], fragments[1] = fragments[1], fragments[0]
+						}
+						if !bytes.Equal(fragments[0], original[0]) || !bytes.Equal(fragments[1], original[1]) {
+							t.Fatal("reassembly modified retained fragment headers")
+						}
+						if !ipv6 && referenceChecksum(wire[:int(wire[0]&15)*4]) != 0 {
+							t.Fatal("reassembled IPv4 checksum is invalid")
+						}
+					})
+				}
+			}
+		}
+		t.Run(fmt.Sprintf("ipv6-%t/ECT1-ECT0-CE", ipv6), func(t *testing.T) {
+			payload := bytes.Repeat([]byte{0x6c}, 3000)
+			packet := IPPacket{Source: source, Destination: target, Protocol: 253, HopLimit: 64, TrafficClass: 0x29, Payload: payload}
+			fragments, err := packet.MarshalFragments(1280, 92)
+			if err != nil || len(fragments) != 3 {
+				t.Fatalf("fragmentation = %d fragments, %v", len(fragments), err)
+			}
+			setPacketECN(fragments[1], 2)
+			setPacketECN(fragments[2], 3)
+			for _, order := range [][3]int{{0, 1, 2}, {2, 1, 0}, {1, 2, 0}} {
+				var reassembly IPPacketReassembly
+				var wire []byte
+				var public IPPacket
+				var complete bool
+				for step, index := range order {
+					wire = stack.reassemblePacket(fragments[index], time.Now())
+					fragment, parseErr := ParseIPPacket(fragments[index])
+					if parseErr != nil {
+						t.Fatal(parseErr)
+					}
+					public, complete, err = reassembly.Add(fragment)
+					if err != nil || complete != (step == 2) || (len(wire) != 0) != (step == 2) {
+						t.Fatalf("order %v step %d = wire %d complete %t, %v", order, step, len(wire), complete, err)
+					}
+				}
+				parsed, ok := parseIPPacket(wire, false)
+				if !ok || parsed.trafficClass != 0x2b || public.TrafficClass != 0x2b || !bytes.Equal(parsed.payload, payload) || !bytes.Equal(public.Payload, payload) {
+					t.Fatalf("order %v lost CE, DSCP, or payload", order)
+				}
+				if !ipv6 && referenceChecksum(wire[:int(wire[0]&15)*4]) != 0 {
+					t.Fatal("three-codepoint reassembly has an invalid IPv4 checksum")
+				}
+			}
+		})
 	}
 }
 

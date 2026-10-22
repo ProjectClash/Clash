@@ -3,14 +3,221 @@ package mipstack
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/netip"
+	"runtime"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+type benchmarkRTOController struct {
+	algorithm       CongestionController
+	window          uint32
+	recoveryEntries atomic.Uint32
+	timeoutAt       chan time.Time
+}
+
+func (c *benchmarkRTOController) HandleCongestionEvent(event *CongestionEvent) {
+	if event.Type == CongestionEventInitialize {
+		event.State.CongestionWindow = c.window
+	}
+	c.algorithm.HandleCongestionEvent(event)
+	if event.Type == CongestionEventTimeout {
+		if c.recoveryEntries.Add(1) == 1 {
+			c.timeoutAt <- event.Time
+		}
+	}
+}
+
+func BenchmarkTCPRTORecovery(b *testing.B) {
+	const mss = 1280
+	local := netip.MustParseAddr("192.0.2.211")
+	remote := netip.MustParseAddr("192.0.2.212")
+	for _, algorithm := range []string{CongestionControlReno, CongestionControlCUBIC, CongestionControlBBR, CongestionControlBBR3} {
+		for _, count := range []int{16, 128, 1024, 8192} {
+			b.Run(fmt.Sprintf("%s/segments-%d", algorithm, count), func(b *testing.B) {
+				payload := bytes.Repeat([]byte{0x5a}, count*mss)
+				var recoveryTime time.Duration
+				b.SetBytes(int64(len(payload)))
+				b.ReportAllocs()
+				b.ResetTimer()
+				b.StopTimer()
+				for iteration := 0; iteration < b.N; iteration++ {
+					base, _ := registeredCongestionControlFactory(algorithm)
+					definition := base.definition
+					var observer *benchmarkRTOController
+					definition.New = func(context CongestionControlContext) CongestionController {
+						observer = &benchmarkRTOController{
+							algorithm: base.definition.New(context), window: uint32(len(payload)),
+							timeoutAt: make(chan time.Time, 1),
+						}
+						return observer
+					}
+					factory, err := NewCongestionControlFactory(definition)
+					if err != nil {
+						b.Fatal(err)
+					}
+					stack, err := New(Config{
+						LocalAddresses: []netip.Prefix{netip.PrefixFrom(local, 32)}, MTU: 1400,
+						TCP: TCPSocketDefaults{CongestionControlFactory: factory, SendBuffer: len(payload), MaximumSendBuffer: len(payload)},
+					})
+					if err != nil {
+						b.Fatal(err)
+					}
+					if err = stack.Start(); err != nil {
+						_ = stack.Close()
+						b.Fatal(err)
+					}
+					peerDone := make(chan error, 1)
+					go func() {
+						peerDone <- func() error {
+							buffer := make([]byte, 65535)
+							original := make([]bool, count)
+							received := make([]bool, count)
+							originalCount, prefix := 0, 0
+							firstRecoveryACK := true
+							synLost := false
+							var first uint32
+							for {
+								sizes := []int{0}
+								if _, readErr := stack.Read([][]byte{buffer}, sizes, 0); readErr != nil {
+									return readErr
+								}
+								packet, ok := parseIPPacket(buffer[:sizes[0]], false)
+								if !ok || packet.protocol != ProtocolTCP || len(packet.payload) < tcpHeaderSize {
+									return fmt.Errorf("invalid outbound TCP packet")
+								}
+								tcp := packet.payload
+								sequence := binary.BigEndian.Uint32(tcp[4:8])
+								flags := tcp[13]
+								data := tcp[int(tcp[12]>>4)*4:]
+								if flags&TCPFlagSYN != 0 {
+									if !synLost {
+										synLost = true
+										continue
+									}
+									first = sequence + 1
+									options := []byte{2, 4, 5, 0, 4, 2, 1, 3, 3, 8}
+									if writeErr := writeTestPacket(stack, buildTestTCP(remote, local, 8080, binary.BigEndian.Uint16(tcp[:2]), 100, first, TCPFlagSYN|TCPFlagACK, 65535, options, nil)); writeErr != nil {
+										return writeErr
+									}
+									continue
+								}
+								if flags&TCPFlagRST != 0 {
+									return fmt.Errorf("connection reset during RTO recovery")
+								}
+								if len(data) != 0 {
+									offset := int(sequence - first)
+									if offset < 0 || offset >= len(payload) || offset%mss != 0 || len(data) != mss || !bytes.Equal(data, payload[offset:offset+mss]) {
+										return fmt.Errorf("invalid recovery payload at offset %d, length %d", offset, len(data))
+									}
+									index := offset / mss
+									if observer.recoveryEntries.Load() == 0 || firstRecoveryACK && index != 0 {
+										if !original[index] {
+											original[index] = true
+											originalCount++
+										}
+										continue
+									}
+									if originalCount != count {
+										return fmt.Errorf("RTO started after only %d/%d original segments departed", originalCount, count)
+									}
+									if firstRecoveryACK {
+										time.Sleep(time.Millisecond)
+										firstRecoveryACK = false
+									}
+									received[index] = true
+									for prefix < count && received[prefix] {
+										prefix++
+									}
+								}
+								ackFlags := uint8(TCPFlagACK)
+								if prefix == count {
+									ackFlags |= TCPFlagFIN
+								}
+								if writeErr := writeTestPacket(stack, buildTestTCP(remote, local, 8080, binary.BigEndian.Uint16(tcp[:2]), 101, first+uint32(prefix*mss), ackFlags, 65535, nil, nil)); writeErr != nil {
+									return writeErr
+								}
+								if prefix == count {
+									return nil
+								}
+							}
+						}()
+					}()
+					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+					connection, err := stack.DialTCP(ctx, "tcp4", netip.AddrPort{}, netip.AddrPortFrom(remote, 8080))
+					if err != nil {
+						cancel()
+						_ = stack.Close()
+						<-peerDone
+						b.Fatal(err)
+					}
+					deadline, _ := ctx.Deadline()
+					_ = connection.SetDeadline(deadline)
+					for connection.(*TCPConn).Info().PeerWindow < uint32(len(payload)) {
+						select {
+						case <-ctx.Done():
+							_ = stack.Close()
+							<-peerDone
+							cancel()
+							b.Fatal("scaled peer window was not installed")
+						default:
+							runtime.Gosched()
+						}
+					}
+					setup := connection.(*TCPConn).Info()
+					if setup.RTT != 0 || setup.MinimumRTT != 0 || setup.RetransmissionTimeout != 3*time.Second {
+						_ = stack.Close()
+						<-peerDone
+						cancel()
+						b.Fatalf("unexpected initial RTT/RTO: %v/%v, minimum %v", setup.RTT, setup.RetransmissionTimeout, setup.MinimumRTT)
+					}
+					b.StartTimer()
+					written, writeErr := connection.Write(payload)
+					select {
+					case err = <-peerDone:
+						peerDone = nil
+					case <-ctx.Done():
+						err = ctx.Err()
+					}
+					if err == nil {
+						var buffer [1]byte
+						if n, readErr := connection.Read(buffer[:]); n != 0 || readErr != io.EOF {
+							err = fmt.Errorf("recovery completion read = %d, %v; want 0, EOF", n, readErr)
+						}
+					}
+					completed := time.Now()
+					b.StopTimer()
+					info := connection.(*TCPConn).Info()
+					_ = stack.Close()
+					if peerDone != nil {
+						if peerErr := <-peerDone; err == nil {
+							err = peerErr
+						}
+					}
+					cancel()
+					if err != nil || writeErr != nil || written != len(payload) {
+						b.Fatalf("recovery failed: peer %v, write %d/%d: %v, recovery entries %d, info %+v", err, written, len(payload), writeErr, observer.recoveryEntries.Load(), info)
+					}
+					if observer.recoveryEntries.Load() != 1 || info.BytesAcknowledged != uint64(len(payload)) || info.RetransmissionRecovery || info.FastRecovery || info.SpuriousRecoveryUndos != 0 || info.State != TCPStateCloseWait {
+						b.Fatalf("incomplete RTO recovery: recovery entries %d, info %+v", observer.recoveryEntries.Load(), info)
+					}
+					recoveryTime += completed.Sub(<-observer.timeoutAt)
+				}
+				if recoveryTime > 0 {
+					b.ReportMetric(float64(recoveryTime.Nanoseconds())/float64(b.N)/1e6, "recovery-ms/op")
+					b.ReportMetric(float64(len(payload))*float64(b.N)/recoveryTime.Seconds()/(1024*1024), "recovery-MiB/s")
+				}
+			})
+		}
+	}
+}
 
 func benchmarkTCPControllerConnection(b *testing.B, algorithm string, mtu uint32, ipv6 bool, offload RXChecksumOffload) (net.Conn, *Stack, *stackBridge) {
 	return benchmarkTCPProfileConnection(b, TCPSocketDefaults{CongestionControl: algorithm}, mtu, ipv6, offload)
@@ -88,6 +295,256 @@ func benchmarkTCPProfileConnection(b *testing.B, defaults TCPSocketDefaults, mtu
 	return connection, server, bridge
 }
 
+func BenchmarkTCPFastRecovery(b *testing.B) {
+	for _, algorithm := range []string{CongestionControlReno, CongestionControlCUBIC, CongestionControlBBR, CongestionControlBBR3} {
+		for _, test := range []struct {
+			name     string
+			segments int
+			drops    map[int]bool
+		}{
+			{name: "SACK", segments: 64, drops: map[int]bool{1: true, 2: true}},
+			{name: "RACK", segments: 2, drops: map[int]bool{1: true}},
+		} {
+			b.Run(algorithm+"/"+test.name, func(b *testing.B) {
+				link, stack := newTestStack(b, netip.MustParseAddr("192.0.2.221"), netip.MustParseAddr("192.0.2.222"))
+				link.mu.Lock()
+				link.echoTCP, link.sackTCP, link.dropTCPOrdinals = true, true, test.drops
+				link.mu.Unlock()
+				payload := bytes.Repeat([]byte{0x5a}, test.segments*1280)
+				received := make([]byte, len(payload))
+				var retransmissions, sackRetransmissions, rackRetransmissions uint64
+				var handshakeRTT time.Duration
+				b.SetBytes(int64(2 * len(payload)))
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					opened, err := stack.DialTCP(ctx, "tcp4", netip.AddrPort{}, netip.AddrPortFrom(link.remote, 8080))
+					if err != nil {
+						cancel()
+						b.Fatal(err)
+					}
+					connection := opened.(*TCPConn)
+					if err = connection.SetCongestionControl(algorithm); err != nil {
+						b.Fatal(err)
+					}
+					if err = connection.SetLinger(0); err != nil {
+						b.Fatal(err)
+					}
+					deadline, _ := ctx.Deadline()
+					_ = connection.SetDeadline(deadline)
+					setup := connection.Info()
+					if setup.CongestionControl != algorithm || setup.MaximumSegmentSize != 1280 {
+						b.Fatalf("unexpected initial connection: %+v", setup)
+					}
+					handshakeRTT += setup.MinimumRTT
+					before := stack.Stats()
+					written := make(chan error, 1)
+					go func() {
+						n, writeErr := connection.Write(payload)
+						if writeErr == nil && n != len(payload) {
+							writeErr = io.ErrShortWrite
+						}
+						written <- writeErr
+					}()
+					_, readErr := io.ReadFull(connection, received)
+					writeErr := <-written
+					info, after := connection.Info(), stack.Stats()
+					_ = connection.Close()
+					select {
+					case <-connection.done:
+					case <-ctx.Done():
+						b.Fatal("connection cleanup timed out")
+					}
+					cancel()
+					link.mu.Lock()
+					delete(link.tcp, connection.key.local.Port())
+					link.mu.Unlock()
+					if readErr != nil || writeErr != nil || !bytes.Equal(received, payload) {
+						b.Fatalf("stream transfer: read %v, write %v", readErr, writeErr)
+					}
+					retries := after.TCPRetransmissions - before.TCPRetransmissions
+					sack := after.TCPSACKRetransmissions - before.TCPSACKRetransmissions
+					rack := after.TCPRACKRetransmissions - before.TCPRACKRetransmissions
+					tlp := after.TCPTailLossProbes - before.TCPTailLossProbes
+					if retries != uint64(len(test.drops)) || sack != retries || test.name == "RACK" && rack != retries || tlp != 0 || info.FastRecovery || info.RetransmissionRecovery || info.BytesAcknowledged != uint64(len(payload)) {
+						b.Fatalf("unexpected recovery: retransmissions %d, SACK %d, RACK %d, TLP %d, info %+v", retries, sack, rack, tlp, info)
+					}
+					retransmissions += retries
+					sackRetransmissions += sack
+					rackRetransmissions += rack
+				}
+				b.StopTimer()
+				b.ReportMetric(float64(handshakeRTT.Nanoseconds())/float64(b.N), "handshake-rtt-ns/op")
+				b.ReportMetric(float64(retransmissions)/float64(b.N), "retransmissions/op")
+				b.ReportMetric(float64(sackRetransmissions)/float64(b.N), "sack-retransmissions/op")
+				b.ReportMetric(float64(rackRetransmissions)/float64(b.N), "rack-retransmissions/op")
+				b.ReportMetric(0, "tail-loss-probes/op")
+			})
+		}
+	}
+}
+
+func BenchmarkTCPRACKRecovery(b *testing.B) {
+	responseDelay := time.Millisecond
+	version := runtime.Version()
+	if runtime.GOOS == "windows" && (strings.HasPrefix(version, "go1.20") || strings.HasPrefix(version, "go1.21") || strings.HasPrefix(version, "go1.22")) {
+		responseDelay = 20 * time.Millisecond
+	}
+	for _, algorithm := range []string{CongestionControlReno, CongestionControlCUBIC, CongestionControlBBR, CongestionControlBBR3} {
+		b.Run(algorithm, func(b *testing.B) {
+			link, stack := newTestStack(b, netip.MustParseAddr("192.0.2.223"), netip.MustParseAddr("192.0.2.224"))
+			link.mu.Lock()
+			link.echoTCP, link.sackTCP = true, true
+			link.delayTCPResponse = responseDelay
+			link.dropTCPOrdinals = map[int]bool{1: true}
+			link.mu.Unlock()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			opened, err := stack.DialTCP(ctx, "tcp4", netip.AddrPort{}, netip.AddrPortFrom(link.remote, 8080))
+			if err != nil {
+				b.Fatal(err)
+			}
+			connection := opened.(*TCPConn)
+			defer connection.Close()
+			if err = connection.SetCongestionControl(algorithm); err != nil {
+				b.Fatal(err)
+			}
+			if err = connection.SetLinger(0); err != nil {
+				b.Fatal(err)
+			}
+			if err = connection.SetDeadline(time.Now().Add(5 * time.Minute)); err != nil {
+				b.Fatal(err)
+			}
+			setup := connection.Info()
+			if setup.CongestionControl != algorithm || setup.MaximumSegmentSize != 1280 || setup.MinimumRTT < responseDelay {
+				b.Fatalf("unexpected RACK connection: %+v", setup)
+			}
+			payload := bytes.Repeat([]byte{0x6b}, 2*setup.MaximumSegmentSize)
+			received := make([]byte, len(payload))
+			before := stack.Stats()
+			b.SetBytes(int64(2 * len(payload)))
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if n, writeErr := connection.Write(payload); writeErr != nil || n != len(payload) {
+					b.Fatalf("RACK write = %d, %v", n, writeErr)
+				}
+				if _, err = io.ReadFull(connection, received); err != nil || !bytes.Equal(received, payload) {
+					b.Fatalf("RACK echo = %v", err)
+				}
+				info := connection.Info()
+				if info.FastRecovery || info.RetransmissionRecovery || info.BytesAcknowledged != uint64(i+1)*uint64(len(payload)) {
+					b.Fatalf("incomplete RACK recovery: %+v", info)
+				}
+				link.mu.Lock()
+				peer := link.tcp[connection.key.local.Port()]
+				peer.dataSegments = 0
+				for sequence := range peer.seenData {
+					delete(peer.seenData, sequence)
+				}
+				link.mu.Unlock()
+			}
+			b.StopTimer()
+			after := stack.Stats()
+			retries := after.TCPRetransmissions - before.TCPRetransmissions
+			rack := after.TCPRACKRetransmissions - before.TCPRACKRetransmissions
+			if retries != uint64(b.N) || rack != retries || after.TCPTailLossProbes != before.TCPTailLossProbes {
+				b.Fatalf("recovery count = retransmissions:%d RACK:%d TLP:%d, want %d RACK retransmissions only", retries, rack, after.TCPTailLossProbes-before.TCPTailLossProbes, b.N)
+			}
+			b.ReportMetric(float64(rack)/float64(b.N), "rack-retransmissions/op")
+			b.ReportMetric(float64(setup.MinimumRTT.Nanoseconds()), "handshake-rtt-ns")
+			b.ReportMetric(float64(responseDelay.Nanoseconds()), "response-delay-ns")
+		})
+	}
+}
+
+func BenchmarkTCPPRREntryAcknowledgment(b *testing.B) {
+	for _, algorithm := range []string{CongestionControlReno, CongestionControlCUBIC, CongestionControlBBR, CongestionControlBBR3} {
+		b.Run(algorithm, func(b *testing.B) {
+			fixture := newTCPRecoveryACKFixture(b, algorithm, 64)
+			fixture.initial.fastRecovery = false
+			fixture.initial.recoveryPoint, fixture.initial.prrPriorFlight = 0, 0
+			fixture.initial.controller.state.Phase = CongestionPhaseOpen
+			fixture.original[1].state = sentTCPSegmentTransmitted
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				fixture.reset()
+				fixture.state.processAcknowledgment(&fixture.segment, fixture.ackTime, 0)
+			}
+			b.StopTimer()
+			b.ReportMetric(float64(fixture.state.prrDelivered), "credit-B")
+		})
+	}
+}
+
+func BenchmarkICMPv6ErrorInput(b *testing.B) {
+	local, remote := netip.MustParseAddr("2001:db8::31"), netip.MustParseAddr("2001:db8::32")
+	for _, input := range []struct{ messageType, code byte }{{2, 0}, {2, 1}, {100, 255}} {
+		b.Run(fmt.Sprintf("type-%d/code-%d", input.messageType, input.code), func(b *testing.B) {
+			stack, err := New(Config{LocalAddresses: []netip.Prefix{netip.PrefixFrom(local, 128)}, MTU: 1500})
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer stack.Close()
+			if err = stack.Start(); err != nil {
+				b.Fatal(err)
+			}
+			opened, err := stack.DialUDP(context.Background(), "udp6", netip.AddrPort{}, netip.AddrPortFrom(remote, 13000))
+			if err != nil {
+				b.Fatal(err)
+			}
+			connection := opened.(*UDPConn)
+			defer connection.Close()
+			if err = connection.SetReceiveErrors(true); err != nil {
+				b.Fatal(err)
+			}
+			quote := buildTestUDP(local, remote, connection.LocalAddr().(*net.UDPAddr).AddrPort().Port(), 13000, []byte("quote"))
+			body := make([]byte, 4+len(quote))
+			binary.BigEndian.PutUint32(body[:4], 1280)
+			copy(body[4:], quote)
+			wire := mustTestWire((ICMPMessage{Source: remote, Destination: local, Type: input.messageType, Code: input.code, Body: body}).MarshalBinary())
+			packet := buildIPPacket(remote, local, ProtocolICMPv6, wire, 1, true)
+			packets := [][]byte{packet}
+			delivered := 0
+			b.ReportAllocs()
+			b.SetBytes(int64(len(packet)))
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if n, err := stack.Write(packets, 0); err != nil || n != 1 {
+					b.Fatalf("ICMPv6 input = %d, %v", n, err)
+				}
+				if reported, err := connection.ReadError(); err == nil && reported != nil {
+					delivered++
+				}
+			}
+			b.StopTimer()
+			b.ReportMetric(float64(delivered)/float64(b.N), "errors/op")
+		})
+	}
+}
+
+func BenchmarkTCPEstablishedStateAllocation(b *testing.B) {
+	states := make([]*tcpEstablishedState, 128)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		states[i%len(states)] = &tcpEstablishedState{}
+	}
+	runtime.KeepAlive(states)
+}
+
+func BenchmarkTCPEstablishedLivenessAllocation(b *testing.B) {
+	states := make([]*tcpEstablishedLivenessState, 128)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		states[i%len(states)] = &tcpEstablishedLivenessState{}
+	}
+	runtime.KeepAlive(states)
+}
+
 func BenchmarkTCPControllerThroughput(b *testing.B) {
 	const size = 4 * 1024 * 1024
 	for _, algorithm := range []string{CongestionControlReno, CongestionControlCUBIC, CongestionControlBBR, CongestionControlBBR3} {
@@ -113,6 +570,7 @@ func BenchmarkTCPControllerThroughput(b *testing.B) {
 					b.Fatal("echo payload mismatch")
 				}
 			}
+			b.StopTimer()
 			if tcp, ok := connection.(*TCPConn); ok {
 				info := tcp.Info()
 				stats := tcp.stack.Stats()
@@ -130,6 +588,7 @@ func BenchmarkTCPControllerThroughput(b *testing.B) {
 				b.ReportMetric(float64(stats.TCPInboundQueueDrops), "queue-drops")
 				b.ReportMetric(float64(peerStats.InboundDroppedPackets), "peer-rx-drops")
 				b.ReportMetric(float64(peerStats.TCPInboundQueueDrops), "peer-queue-drops")
+				b.ReportMetric(float64(stats.OutboundPackets+peerStats.OutboundPackets)/float64(b.N), "wire-packets/op")
 				b.ReportMetric(float64(stats.TCPSACKRetransmissions), "sack-retransmissions")
 				b.ReportMetric(float64(stats.TCPRACKRetransmissions), "rack-retransmissions")
 				b.ReportMetric(float64(stats.TCPTailLossProbes), "tail-loss-probes")
@@ -142,6 +601,66 @@ func BenchmarkTCPControllerThroughput(b *testing.B) {
 				b.ReportMetric(float64(bridge.peerDSACKs), "peer-dsack-acks")
 				bridge.mu.Unlock()
 			}
+		})
+	}
+}
+
+func BenchmarkTCPControllerFixedBufferThroughput(b *testing.B) {
+	const size = 4 * 1024 * 1024
+	for _, algorithm := range []string{CongestionControlReno, CongestionControlCUBIC, CongestionControlBBR, CongestionControlBBR3} {
+		b.Run(algorithm, func(b *testing.B) {
+			connection, peer, _ := benchmarkTCPControllerConnection(b, algorithm, defaultMTU, false, RXChecksumOffload{})
+			sender := connection.(*TCPConn)
+			peer.mu.Lock()
+			receiver := peer.tcp[tcpKey{local: sender.key.remote, remote: sender.key.local}]
+			peer.mu.Unlock()
+			if receiver == nil {
+				b.Fatal("fixed-buffer benchmark has no peer connection")
+			}
+			for _, c := range []*TCPConn{sender, receiver} {
+				if err := c.SetReadBuffer(tcpReceiveCapacity); err != nil {
+					b.Fatal(err)
+				}
+				if err := c.SetWriteBuffer(tcpSendCapacity); err != nil {
+					b.Fatal(err)
+				}
+			}
+			payload := bytes.Repeat([]byte{0x5a}, size)
+			received := make([]byte, size)
+			b.ReportAllocs()
+			b.SetBytes(2 * size)
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				written := make(chan error, 1)
+				go func() {
+					n, err := connection.Write(payload)
+					if err == nil && n != len(payload) {
+						err = io.ErrShortWrite
+					}
+					written <- err
+				}()
+				if _, err := io.ReadFull(connection, received); err != nil {
+					b.Fatal(err)
+				}
+				if err := <-written; err != nil {
+					b.Fatal(err)
+				}
+				if !bytes.Equal(received, payload) {
+					b.Fatal("fixed-buffer echo payload mismatch")
+				}
+			}
+			b.StopTimer()
+			for _, c := range []*TCPConn{sender, receiver} {
+				info := c.Info()
+				if info.SendBufferCapacity != tcpSendCapacity || info.ReceiveBufferCapacity != tcpReceiveCapacity {
+					b.Fatalf("fixed socket buffers changed: %+v", info)
+				}
+			}
+			clientStats, peerStats := sender.stack.Stats(), peer.Stats()
+			b.ReportMetric(float64(clientStats.OutboundPackets+peerStats.OutboundPackets)/float64(b.N), "wire-packets/op")
+			b.ReportMetric(float64(sender.inbound.peakBytes()), "client-inbound-queue-peak-B")
+			b.ReportMetric(float64(receiver.inbound.peakBytes()), "peer-inbound-queue-peak-B")
+			b.ReportMetric(float64(sender.Info().Retransmissions+receiver.Info().Retransmissions), "retransmissions")
 		})
 	}
 }
@@ -214,7 +733,7 @@ func BenchmarkTCPControllerLatency(b *testing.B) {
 	}
 }
 
-func benchmarkTCPControllerConnections(b *testing.B, algorithm string, count int) []net.Conn {
+func benchmarkTCPControllerConnections(b *testing.B, algorithm string, count int) ([]net.Conn, []net.Conn) {
 	b.Helper()
 	clientAddress := netip.MustParseAddr("192.0.2.211")
 	serverAddress := netip.MustParseAddr("192.0.2.212")
@@ -301,7 +820,7 @@ func benchmarkTCPControllerConnections(b *testing.B, algorithm string, count int
 		<-bridge.done
 		<-bridge.done
 	})
-	return connections
+	return connections, serverConnections
 }
 
 func BenchmarkTCPControllerConcurrency(b *testing.B) {
@@ -309,7 +828,7 @@ func BenchmarkTCPControllerConcurrency(b *testing.B) {
 	for _, algorithm := range []string{CongestionControlReno, CongestionControlCUBIC, CongestionControlBBR, CongestionControlBBR3} {
 		for _, count := range []int{16, 64, 256, 512, 1024, 2048, 4096, 8192} {
 			b.Run(fmt.Sprintf("%s-%d", algorithm, count), func(b *testing.B) {
-				connections := benchmarkTCPControllerConnections(b, algorithm, count)
+				connections, peerConnections := benchmarkTCPControllerConnections(b, algorithm, count)
 				payload := bytes.Repeat([]byte{0x6b}, size)
 				b.SetBytes(int64(2 * size * count))
 				b.ResetTimer()
@@ -340,6 +859,43 @@ func BenchmarkTCPControllerConcurrency(b *testing.B) {
 						}
 					}
 				}
+				b.StopTimer()
+				var retransmissions, queueDrops, window, sendCapacity uint64
+				for _, connection := range connections {
+					info := connection.(*TCPConn).Info()
+					retransmissions += info.Retransmissions
+					queueDrops += info.InboundQueueDrops
+					window += uint64(info.CongestionWindow)
+					sendCapacity += uint64(info.SendBufferCapacity)
+				}
+				var peerRetransmissions, peerQueueDrops, peerWindow, peerSendCapacity uint64
+				for _, connection := range peerConnections {
+					info := connection.(*TCPConn).Info()
+					peerRetransmissions += info.Retransmissions
+					peerQueueDrops += info.InboundQueueDrops
+					peerWindow += uint64(info.CongestionWindow)
+					peerSendCapacity += uint64(info.SendBufferCapacity)
+				}
+				stats := connections[0].(*TCPConn).stack.Stats()
+				peerStats := peerConnections[0].(*TCPConn).stack.Stats()
+				b.ReportMetric(float64(retransmissions), "retransmissions")
+				b.ReportMetric(float64(queueDrops), "connection-queue-drops")
+				b.ReportMetric(float64(window)/float64(count), "cwnd-B/flow")
+				b.ReportMetric(float64(sendCapacity)/float64(count), "send-buffer-B/flow")
+				b.ReportMetric(float64(stats.TCPTailLossProbes), "tail-loss-probes")
+				b.ReportMetric(float64(stats.TCPSACKRetransmissions), "sack-retransmissions")
+				b.ReportMetric(float64(stats.TCPRACKRetransmissions), "rack-retransmissions")
+				b.ReportMetric(float64(stats.InboundDroppedPackets), "rx-drops")
+				b.ReportMetric(float64(stats.TCPInboundQueueDrops), "queue-drops")
+				b.ReportMetric(float64(peerRetransmissions), "peer-retransmissions")
+				b.ReportMetric(float64(peerQueueDrops), "peer-connection-queue-drops")
+				b.ReportMetric(float64(peerWindow)/float64(count), "peer-cwnd-B/flow")
+				b.ReportMetric(float64(peerSendCapacity)/float64(count), "peer-send-buffer-B/flow")
+				b.ReportMetric(float64(peerStats.TCPTailLossProbes), "peer-tail-loss-probes")
+				b.ReportMetric(float64(peerStats.TCPSACKRetransmissions), "peer-sack-retransmissions")
+				b.ReportMetric(float64(peerStats.TCPRACKRetransmissions), "peer-rack-retransmissions")
+				b.ReportMetric(float64(peerStats.InboundDroppedPackets), "peer-rx-drops")
+				b.ReportMetric(float64(peerStats.TCPInboundQueueDrops), "peer-queue-drops")
 			})
 		}
 	}

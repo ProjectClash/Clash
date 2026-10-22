@@ -102,11 +102,20 @@ func (p *Pool) CloneFrom(o *Pool) {
 		p.allocator = o.allocator
 		return
 	}
+	p.mux.Lock()
+	defer p.mux.Unlock()
+
 	o.mux.Lock()
 	defer o.mux.Unlock()
 	o.settleLocked()
 	o.retired = true
 	o.store.CloneTo(p.store)
+
+	// the allocation state only matches the cloned entries if both pools cover the same range
+	if o.first == p.first && o.last == p.last {
+		p.settleLocked()
+		p.offset, p.cycle = o.offset, o.cycle
+	}
 }
 
 func sameStoreKind(a, b store) bool {

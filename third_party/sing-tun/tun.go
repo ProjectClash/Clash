@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/metacubex/sing/common"
 	"github.com/metacubex/sing/common/buf"
 	E "github.com/metacubex/sing/common/exceptions"
 	F "github.com/metacubex/sing/common/format"
@@ -72,6 +73,12 @@ const (
 	DefaultIPRoute2AutoRedirectFallbackRuleIndex = 32768
 )
 
+const (
+	DNSModeDisabled = "disabled"
+	DNSModeNative   = "native"
+	DNSModeHijack   = "hijack"
+)
+
 type Options struct {
 	Name                                  string
 	Inet4Address                          []netip.Prefix
@@ -81,6 +88,7 @@ type Options struct {
 	AutoRoute                             bool
 	Inet4Gateway                          netip.Addr
 	Inet6Gateway                          netip.Addr
+	DNSMode                               string
 	DNSServers                            []netip.Addr
 	IPRoute2TableIndex                    int
 	IPRoute2RuleIndex                     int
@@ -113,12 +121,64 @@ type Options struct {
 
 	_TXChecksumOffload bool
 
-	EXP_DisableDNSHijack bool
-
 	EXP_RecvMsgX bool
 	EXP_SendMsgX bool
 
 	EXP_ProcessorsPerChannel int
+}
+
+func (o *Options) DNSModeOrDefault() string {
+	if o.DNSMode == "" {
+		if o.AutoRoute && runtime.GOOS != "darwin" {
+			return DNSModeHijack
+		}
+		return DNSModeDisabled
+	}
+	return o.DNSMode
+}
+
+func (o *Options) DNSServerAddress() ([]netip.Addr, error) {
+	inet4DNS, err := o.Inet4DNSAddress()
+	if err != nil {
+		return nil, err
+	}
+	inet6DNS, err := o.Inet6DNSAddress()
+	if err != nil {
+		return nil, err
+	}
+	return append(inet4DNS, inet6DNS...), nil
+}
+
+func (o *Options) Inet4DNSAddress() ([]netip.Addr, error) {
+	if len(o.Inet4Address) == 0 {
+		return nil, nil
+	}
+	if len(o.DNSServers) > 0 {
+		return common.Filter(o.DNSServers, netip.Addr.Is4), nil
+	}
+	if HasNextAddress(o.Inet4Address[0], 1) {
+		return []netip.Addr{o.Inet4Address[0].Addr().Next()}, nil
+	}
+	if !(len(o.Inet6Address) > 0 && HasNextAddress(o.Inet6Address[0], 1)) {
+		return nil, E.New("no IPv4 server configured and no usable next address in ", o.Inet4Address[0], " for DNS")
+	}
+	return nil, nil
+}
+
+func (o *Options) Inet6DNSAddress() ([]netip.Addr, error) {
+	if len(o.Inet6Address) == 0 {
+		return nil, nil
+	}
+	if len(o.DNSServers) > 0 {
+		return common.Filter(o.DNSServers, netip.Addr.Is6), nil
+	}
+	if HasNextAddress(o.Inet6Address[0], 1) {
+		return []netip.Addr{o.Inet6Address[0].Addr().Next()}, nil
+	}
+	if !(len(o.Inet4Address) > 0 && HasNextAddress(o.Inet4Address[0], 1)) {
+		return nil, E.New("no IPv6 server configured and no usable next address in ", o.Inet6Address[0], " for DNS")
+	}
+	return nil, nil
 }
 
 func (o *Options) Inet4GatewayAddr() netip.Addr {

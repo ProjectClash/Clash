@@ -271,14 +271,14 @@ func TestARebuildRightAfterAReleaseWaitsOutTheRehandshakeGap(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer node.Close()
-	if err := node.clashBuildDevice(); err != nil {
+	if err := node.init0(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	node.ReleaseSessions()
 	node.clashDevice.mu.Lock()
 	released := node.clashDevice.released
 	node.clashDevice.mu.Unlock()
-	if err := node.clashBuildDevice(); err != nil {
+	if err := node.init0(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if waited := time.Since(released); waited < clashRehandshakeGap {
@@ -287,7 +287,7 @@ func TestARebuildRightAfterAReleaseWaitsOutTheRehandshakeGap(t *testing.T) {
 	node.ReleaseSessions()
 	time.Sleep(clashRehandshakeGap)
 	started := time.Now()
-	if err := node.clashBuildDevice(); err != nil {
+	if err := node.init0(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if waited := time.Since(started); waited >= clashRehandshakeGap/2 {

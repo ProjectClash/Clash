@@ -237,10 +237,16 @@ func (s *Mipstack) batchLoopDarwin(darwinTUN DarwinTUN) {
 	for {
 		buffers, err := darwinTUN.BatchRead()
 		if len(buffers) > 0 {
-			for i, buffer := range buffers {
-				packets[i] = buffer.Bytes()
+			offset := 4
+			for _, buffer := range buffers {
+				if buffer.Start() < offset {
+					offset = buffer.Start()
+				}
 			}
-			s.processPackets(packets[:len(buffers)], 0)
+			for i, buffer := range buffers {
+				packets[i] = buffer.From(-offset)
+			}
+			s.processPackets(packets[:len(buffers)], offset)
 			for _, buffer := range buffers {
 				buffer.Release()
 			}

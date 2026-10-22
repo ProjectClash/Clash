@@ -11,13 +11,13 @@
 [![Telegram 频道](https://img.shields.io/badge/Telegram-%E9%A2%91%E9%81%93-26A5E4?logo=telegram&logoColor=white)](https://t.me/clashbyclash)
 [![Telegram 交流群](https://img.shields.io/badge/Telegram-%E4%BA%A4%E6%B5%81%E7%BE%A4-26A5E4?logo=telegram&logoColor=white)](https://t.me/+t__WNRvjUbk3M2Nl)
 
-Clash 是基于 **mihomo v1.19.32** 的代理内核，提供面向 Apple 应用的 Go 绑定与构建工具，可生成支持 iOS、macOS 和 tvOS 的 `Clash.xcframework`。
+Clash 是基于 **mihomo v1.19.33** 的代理内核，提供面向 Apple 应用的 Go 绑定与构建工具，可生成支持 iOS、macOS 和 tvOS 的 `Clash.xcframework`。
 
 使用官方应用请点击顶部的 App Store 下载链接。本仓库面向构建或集成内核的开发者。
 
 ## 上游历史与修改说明
 
-Clash 是基于 [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) 的独立衍生项目，上游基线为 [v1.19.32](https://github.com/MetaCubeX/mihomo/tree/v1.19.32)，提交为 `88dcbf7f1614a67c3b36b848ee3592dfa92ada36`。本项目与 MetaCubeX 无隶属关系。上游要求无隶属关系的下游项目不要在项目名称中使用“mihomo”。
+Clash 是基于 [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) 的独立衍生项目，上游基线为 [v1.19.33](https://github.com/MetaCubeX/mihomo/tree/v1.19.33)，提交为 `3f27ef39f8c96bbfbc8b0b9bb10f5c9ef60149d8`。本项目与 MetaCubeX 无隶属关系。上游要求无隶属关系的下游项目不要在项目名称中使用“mihomo”。
 
 仓库保留 mihomo 的原始提交及贡献者署名。首次源码发布将累计的 Clash 适配整理为一笔提交，衔接已有 README 历史与官方上游基线；这笔提交不重建适配工作的研发历史。后续修改按独立逻辑变更追加，上游稳定版本升级通过保留官方提交的合并接入。比较上游基线与具体 Clash 提交，可查看 Apple 绑定、SDK 构建工具及内核修改的完整差异。
 
@@ -35,7 +35,7 @@ Clash 是基于 [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) 的独�
 
 | 组件 | 当前基准 |
 | --- | --- |
-| 上游引擎 | mihomo **v1.19.32**，记录于 [`UPSTREAM_VERSION`](UPSTREAM_VERSION) |
+| 上游引擎 | mihomo **v1.19.33**，记录于 [`UPSTREAM_VERSION`](UPSTREAM_VERSION) |
 | 已发布的 Apple SDK | [`v1.19.32-clash.3`](https://github.com/ProjectClash/Clash/releases/tag/v1.19.32-clash.3) |
 | 客户端集成 | 客户端的 [`Dependencies.lock.json`](https://github.com/ProjectClash/Clash-Client/blob/main/Dependencies.lock.json) 固定 Kernel 和 Adapter 提交 |
 
@@ -56,7 +56,7 @@ Apple SDK 的 iOS 和 tvOS 切片使用 `no_easytier`，不包含 EasyTier；mac
 
 ## 构建 Apple SDK
 
-需要 macOS、完整的 Xcode，以及 iOS、macOS、tvOS SDK。绑定模块在 [`bind/clash/go.mod`](bind/clash/go.mod) 中声明 Go 1.26.0，并选择 Go 1.26.9 工具链；请允许 Go 获取该工具链，或自行安装。
+需要 macOS、完整的 Xcode，以及 iOS、macOS、tvOS SDK。绑定模块在 [`bind/clash/go.mod`](bind/clash/go.mod) 中声明 Go 1.26.0，并选择 Go 1.26.10 工具链；请允许 Go 获取该工具链，或自行安装。
 
 构建当前正式 SDK 时，完整克隆仓库及标签，切到发行版，再安装固定版本的 gomobile 工具：
 

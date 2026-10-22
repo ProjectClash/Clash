@@ -26,6 +26,7 @@ func TestOverrideForIOSForcesTunParams(t *testing.T) {
 					GSO:                   true,
 					GSOMaxSize:            65536,
 					DisableICMPForwarding: false,
+					DNSMode:               "hijak",
 					FileDescriptor:        42,
 				},
 			},
@@ -61,6 +62,9 @@ func TestOverrideForIOSForcesTunParams(t *testing.T) {
 	}
 	if !tun.DisableICMPForwarding {
 		t.Error("DisableICMPForwarding must be true")
+	}
+	if tun.DNSMode != "" {
+		t.Errorf("DNSMode = %q, want empty: the extension's network settings set the system DNS", tun.DNSMode)
 	}
 	if tun.FileDescriptor != 42 {
 		t.Errorf("override clobbered injected fd: %d", tun.FileDescriptor)

@@ -497,11 +497,11 @@ func (s *datagramSocketErrorState) rearmPending() {
 	}
 }
 
-func (s *datagramSocketErrorState) readMessage(message *SocketMessage, flags int) (bool, error) {
+func (s *datagramSocketErrorState) readMessage(message *SocketMessage) (bool, error) {
 	if s == nil {
 		return false, nil
 	}
-	size, ok, err := readSocketErrorMessage(&s.queue, message, flags)
+	size, ok, err := readSocketErrorMessage(&s.queue, message)
 	if ok && err == nil {
 		s.queuedBytes -= size
 		s.rearmPending()
@@ -579,6 +579,51 @@ func copyMessageBuffers(destination []byte, buffers [][]byte) int {
 	return written
 }
 
+func copyLinuxControlMessages(destination, control []byte) (int, bool) {
+	if len(destination) >= len(control) {
+		return copy(destination, control), false
+	}
+	written := 0
+	for len(control) != 0 {
+		remaining := len(destination) - written
+		if remaining < linuxControlHeaderSize {
+			return written, true
+		}
+		if len(control) < linuxControlHeaderSize {
+			copy(destination[written:], control[:remaining])
+			return len(destination), true
+		}
+		length64 := binary.LittleEndian.Uint64(control[:8])
+		if length64 < linuxControlHeaderSize || length64 > uint64(len(control)) {
+			copy(destination[written:], control[:remaining])
+			return len(destination), true
+		}
+		length := int(length64)
+		space := (length + linuxControlAlignment - 1) &^ (linuxControlAlignment - 1)
+		if space > len(control) {
+			space = len(control)
+		}
+		copyLength := space
+		if copyLength > remaining {
+			copyLength = remaining
+		}
+		copy(destination[written:written+copyLength], control[:copyLength])
+		if copyLength < length {
+			binary.LittleEndian.PutUint64(destination[written:written+8], uint64(copyLength))
+			return written + copyLength, true
+		}
+		written += copyLength
+		if copyLength < space {
+			return written, len(control) > space
+		}
+		control = control[space:]
+		if len(control) != 0 && written == len(destination) {
+			return written, true
+		}
+	}
+	return written, false
+}
+
 func gatherMessagePayload(buffers [][]byte, maximum int) ([]byte, error) {
 	size, err := messageBufferLength(buffers)
 	if err != nil {
@@ -598,7 +643,7 @@ func gatherMessagePayload(buffers [][]byte, maximum int) ([]byte, error) {
 	return payload, nil
 }
 
-func fillSocketErrorMessage(message *SocketMessage, queued queuedSocketError, returnLength bool) error {
+func fillSocketErrorMessage(message *SocketMessage, queued queuedSocketError) error {
 	if _, err := messageBufferLength(message.Buffers); err != nil {
 		return err
 	}
@@ -611,24 +656,21 @@ func fillSocketErrorMessage(message *SocketMessage, queued queuedSocketError, re
 	flags := MessageFlagErrorQueue
 	if copied < len(queued.payload) {
 		flags |= MessageFlagTruncated
-		if returnLength {
-			n = len(queued.payload)
-		}
 	}
-	oobn := copy(message.OOB, control)
-	if oobn < len(control) {
+	oobn, controlTruncated := copyLinuxControlMessages(message.OOB, control)
+	if controlTruncated {
 		flags |= MessageFlagControlTruncated
 	}
 	message.N, message.NN, message.Flags, message.Addr = n, oobn, flags, queued.err.Addr
 	return nil
 }
 
-func readSocketErrorMessage(queue *datagramQueue[queuedSocketError], message *SocketMessage, flags int) (size int, ok bool, err error) {
+func readSocketErrorMessage(queue *datagramQueue[queuedSocketError], message *SocketMessage) (size int, ok bool, err error) {
 	queued, ok := queue.peek()
 	if !ok {
 		return 0, false, nil
 	}
-	if err := fillSocketErrorMessage(message, queued, flags&MessageFlagTruncated != 0); err != nil {
+	if err := fillSocketErrorMessage(message, queued); err != nil {
 		return 0, true, err
 	}
 	consumed, popped := queue.pop()
@@ -1411,6 +1453,14 @@ func (t packetQueueTicket) generation() uint64 { return t.token >> packetQueueTi
 
 func (t packetQueueTicket) loopback() bool { return t.token&packetQueueTicketLoopback != 0 }
 
+func (t packetQueueTicket) queue(stack *Stack) *packetQueue {
+	queue := &stack.outbound
+	if t.loopback() {
+		queue = &stack.loopback.packetQueue
+	}
+	return queue
+}
+
 func (q *packetQueue) initFIFO(capacity int, epoch time.Time) {
 	q.initStorage(capacity, epoch)
 	q.packets = make(chan packetQueueEntry, capacity)
@@ -1447,14 +1497,7 @@ func (t packetQueueTicket) pendingIn(queue *packetQueue) bool {
 }
 
 func (t packetQueueTicket) pending(stack *Stack) bool {
-	if stack == nil {
-		return false
-	}
-	queue := &stack.outbound
-	if t.loopback() {
-		queue = &stack.loopback.packetQueue
-	}
-	return t.pendingIn(queue)
+	return t.pendingIn(t.queue(stack))
 }
 
 func (w *packetQueueDepartureWaiter) departedTime(epoch time.Time) (time.Time, bool) {
@@ -1477,10 +1520,7 @@ func (t packetQueueTicket) departureWaiter(stack *Stack, notify chan<- struct{})
 	if stack == nil {
 		return nil
 	}
-	queue := &stack.outbound
-	if t.loopback() {
-		queue = &stack.loopback.packetQueue
-	}
+	queue := t.queue(stack)
 	slot := t.slot()
 	if int(slot) >= len(queue.slots) || !t.pendingIn(queue) {
 		return nil
@@ -3230,7 +3270,6 @@ func (d *socketDeadline) setLocked(deadline time.Time) {
 	if d.timer != nil && !d.timer.Stop() {
 		<-d.done
 	}
-	d.timer = nil
 	closed := false
 	select {
 	case <-d.done:
@@ -3238,6 +3277,7 @@ func (d *socketDeadline) setLocked(deadline time.Time) {
 	default:
 	}
 	if deadline.IsZero() {
+		d.timer = nil
 		if closed {
 			d.done = make(chan struct{})
 		}
@@ -3246,11 +3286,17 @@ func (d *socketDeadline) setLocked(deadline time.Time) {
 	if duration := time.Until(deadline); duration > 0 {
 		if closed {
 			d.done = make(chan struct{})
+			d.timer = nil
 		}
-		done := d.done
-		d.timer = time.AfterFunc(duration, func() { close(done) })
+		if d.timer != nil {
+			d.timer.Reset(duration)
+		} else {
+			done := d.done
+			d.timer = time.AfterFunc(duration, func() { close(done) })
+		}
 		return
 	}
+	d.timer = nil
 	if !closed {
 		close(d.done)
 	}
@@ -3267,7 +3313,9 @@ func (d *socketDeadline) waitLocked() <-chan struct{} {
 
 func (d *socketDeadline) stopLocked() {
 	if d.timer != nil {
-		d.timer.Stop()
+		if !d.timer.Stop() {
+			<-d.done
+		}
 		d.timer = nil
 	}
 }

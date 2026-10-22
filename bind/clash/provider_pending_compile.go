@@ -230,15 +230,23 @@ func compilePendingRuleSet(home, requestKey string, entry *providerCacheEntry, v
 		seed, _ := json.Marshal(providerSeed{Payload: "indexed", SourceSHA256: entry.PendingSHA256, FetchedAt: entry.PendingCheckedAt, Count: index.Rules})
 		return string(seed), index.Bytes, nil
 	}
-	compilation := compileRuleProviderPayload(content, sourceBehavior, sourceFormat)
-	if compilation.Reason != "" || compilation.Behavior != product.Behavior {
-		return "", nil, fmt.Errorf("the content does not compile into the set the tunnel runs; publish the configuration")
+	artifact := content
+	if strings.EqualFold(strings.TrimSpace(sourceFormat), "mrs") {
+		if got := strings.ToLower(strings.TrimSpace(sourceBehavior)); got != product.Behavior {
+			return "", nil, fmt.Errorf("the set runs %s and the content is %s; publish the configuration", product.Behavior, got)
+		}
+	} else {
+		compilation := compileRuleProviderPayload(content, sourceBehavior, sourceFormat)
+		if compilation.Reason != "" || compilation.Behavior != product.Behavior {
+			return "", nil, fmt.Errorf("the content does not compile into the set the tunnel runs; publish the configuration")
+		}
+		artifact = compilation.artifact
 	}
 	behavior, err := ruleBehavior(product.Behavior)
 	if err != nil {
 		return "", nil, err
 	}
-	set, err := ruleprovider.ClashMappedFromMrs(compilation.artifact, behavior)
+	set, err := ruleprovider.ClashMappedFromMrs(artifact, behavior)
 	if err != nil {
 		return "", nil, err
 	}

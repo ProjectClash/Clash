@@ -20,6 +20,7 @@ var (
 	initMu       sync.Mutex
 	initialized  bool
 	disabled     bool
+	cachePath    string
 	fileMode     os.FileMode = 0o666
 	defaultCache *CacheFile
 
@@ -112,25 +113,42 @@ func DisablePersistentCache() error {
 	return nil
 }
 
+func SetPersistentCachePath(path string) error {
+	initMu.Lock()
+	defer initMu.Unlock()
+	if initialized {
+		if path == cachePath {
+			return nil
+		}
+		return errors.New("cachefile: cache already initialized")
+	}
+	cachePath = path
+	return nil
+}
+
 func initCache() {
 	initMu.Lock()
 	initialized = true
 	cacheDisabled := disabled
+	if cachePath == "" {
+		cachePath = C.Path.Cache()
+	}
+	path := cachePath
 	initMu.Unlock()
 	if cacheDisabled {
 		defaultCache = &CacheFile{}
 		return
 	}
 	options := bbolt.Options{Timeout: time.Second, NoStatistics: true}
-	db, err := bbolt.Open(C.Path.Cache(), fileMode, &options)
+	db, err := bbolt.Open(path, fileMode, &options)
 	switch err {
 	case bbolt.ErrInvalid, bbolt.ErrChecksum, bbolt.ErrVersionMismatch:
-		if err = os.Remove(C.Path.Cache()); err != nil {
+		if err = os.Remove(path); err != nil {
 			log.Warnln("[CacheFile] remove invalid cache file error: %s", err.Error())
 			break
 		}
 		log.Infoln("[CacheFile] remove invalid cache file and create new one")
-		db, err = bbolt.Open(C.Path.Cache(), fileMode, &options)
+		db, err = bbolt.Open(path, fileMode, &options)
 	}
 	if err != nil {
 		log.Warnln("[CacheFile] can't open cache file: %s", err.Error())

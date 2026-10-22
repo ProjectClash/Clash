@@ -55,7 +55,9 @@ func TestWireGuardFirstDialsBuildOneDevice(t *testing.T) {
 }
 
 func TestWireGuardClosedBeforeItsFirstDialBuildsNothing(t *testing.T) {
-	node, err := NewWireGuard(clashWireGuardOption())
+	option := clashWireGuardOption()
+	option.Server = "closed-node.invalid"
+	node, err := NewWireGuard(option)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,8 +66,8 @@ func TestWireGuardClosedBeforeItsFirstDialBuildsNothing(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if _, err := node.DialContext(ctx, clashTCPMetadata()); !errors.Is(err, errOutboundClosed) {
-		t.Fatalf("a dial after Close: %v, want errOutboundClosed", err)
+	if _, err := node.DialContext(ctx, clashTCPMetadata()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("a dial after Close: %v, want context.Canceled", err)
 	}
 	if builds := node.clashDeviceBuilds(); builds != 0 {
 		t.Fatalf("a closed node built %d devices", builds)
@@ -105,5 +107,32 @@ func TestWireGuardDialsRacingCloseLeaveNoDevice(t *testing.T) {
 	}
 	if _, goroutinesAfter := clashSettle(); goroutinesAfter > goroutinesBefore+2 {
 		t.Fatalf("goroutines %d before, %d after five closed nodes", goroutinesBefore, goroutinesAfter)
+	}
+}
+
+func TestAFailedRebuildAfterAnIdleReleaseIsNotKept(t *testing.T) {
+	option := clashWireGuardOption()
+	option.MTU = 20
+	option.IPStack.Mode = ipStackMips
+	node, err := NewWireGuard(option)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer node.Close()
+	if err := node.init0(context.Background()); err == nil {
+		t.Fatal("a stack mipstack refuses was built")
+	}
+	if node.initErr == nil {
+		t.Fatal("a node that never built did not keep its failure, as upstream's does")
+	}
+	node.initErr = nil
+	node.clashDevice.mu.Lock()
+	node.clashDevice.releases = 1
+	node.clashDevice.mu.Unlock()
+	if err := node.init0(context.Background()); err == nil {
+		t.Fatal("a stack mipstack refuses was built")
+	}
+	if node.initErr != nil {
+		t.Fatalf("a failed rebuild after a release was kept: %v", node.initErr)
 	}
 }

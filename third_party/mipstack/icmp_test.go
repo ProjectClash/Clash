@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"math"
 	"net"
 	"net/netip"
@@ -261,9 +262,372 @@ func TestICMPErrorCodeValidation(t *testing.T) {
 	}
 }
 
+func TestICMPv6ReceiveErrorClassification(t *testing.T) {
+	local, remote := netip.MustParseAddr("2001:db8::1"), netip.MustParseAddr("2001:db8::2")
+	quote := buildTestUDP(local, remote, 12000, 13000, []byte("quote"))
+	for _, messageType := range []byte{0, 2, 100, 127, 128, 200, 255} {
+		for _, code := range []byte{0, 1, 255} {
+			t.Run(fmt.Sprintf("type-%d/code-%d", messageType, code), func(t *testing.T) {
+				body := make([]byte, 4+len(quote))
+				binary.BigEndian.PutUint32(body[:4], 1280)
+				copy(body[4:], quote)
+				message := ICMPMessage{Source: remote, Destination: local, Type: messageType, Code: code, Body: body}
+				wantError := messageType < 128
+				if message.IsError() != wantError {
+					t.Fatalf("IsError = %t, want %t", message.IsError(), wantError)
+				}
+				networkError, err := message.ICMPError()
+				if !wantError {
+					if !errors.Is(err, syscall.EINVAL) {
+						t.Fatalf("informational ICMPError = %v", err)
+					}
+					return
+				}
+				if err != nil || networkError.Type != messageType || networkError.Code != code || !bytes.Equal(networkError.QuotedPacket, quote) {
+					t.Fatalf("ICMPError = %+v, %v", networkError, err)
+				}
+				wantMTU := uint32(0)
+				if messageType == ICMPv6TypePacketTooBig {
+					wantMTU = 1280
+				}
+				if networkError.MTU != wantMTU || networkError.Pointer != 0 || len(networkError.Extensions) != 0 {
+					t.Fatalf("type-specific fields = MTU:%d pointer:%d extensions:%x", networkError.MTU, networkError.Pointer, networkError.Extensions)
+				}
+				_, constructErr := networkError.ICMPMessage(local)
+				if messageType == ICMPv6TypePacketTooBig && code == 0 {
+					if constructErr != nil {
+						t.Fatal(constructErr)
+					}
+				} else if !errors.Is(constructErr, syscall.EINVAL) {
+					t.Fatalf("unsupported construction = %v, want EINVAL", constructErr)
+				}
+				message.Body = body[:4]
+				if !message.IsError() {
+					t.Fatal("error classification incorrectly depended on quote length")
+				}
+				if _, err = message.ICMPError(); !errors.Is(err, syscall.EINVAL) {
+					t.Fatalf("truncated quote = %v, want EINVAL", err)
+				}
+				message.Body = append(body[:4:4], buildTestUDP(netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("192.0.2.2"), 12000, 13000, nil)...)
+				if _, err = message.ICMPError(); !errors.Is(err, syscall.EINVAL) {
+					t.Fatalf("cross-family quote = %v, want EINVAL", err)
+				}
+			})
+		}
+	}
+}
+
+func TestICMPv6ReceiveErrorDatagramDelivery(t *testing.T) {
+	local, remote := netip.MustParseAddr("2001:db8::11"), netip.MustParseAddr("2001:db8::12")
+	for _, raw := range []bool{false, true} {
+		for _, receiveErrors := range []bool{false, true} {
+			for _, input := range []struct{ messageType, code byte }{{2, 0}, {2, 1}, {2, 255}, {100, 0}, {100, 255}, {127, 255}, {200, 0}} {
+				t.Run(fmt.Sprintf("raw-%t/RECVERR-%t/type-%d/code-%d", raw, receiveErrors, input.messageType, input.code), func(t *testing.T) {
+					stack, err := New(Config{LocalAddresses: []netip.Prefix{netip.PrefixFrom(local, 128)}, MTU: 1500})
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer stack.Close()
+					if err = stack.Start(); err != nil {
+						t.Fatal(err)
+					}
+					var connection net.Conn
+					var readError func() (*net.OpError, error)
+					var readBatch func([]SocketMessage, int) (int, error)
+					if raw {
+						connection, err = stack.DialIP(context.Background(), "ip6:99", local, remote)
+						if err == nil {
+							c := connection.(*IPConn)
+							err = c.SetReceiveErrors(receiveErrors)
+							readError, readBatch = c.ReadError, c.ReadBatch
+						}
+					} else {
+						connection, err = stack.DialUDP(context.Background(), "udp6", netip.AddrPortFrom(local, 0), netip.AddrPortFrom(remote, 13000))
+						if err == nil {
+							c := connection.(*UDPConn)
+							if err = c.SetPathMTUDiscovery(PathMTUDiscoveryDo); err == nil {
+								err = c.SetReceiveErrors(receiveErrors)
+							}
+							readError, readBatch = c.ReadError, c.ReadBatch
+						}
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer connection.Close()
+					if raw {
+						if err = connection.(*IPConn).SetPathMTUDiscovery(PathMTUDiscoveryDo); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if _, err = connection.Write([]byte("quoted datagram")); err != nil {
+						t.Fatal(err)
+					}
+					quote := readOutboundPacket(t, stack)
+					body := make([]byte, 4+len(quote))
+					binary.BigEndian.PutUint32(body[:4], 1280)
+					copy(body[4:], quote)
+					wire := mustTestWire((ICMPMessage{Source: remote, Destination: local, Type: input.messageType, Code: input.code, Body: body}).MarshalBinary())
+					packet := buildIPPacket(remote, local, ProtocolICMPv6, wire, 1, true)
+					packet[len(packet)-1] ^= 1
+					unrelatedBody := append([]byte(nil), body...)
+					unrelatedBody[4+39] ^= 1
+					unrelated := mustTestWire((ICMPMessage{Source: remote, Destination: local, Type: input.messageType, Code: input.code, Body: unrelatedBody}).MarshalBinary())
+					if err = writeTestPacket(stack, buildIPPacket(remote, local, ProtocolICMPv6, unrelated, 1, true)); err != nil {
+						t.Fatal(err)
+					}
+					if reported, readErr := readError(); reported != nil || !errors.Is(readErr, syscall.EAGAIN) {
+						t.Fatalf("unrelated quote delivered an error: %v, %v", reported, readErr)
+					}
+					if _, readErr := readBatch([]SocketMessage{{Buffers: [][]byte{make([]byte, 1)}}}, MessageFlagDontWait); !errors.Is(readErr, syscall.EAGAIN) {
+						t.Fatalf("unrelated quote became pending: %v", readErr)
+					}
+					if err = writeTestPacket(stack, packet); err != nil {
+						t.Fatal(err)
+					}
+					if reported, readErr := readError(); reported != nil || !errors.Is(readErr, syscall.EAGAIN) {
+						t.Fatalf("bad checksum delivered an error: %v, %v", reported, readErr)
+					}
+					packet[len(packet)-1] ^= 1
+					if err = writeTestPacket(stack, packet); err != nil {
+						t.Fatal(err)
+					}
+					isError := input.messageType < 128
+					wantPending := isError && (receiveErrors || input.messageType == ICMPv6TypePacketTooBig)
+					_, pending := readBatch([]SocketMessage{{Buffers: [][]byte{make([]byte, 1)}}}, MessageFlagDontWait)
+					if wantPending {
+						wantCause := syscall.EPROTO
+						if input.messageType == ICMPv6TypePacketTooBig {
+							wantCause = syscall.EMSGSIZE
+						}
+						if !errors.Is(pending, wantCause) {
+							t.Fatalf("pending error = %v, want %v", pending, wantCause)
+						}
+					} else if !errors.Is(pending, syscall.EAGAIN) {
+						t.Fatalf("soft or informational input became pending: %v", pending)
+					}
+					reported, readErr := readError()
+					if receiveErrors && isError {
+						var networkError ICMPError
+						if readErr != nil || !errors.As(reported, &networkError) || networkError.Type != input.messageType || networkError.Code != input.code || !bytes.Equal(networkError.QuotedPacket, quote) {
+							t.Fatalf("queued error = %v, %v", reported, readErr)
+						}
+					} else if reported != nil || !errors.Is(readErr, syscall.EAGAIN) {
+						t.Fatalf("unexpected queued error: %v, %v", reported, readErr)
+					}
+					wantMTU := 1500
+					if input.messageType == ICMPv6TypePacketTooBig {
+						wantMTU = 1280
+					}
+					if mtu := stack.mtuFor(remote); mtu != wantMTU {
+						t.Fatalf("PMTU = %d, want %d", mtu, wantMTU)
+					}
+					if input.messageType == ICMPv6TypePacketTooBig {
+						if _, err = connection.Write(make([]byte, 1400)); !errors.Is(err, syscall.EMSGSIZE) {
+							t.Fatalf("write above learned PMTU = %v, want EMSGSIZE", err)
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestICMPv6ReceiveErrorTCPDelivery(t *testing.T) {
+	local, remote := netip.MustParseAddr("2001:db8::21"), netip.MustParseAddr("2001:db8::22")
+	for _, input := range []struct{ messageType, code byte }{{2, 0}, {2, 1}, {2, 255}, {100, 0}, {100, 255}, {200, 0}} {
+		t.Run(fmt.Sprintf("type-%d/code-%d", input.messageType, input.code), func(t *testing.T) {
+			stack, err := New(Config{LocalAddresses: []netip.Prefix{netip.PrefixFrom(local, 128)}, MTU: 1500})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stack.Close()
+			if err = stack.Start(); err != nil {
+				t.Fatal(err)
+			}
+			key := tcpKey{local: netip.AddrPortFrom(local, 12000), remote: netip.AddrPortFrom(remote, 13000)}
+			connection := newTCPConn(stack, "tcp6", key, 1500, tcpSocketOptionSet{})
+			connection.publishICMPSequenceRange(100, 1100)
+			stack.mu.Lock()
+			stack.tcp[key] = connection
+			stack.mu.Unlock()
+			defer func() {
+				stack.mu.Lock()
+				delete(stack.tcp, key)
+				stack.mu.Unlock()
+			}()
+			for _, sequence := range []uint32{99, 100} {
+				quote := buildTestTCP(local, remote, key.local.Port(), key.remote.Port(), sequence, 0, TCPFlagACK, 65535, nil, []byte("quote"))
+				body := make([]byte, 4+len(quote))
+				binary.BigEndian.PutUint32(body[:4], 1280)
+				copy(body[4:], quote)
+				wire := mustTestWire((ICMPMessage{Source: remote, Destination: local, Type: input.messageType, Code: input.code, Body: body}).MarshalBinary())
+				if err = writeTestPacket(stack, buildIPPacket(remote, local, ProtocolICMPv6, wire, 1, true)); err != nil {
+					t.Fatal(err)
+				}
+				reported, queued := connection.takeNetworkError()
+				wantQueued := sequence == 100 && input.messageType < 128 && input.messageType != ICMPv6TypePacketTooBig
+				if queued != wantQueued {
+					t.Fatalf("sequence %d TCP notification = %v/%t, want queued:%t", sequence, reported, queued, wantQueued)
+				}
+				if queued {
+					var networkError ICMPError
+					if !errors.As(reported, &networkError) || !errors.Is(reported, syscall.EPROTO) || networkError.Type != input.messageType || networkError.Code != input.code || !bytes.Equal(networkError.QuotedPacket, quote) {
+						t.Fatalf("TCP notification = %v", reported)
+					}
+				}
+				wantMTU := 1500
+				if sequence == 100 && input.messageType == ICMPv6TypePacketTooBig {
+					wantMTU = 1280
+				}
+				if mtu := stack.mtuFor(remote); mtu != wantMTU {
+					t.Fatalf("sequence %d PMTU = %d, want %d", sequence, mtu, wantMTU)
+				}
+			}
+		})
+	}
+}
+
 func TestTruncatedICMPv6ErrorIsRejected(t *testing.T) {
 	if _, ok := parseICMPError(ipPacket{protocol: ProtocolICMPv6, payload: []byte{1}}); ok {
 		t.Fatal("truncated ICMPv6 error was accepted")
+	}
+}
+
+func TestICMPRecursiveSuppressionUsesInvokingFamily(t *testing.T) {
+	for _, family := range []struct {
+		name, local, remote string
+		protocol            byte
+	}{
+		{"IPv4", "192.0.2.194", "198.51.100.194", ProtocolICMPv4},
+		{"IPv6", "2001:db8::194", "2001:db8:1::194", ProtocolICMPv6},
+	} {
+		for _, foreign := range []bool{false, true} {
+			for _, informational := range []bool{false, true} {
+				for _, fragment := range []bool{false, true} {
+					t.Run(fmt.Sprintf("%s/foreign-%v/info-%v/fragment-%v", family.name, foreign, informational, fragment), func(t *testing.T) {
+						local, remote := netip.MustParseAddr(family.local), netip.MustParseAddr(family.remote)
+						stack, err := New(Config{LocalAddresses: []netip.Prefix{netip.PrefixFrom(local, local.BitLen())}})
+						if err != nil {
+							t.Fatal(err)
+						}
+						if err = stack.Start(); err != nil {
+							t.Fatal(err)
+						}
+						defer stack.Close()
+						protocol := family.protocol
+						if foreign {
+							if protocol == ProtocolICMPv4 {
+								protocol = ProtocolICMPv6
+							} else {
+								protocol = ProtocolICMPv4
+							}
+						}
+						messageType := byte(ICMPv4TypeDestinationUnreachable)
+						if protocol == ProtocolICMPv6 {
+							messageType = ICMPv6TypeDestinationUnreachable
+						}
+						if informational {
+							if protocol == ProtocolICMPv4 {
+								messageType = ICMPv4TypeEchoRequest
+							} else {
+								messageType = ICMPv6TypeEchoRequest
+							}
+						}
+						payload := make([]byte, 8)
+						payload[0] = messageType
+						packet := IPPacket{Source: remote, Destination: local, Protocol: int(protocol), HopLimit: 64, Payload: payload}
+						if !fragment && local.Is4() {
+							packet.IPv4Options = []byte{0x44, 1, 0, 0}
+						} else if !fragment {
+							packet.Protocol = int(IPv6ExtensionHeaderDestination)
+							packet.Payload = append([]byte{protocol, 0, 0x80, 0, 0, 0, 0, 0}, payload...)
+						}
+						wire, err := packet.MarshalRawBinary()
+						if err != nil {
+							t.Fatal(err)
+						}
+						if fragment {
+							payload = append(payload, make([]byte, 2000)...)
+							if local.Is4() {
+								wire = buildIPv4Fragments(remote, local, protocol, payload, 1280, 1)[0]
+							} else {
+								wire = buildIPv6FragmentsWithOptions(remote, local, protocol, payload, 1280, 1, ipPacketOptions{})[0]
+							}
+						}
+						if err = writeTestPacket(stack, wire); err != nil {
+							t.Fatal(err)
+						}
+						if fragment {
+							stack.expireFragments(time.Now().Add(fragmentIPv6Lifetime + fragmentIPv4Lifetime + time.Second))
+						}
+						if !foreign && !informational {
+							if entry, ok := waitTestPacketEntry(&stack.outbound, 25*time.Millisecond); ok {
+								t.Fatalf("recursive response: %x", consumeTestPacket(&stack.outbound, entry))
+							}
+							return
+						}
+						response := readOutboundPacket(t, stack)
+						parsed, ok := parseIPPacket(response, false)
+						if !ok || parsed.protocol != family.protocol || parsed.source != local || parsed.target != remote || len(parsed.payload) < 8 {
+							t.Fatalf("invalid response: %x", response)
+						}
+						wantType, wantCode, wantPointer := byte(ICMPv4TypeParameterProblem), byte(0), uint32(20)
+						pointer := uint32(parsed.payload[4])
+						validChecksum := checksum(parsed.payload) == 0
+						if local.Is6() {
+							wantType, wantCode, wantPointer = ICMPv6TypeParameterProblem, 2, 42
+							pointer = binary.BigEndian.Uint32(parsed.payload[4:8])
+							validChecksum = transportChecksum(local, remote, ProtocolICMPv6, parsed.payload) == 0
+						}
+						if fragment {
+							wantType, wantCode, wantPointer = ICMPv4TypeTimeExceeded, 1, 0
+							if local.Is6() {
+								wantType = ICMPv6TypeTimeExceeded
+							}
+						}
+						quoteSize := int(wire[0]&0x0f)*4 + 8
+						if local.Is6() {
+							quoteSize = len(wire)
+							if quoteSize > 1280-40-8 {
+								quoteSize = 1280 - 40 - 8
+							}
+						}
+						if parsed.payload[0] != wantType || parsed.payload[1] != wantCode || pointer != wantPointer || !validChecksum || !bytes.Equal(wire[:quoteSize], parsed.payload[8:]) {
+							t.Fatalf("wrong ICMP error: %x", response)
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
+func BenchmarkICMPRecursiveErrorSuppression(b *testing.B) {
+	for _, ipv6 := range []bool{false, true} {
+		for _, foreign := range []bool{false, true} {
+			b.Run(fmt.Sprintf("IPv6-%v/foreign-%v", ipv6, foreign), func(b *testing.B) {
+				source, target := netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("192.0.2.2")
+				protocol, messageType := byte(ProtocolICMPv4), byte(ICMPv4TypeDestinationUnreachable)
+				if ipv6 {
+					source, target = netip.MustParseAddr("2001:db8::1"), netip.MustParseAddr("2001:db8::2")
+					protocol, messageType = ProtocolICMPv6, ICMPv6TypeDestinationUnreachable
+				}
+				if foreign {
+					if ipv6 {
+						protocol, messageType = ProtocolICMPv4, ICMPv4TypeDestinationUnreachable
+					} else {
+						protocol, messageType = ProtocolICMPv6, ICMPv6TypeDestinationUnreachable
+					}
+				}
+				wire := buildIPPacket(source, target, protocol, []byte{messageType, 0, 0, 0, 0, 0, 0, 0}, 1, true)
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					_ = packetInvokesICMPError(wire)
+				}
+			})
+		}
 	}
 }
 
@@ -2368,7 +2732,209 @@ func TestConnectedDatagramICMPOrdinaryAndExtendedErrors(t *testing.T) {
 				if queueErr != nil || !errors.As(queued, &networkError) || networkError.Type != family.softType || !bytes.Equal(networkError.QuotedPacket, quoted) {
 					t.Fatalf("enabled soft extended error = %v, %v", queued, queueErr)
 				}
+				quoted = request()
+				inject(quoted, family.softType, 1)
+				count, readErr = readNonblocking()
+				queued, queueErr = connection.ReadError()
+				if family.local.Is4() {
+					if count != 0 || !errors.Is(readErr, syscall.EAGAIN) || queued != nil || !errors.Is(queueErr, syscall.EAGAIN) {
+						t.Fatalf("IPv4 reassembly timeout was reported: read %d, %v; queue %v, %v", count, readErr, queued, queueErr)
+					}
+				} else {
+					if count != 0 || !errors.As(readErr, &networkError) || networkError.Type != ICMPv6TypeTimeExceeded || networkError.Code != ICMPv6TimeExceededCodeFragmentReassembly {
+						t.Fatalf("IPv6 reassembly pending error = %d, %v", count, readErr)
+					}
+					if queueErr != nil || !errors.As(queued, &networkError) || networkError.Type != ICMPv6TypeTimeExceeded || networkError.Code != ICMPv6TimeExceededCodeFragmentReassembly || !bytes.Equal(networkError.QuotedPacket, quoted) {
+						t.Fatalf("IPv6 reassembly extended error = %v, %v", queued, queueErr)
+					}
+				}
 			})
+		}
+	}
+}
+
+func TestDatagramIPv4ReassemblyTimeout(t *testing.T) {
+	type errorSocket interface {
+		net.Conn
+		net.PacketConn
+		ReadBatch([]SocketMessage, int) (int, error)
+		ReadError() (*net.OpError, error)
+		SetReceiveErrors(bool) error
+		SetPathMTUDiscovery(PathMTUDiscovery) error
+	}
+	local, remote := netip.MustParseAddr("192.0.2.195"), netip.MustParseAddr("198.51.100.195")
+	for _, protocol := range []string{"UDP", "IP payload", "IP header-included"} {
+		for _, connected := range []bool{false, true} {
+			for _, receiveErrors := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/connected-%t/recverr-%t", protocol, connected, receiveErrors), func(t *testing.T) {
+					stack, err := New(Config{LocalAddresses: []netip.Prefix{netip.PrefixFrom(local, 32)}, MTU: 576})
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer stack.Close()
+					if err = stack.Start(); err != nil {
+						t.Fatal(err)
+					}
+					var opened any
+					var target net.Addr = ipNetAddr(remote)
+					inboundProtocol := 99
+					if protocol == "UDP" {
+						inboundProtocol = ProtocolUDP
+						address := netip.AddrPortFrom(remote, 5353)
+						target = net.UDPAddrFromAddrPort(address)
+						if connected {
+							opened, err = stack.DialUDP(context.Background(), "udp4", netip.AddrPort{}, address)
+						} else {
+							opened, err = stack.ListenUDP(context.Background(), "udp4", netip.AddrPortFrom(local, 0))
+						}
+					} else if connected {
+						opened, err = stack.DialIP(context.Background(), "ip4:99", local, remote)
+					} else {
+						opened, err = stack.ListenIP(context.Background(), "ip4:99", local)
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					connection := opened.(errorSocket)
+					defer connection.Close()
+					if err = connection.SetReceiveErrors(receiveErrors); err != nil {
+						t.Fatal(err)
+					}
+					if err = connection.SetPathMTUDiscovery(PathMTUDiscoveryDont); err != nil {
+						t.Fatal(err)
+					}
+					writePayload := bytes.Repeat([]byte{0x5a}, 700)
+					writePackets := [][]byte{writePayload}
+					if protocol == "IP header-included" {
+						if err = opened.(*IPConn).SetIPHeaderIncludedOnWrite(true); err != nil {
+							t.Fatal(err)
+						}
+						writePackets, err = (IPPacket{Source: local, Destination: remote, Protocol: 99, HopLimit: 64, Payload: writePayload}).MarshalFragments(576, 0)
+						if err != nil {
+							t.Fatal(err)
+						}
+					}
+					var n int
+					for _, packet := range writePackets {
+						if connected {
+							n, err = connection.Write(packet)
+						} else {
+							n, err = connection.WriteTo(packet, target)
+						}
+						if err != nil || n != len(packet) {
+							t.Fatalf("fragmented write = %d, %v", n, err)
+						}
+					}
+					first := readOutboundPacket(t, stack)
+					last := readOutboundPacket(t, stack)
+					if binary.BigEndian.Uint16(first[6:8]) != 0x2000 || binary.BigEndian.Uint16(last[6:8])&0x1fff == 0 {
+						t.Fatal("output did not contain an offset-zero first fragment and a following fragment")
+					}
+					quote := first[:int(first[0]&0x0f)*4+8]
+
+					observer, err := stack.DialIP(context.Background(), fmt.Sprintf("ip4:%d", inboundProtocol), local, remote)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer observer.Close()
+					if err = observer.(*IPConn).SetReceiveErrors(true); err != nil {
+						t.Fatal(err)
+					}
+					rawICMP, err := stack.ListenIP(context.Background(), "ip4:icmp", local)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer rawICMP.Close()
+					var observed []byte
+					forwarder, err := NewICMPForwarder(stack, ICMPForwarderOptions{}, func(request *ICMPForwarderRequest) {
+						observed = append(observed[:0], request.Message().Payload...)
+						if err := request.Drop(); err != nil {
+							t.Fatal(err)
+						}
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer forwarder.Close()
+					inject := func(code uint8) []byte {
+						t.Helper()
+						message, err := (ICMPError{Reporter: remote, Type: ICMPv4TypeTimeExceeded, Code: code, QuotedPacket: quote}).ICMPMessage(local)
+						if err != nil {
+							t.Fatal(err)
+						}
+						decoded, decodeErr := message.ICMPError()
+						if decodeErr != nil || decoded.Type != ICMPv4TypeTimeExceeded || decoded.Code != code || !bytes.Equal(decoded.QuotedPacket, quote) {
+							t.Fatalf("public codec rejected the legal timeout message: %+v, %v", decoded, decodeErr)
+						}
+						body := mustTestWire(message.MarshalBinary())
+						wire := mustTestWire((IPPacket{Source: remote, Destination: local, Protocol: ProtocolICMPv4, HopLimit: 64, Payload: body}).MarshalBinary())
+						if err = writeTestPacket(stack, wire); err != nil {
+							t.Fatal(err)
+						}
+						return body
+					}
+					response := []byte("queued response")
+					payload := response
+					if protocol == "UDP" {
+						port := uint16(connection.LocalAddr().(*net.UDPAddr).Port)
+						payload = mustTestWire((UDPDatagram{Source: netip.AddrPortFrom(remote, 5353), Destination: netip.AddrPortFrom(local, port), Payload: response}).MarshalBinary())
+					}
+					if err = writeTestPacket(stack, mustTestWire((IPPacket{Source: remote, Destination: local, Protocol: inboundProtocol, HopLimit: 64, Payload: payload}).MarshalBinary())); err != nil {
+						t.Fatal(err)
+					}
+					body := inject(ICMPv4TimeExceededCodeFragmentReassembly)
+					buffer := make([]byte, 1500)
+					messages := []SocketMessage{{Buffers: [][]byte{buffer}}}
+					if count, readErr := connection.ReadBatch(messages, MessageFlagDontWait); count != 1 || readErr != nil || !bytes.Equal(buffer[:messages[0].N], response) {
+						t.Fatalf("queued data after reassembly timeout = %d, %v, %x", count, readErr, buffer[:messages[0].N])
+					}
+					if queued, queueErr := connection.ReadError(); queued != nil || !errors.Is(queueErr, syscall.EAGAIN) {
+						t.Fatalf("reassembly timeout entered error queue: %v, %v", queued, queueErr)
+					}
+					if info := observer.(*IPConn).Info(); info.ICMPErrors != 0 || info.LastError != nil || info.ErrorQueueEntries != 0 {
+						t.Fatalf("raw observer retained reassembly timeout: %+v", info)
+					}
+					if !bytes.Equal(observed, body) || forwarder.Info().Requests != 1 {
+						t.Fatalf("forwarder did not observe the unconsumed message: %+v", forwarder.Info())
+					}
+					if count, readErr := rawICMP.(*IPConn).ReadBatch(messages, MessageFlagDontWait); count != 1 || readErr != nil || !bytes.Equal(buffer[:messages[0].N], body) {
+						t.Fatalf("raw ICMP reception = %d, %v, %x", count, readErr, buffer[:messages[0].N])
+					}
+					for _, packet := range writePackets {
+						if connected {
+							n, err = connection.Write(packet)
+						} else {
+							n, err = connection.WriteTo(packet, target)
+						}
+						if err != nil || n != len(packet) {
+							t.Fatalf("write after reassembly timeout = %d, %v", n, err)
+						}
+					}
+					_ = readOutboundPacket(t, stack)
+					_ = readOutboundPacket(t, stack)
+					inject(ICMPv4TimeExceededCodeTTLInTransit)
+					inject(ICMPv4TimeExceededCodeFragmentReassembly)
+					var networkError ICMPError
+					count, readErr := connection.ReadBatch(messages, MessageFlagDontWait)
+					if receiveErrors {
+						if count != 0 || !errors.As(readErr, &networkError) || networkError.Code != ICMPv4TimeExceededCodeTTLInTransit {
+							t.Fatalf("pending TTL error was replaced: %d, %v", count, readErr)
+						}
+						queued, queueErr := connection.ReadError()
+						if queueErr != nil || !errors.As(queued, &networkError) || networkError.Code != ICMPv4TimeExceededCodeTTLInTransit || !bytes.Equal(networkError.QuotedPacket, quote) {
+							t.Fatalf("correlated TTL error = %v, %v", queued, queueErr)
+						}
+					} else if count != 0 || !errors.Is(readErr, syscall.EAGAIN) {
+						t.Fatalf("default soft-error policy = %d, %v", count, readErr)
+					}
+					if queued, queueErr := connection.ReadError(); queued != nil || !errors.Is(queueErr, syscall.EAGAIN) {
+						t.Fatalf("unexpected additional error = %v, %v", queued, queueErr)
+					}
+					if info := observer.(*IPConn).Info(); info.ICMPErrors != 1 || info.ErrorQueueEntries != 1 || !errors.As(info.LastError, &networkError) || networkError.Code != ICMPv4TimeExceededCodeTTLInTransit {
+						t.Fatalf("raw observer did not retain only the correlated TTL error: %+v", info)
+					}
+				})
+			}
 		}
 	}
 }
@@ -2452,6 +3018,9 @@ func TestICMPErrorSyscallCause(t *testing.T) {
 		{"IPv6 prohibited", ICMPError{Reporter: v6, Type: ICMPv6TypeDestinationUnreachable, Code: ICMPv6DestinationUnreachableCodeAdministrativelyProhibited}, syscall.EACCES},
 		{"IPv6 port unreachable", ICMPError{Reporter: v6, Type: ICMPv6TypeDestinationUnreachable, Code: ICMPv6DestinationUnreachableCodePort}, syscall.ECONNREFUSED},
 		{"IPv6 packet too big", ICMPError{Reporter: v6, Type: ICMPv6TypePacketTooBig}, syscall.EMSGSIZE},
+		{"IPv6 packet too big nonzero code", ICMPError{Reporter: v6, Type: ICMPv6TypePacketTooBig, Code: 1}, syscall.EMSGSIZE},
+		{"IPv6 packet too big maximum code", ICMPError{Reporter: v6, Type: ICMPv6TypePacketTooBig, Code: 255}, syscall.EMSGSIZE},
+		{"IPv6 unknown error", ICMPError{Reporter: v6, Type: 100, Code: 255}, syscall.EPROTO},
 		{"IPv6 time exceeded", ICMPError{Reporter: v6, Type: ICMPv6TypeTimeExceeded}, syscall.EHOSTUNREACH},
 		{"IPv6 parameter problem", ICMPError{Reporter: v6, Type: ICMPv6TypeParameterProblem}, syscall.EPROTO},
 	} {
@@ -2474,7 +3043,8 @@ func TestICMPErrorSyscallCause(t *testing.T) {
 		{},
 		{Reporter: v4, Type: ICMPv4TypeEchoRequest},
 		{Reporter: v4, Type: ICMPv4TypeDestinationUnreachable, Code: 255},
-		{Reporter: v6, Type: ICMPv6TypePacketTooBig, Code: 1},
+		{Reporter: v6, Type: ICMPv6TypeEchoRequest},
+		{Reporter: v6, Type: 255},
 	} {
 		if cause := err.Unwrap(); cause != nil {
 			t.Fatalf("invalid ICMP error %+v has syscall cause %v", err, cause)
@@ -3566,6 +4136,57 @@ func BenchmarkICMPErrorLimiterReject(b *testing.B) {
 	}
 }
 
+func BenchmarkICMPTimeExceededInput(b *testing.B) {
+	for _, family := range []struct {
+		name, network string
+		local, remote netip.Addr
+		protocol      int
+		messageType   uint8
+	}{
+		{"IPv4", "udp4", netip.MustParseAddr("192.0.2.199"), netip.MustParseAddr("198.51.100.199"), ProtocolICMPv4, ICMPv4TypeTimeExceeded},
+		{"IPv6", "udp6", netip.MustParseAddr("2001:db8::199"), netip.MustParseAddr("2001:db8::200"), ProtocolICMPv6, ICMPv6TypeTimeExceeded},
+	} {
+		for _, code := range []uint8{0, 1} {
+			for _, batch := range []int{1, 8} {
+				b.Run(fmt.Sprintf("%s/code-%d/batch-%d", family.name, code, batch), func(b *testing.B) {
+					stack, err := New(Config{LocalAddresses: []netip.Prefix{netip.PrefixFrom(family.local, family.local.BitLen())}, MTU: 1500})
+					if err != nil {
+						b.Fatal(err)
+					}
+					defer stack.Close()
+					if err = stack.Start(); err != nil {
+						b.Fatal(err)
+					}
+					connection, err := stack.DialUDP(context.Background(), family.network, netip.AddrPort{}, netip.AddrPortFrom(family.remote, 5353))
+					if err != nil {
+						b.Fatal(err)
+					}
+					defer connection.Close()
+					payload := mustTestWire((UDPDatagram{Source: connection.LocalAddr().(*net.UDPAddr).AddrPort(), Destination: netip.AddrPortFrom(family.remote, 5353), Payload: []byte("quoted")}).MarshalBinary())
+					quote := mustTestWire((IPPacket{Source: family.local, Destination: family.remote, Protocol: ProtocolUDP, HopLimit: 64, Payload: payload}).MarshalBinary())
+					message, err := (ICMPError{Reporter: family.remote, Type: family.messageType, Code: code, QuotedPacket: quote}).ICMPMessage(family.local)
+					if err != nil {
+						b.Fatal(err)
+					}
+					wire := mustTestWire((IPPacket{Source: family.remote, Destination: family.local, Protocol: family.protocol, HopLimit: 64, Payload: mustTestWire(message.MarshalBinary())}).MarshalBinary())
+					packets := make([][]byte, batch)
+					for index := range packets {
+						packets[index] = wire
+					}
+					b.SetBytes(int64(len(wire) * batch))
+					b.ReportAllocs()
+					b.ResetTimer()
+					for iteration := 0; iteration < b.N; iteration++ {
+						if n, err := stack.Write(packets, 0); err != nil || n != batch {
+							b.Fatalf("ICMP input = %d, %v", n, err)
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
 func BenchmarkPublicICMPErrorCodec(b *testing.B) {
 	source := netip.MustParseAddr("192.0.2.1")
 	target := netip.MustParseAddr("198.51.100.1")
@@ -3649,4 +4270,83 @@ func BenchmarkPublicICMPErrorCodec(b *testing.B) {
 			b.Fatal(constructErr)
 		}
 	})
+}
+
+func TestICMPErrorPreservesQuotedMobilityProtocol(t *testing.T) {
+	local, remote := netip.MustParseAddr("2001:db8::249"), netip.MustParseAddr("2001:db8::250")
+	mobility := make([]byte, 16)
+	mobility[0], mobility[1], mobility[2] = ProtocolNoNextHeader, 1, 5
+	binary.BigEndian.PutUint16(mobility[4:6], transportChecksum(local, remote, IPv6ExtensionHeaderMobility, mobility))
+	for _, extension := range []byte{IPv6ExtensionHeaderMobility, IPv6ExtensionHeaderHopByHop, IPv6ExtensionHeaderDestination, IPv6ExtensionHeaderFragment} {
+		for _, quotedSize := range []int{0, 4, len(mobility)} {
+			t.Run(fmt.Sprintf("next-%d/quoted-%d", extension, quotedSize), func(t *testing.T) {
+				payload := append([]byte(nil), mobility...)
+				prefix := 0
+				if extension != IPv6ExtensionHeaderMobility {
+					payload = append(make([]byte, 8), payload...)
+					payload[0] = IPv6ExtensionHeaderMobility
+					prefix = 8
+				}
+				quote := buildIPPacket(local, remote, extension, payload, 0, false)
+				quote = quote[:40+prefix+quotedSize]
+				message := make([]byte, 8+len(quote))
+				message[0] = ICMPv6TypePacketTooBig
+				binary.BigEndian.PutUint32(message[4:8], 1280)
+				copy(message[8:], quote)
+				networkError, ok := parseICMPError(ipPacket{source: remote, target: local, protocol: ProtocolICMPv6, payload: message})
+				if !ok || networkError.QuotedProtocol != IPv6ExtensionHeaderMobility || networkError.QuotedSource != local || networkError.QuotedTarget != remote || !bytes.Equal(networkError.QuotedPayload, mobility[:quotedSize]) {
+					t.Fatalf("Mobility quote = %+v, parsed %t", networkError, ok)
+				}
+				if quotedSize != 0 && &networkError.QuotedPayload[0] != &networkError.QuotedPacket[40+prefix] {
+					t.Fatal("Mobility payload is not a suffix of the quoted packet")
+				}
+			})
+		}
+	}
+	stack, err := New(Config{LocalAddresses: []netip.Prefix{netip.PrefixFrom(local, 128)}, MTU: 1400})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stack.Close()
+	if err = stack.Start(); err != nil {
+		t.Fatal(err)
+	}
+	listened, err := stack.ListenIP(context.Background(), "ip6:135", local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection := listened.(*IPConn)
+	defer connection.Close()
+	other, err := stack.ListenIP(context.Background(), "ip6:59", local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	for _, socket := range []*IPConn{connection, other.(*IPConn)} {
+		if err = socket.SetReceiveErrors(true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err = other.WriteTo([]byte("unrelated"), ipNetAddr(remote)); err != nil {
+		t.Fatal(err)
+	}
+	_ = readOutboundPacket(t, stack)
+	if _, err = connection.WriteTo(mobility, ipNetAddr(remote)); err != nil {
+		t.Fatal(err)
+	}
+	original := readOutboundPacket(t, stack)
+	if err = writeTestPacket(stack, buildTestPacketTooBig(remote, local, original, 1280)); err != nil {
+		t.Fatal(err)
+	}
+	reported, readErr := connection.ReadError()
+	var networkError ICMPError
+	if readErr != nil || !errors.As(reported, &networkError) || networkError.QuotedProtocol != IPv6ExtensionHeaderMobility || !bytes.Equal(networkError.QuotedPayload, mobility) {
+		t.Fatalf("raw Mobility ICMP error = %#v, %v", reported, readErr)
+	}
+	if reported, readErr = other.(*IPConn).ReadError(); reported != nil || !errors.Is(readErr, syscall.EAGAIN) {
+		t.Fatalf("Mobility error was delivered to protocol 59: %#v, %v", reported, readErr)
+	}
+	if mtu, pathErr := stack.PathMTU(remote); pathErr != nil || mtu != 1280 {
+		t.Fatalf("Mobility PathMTU = %d, %v", mtu, pathErr)
+	}
 }

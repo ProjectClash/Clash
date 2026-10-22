@@ -369,7 +369,7 @@ const (
 	coalesceSuccess
 )
 
-func coalesceUDPPackets(pkt []byte, item *udpGROItem, bufs [][]byte, bufsOffset int, isV6 bool) coalesceResult {
+func coalesceUDPPackets(pkt []byte, item *udpGROItem, bufs [][]byte, bufsOffset int, isV6, skipChecksumValidation bool) coalesceResult {
 	pktHead := bufs[item.bufsIndex][bufsOffset:]
 	headersLen := item.iphLen + udphLen
 	coalescedLen := len(bufs[item.bufsIndex][bufsOffset:]) + len(pkt) - int(headersLen)
@@ -378,11 +378,13 @@ func coalesceUDPPackets(pkt []byte, item *udpGROItem, bufs [][]byte, bufsOffset 
 		return coalesceInsufficientCap
 	}
 	if item.numMerged == 0 {
-		if item.cSumKnownInvalid || !checksumValid(bufs[item.bufsIndex][bufsOffset:], item.iphLen, unix.IPPROTO_UDP, isV6) {
+		if item.cSumKnownInvalid || binary.BigEndian.Uint16(pktHead[item.iphLen+6:]) == 0 ||
+			(!skipChecksumValidation && !checksumValid(pktHead, item.iphLen, unix.IPPROTO_UDP, isV6)) {
 			return coalesceItemInvalidCSum
 		}
 	}
-	if !checksumValid(pkt, item.iphLen, unix.IPPROTO_UDP, isV6) {
+	if binary.BigEndian.Uint16(pkt[item.iphLen+6:]) == 0 ||
+		(!skipChecksumValidation && !checksumValid(pkt, item.iphLen, unix.IPPROTO_UDP, isV6)) {
 		return coalescePktInvalidCSum
 	}
 	extendBy := len(pkt) - int(headersLen)
@@ -394,7 +396,7 @@ func coalesceUDPPackets(pkt []byte, item *udpGROItem, bufs [][]byte, bufsOffset 
 	return coalesceSuccess
 }
 
-func coalesceTCPPackets(mode canCoalesce, pkt []byte, pktBuffsIndex int, gsoSize uint16, seq uint32, pshSet bool, item *tcpGROItem, bufs [][]byte, bufsOffset int, isV6 bool) coalesceResult {
+func coalesceTCPPackets(mode canCoalesce, pkt []byte, pktBuffsIndex int, gsoSize uint16, seq uint32, pshSet bool, item *tcpGROItem, bufs [][]byte, bufsOffset int, isV6, skipChecksumValidation bool) coalesceResult {
 	var pktHead []byte
 	headersLen := item.iphLen + item.tcphLen
 	coalescedLen := len(bufs[item.bufsIndex][bufsOffset:]) + len(pkt) - int(headersLen)
@@ -407,12 +409,12 @@ func coalesceTCPPackets(mode canCoalesce, pkt []byte, pktBuffsIndex int, gsoSize
 		if pshSet {
 			return coalescePSHEnding
 		}
-		if item.numMerged == 0 {
+		if !skipChecksumValidation && item.numMerged == 0 {
 			if !checksumValid(bufs[item.bufsIndex][bufsOffset:], item.iphLen, unix.IPPROTO_TCP, isV6) {
 				return coalesceItemInvalidCSum
 			}
 		}
-		if !checksumValid(pkt, item.iphLen, unix.IPPROTO_TCP, isV6) {
+		if !skipChecksumValidation && !checksumValid(pkt, item.iphLen, unix.IPPROTO_TCP, isV6) {
 			return coalescePktInvalidCSum
 		}
 		item.sentSeq = seq
@@ -426,12 +428,12 @@ func coalesceTCPPackets(mode canCoalesce, pkt []byte, pktBuffsIndex int, gsoSize
 		if cap(pktHead)-bufsOffset < coalescedLen {
 			return coalesceInsufficientCap
 		}
-		if item.numMerged == 0 {
+		if !skipChecksumValidation && item.numMerged == 0 {
 			if !checksumValid(bufs[item.bufsIndex][bufsOffset:], item.iphLen, unix.IPPROTO_TCP, isV6) {
 				return coalesceItemInvalidCSum
 			}
 		}
-		if !checksumValid(pkt, item.iphLen, unix.IPPROTO_TCP, isV6) {
+		if !skipChecksumValidation && !checksumValid(pkt, item.iphLen, unix.IPPROTO_TCP, isV6) {
 			return coalescePktInvalidCSum
 		}
 		if pshSet {
@@ -468,7 +470,7 @@ const (
 	groResultCoalesced
 )
 
-func tcpGRO(bufs [][]byte, offset int, pktI int, table *tcpGROTable, isV6 bool) groResult {
+func tcpGRO(bufs [][]byte, offset int, pktI int, table *tcpGROTable, isV6, skipChecksumValidation bool) groResult {
 	pkt := bufs[pktI][offset:]
 	if len(pkt) > maxUint16 {
 		return groResultNoop
@@ -531,7 +533,7 @@ func tcpGRO(bufs [][]byte, offset int, pktI int, table *tcpGROTable, isV6 bool) 
 		item := items[i]
 		can := tcpPacketsCanCoalesce(pkt, uint8(iphLen), uint8(tcphLen), seq, pshSet, gsoSize, item, bufs, offset)
 		if can != coalesceUnavailable {
-			result := coalesceTCPPackets(can, pkt, pktI, gsoSize, seq, pshSet, &item, bufs, offset, isV6)
+			result := coalesceTCPPackets(can, pkt, pktI, gsoSize, seq, pshSet, &item, bufs, offset, isV6, skipChecksumValidation)
 			switch result {
 			case coalesceSuccess:
 				table.updateAt(item, i)
@@ -713,7 +715,7 @@ const (
 	udphLen = 8
 )
 
-func udpGRO(bufs [][]byte, offset int, pktI int, table *udpGROTable, isV6 bool) groResult {
+func udpGRO(bufs [][]byte, offset int, pktI int, table *udpGROTable, isV6, skipChecksumValidation bool) groResult {
 	pkt := bufs[pktI][offset:]
 	if len(pkt) > maxUint16 {
 		return groResultNoop
@@ -763,7 +765,7 @@ func udpGRO(bufs [][]byte, offset int, pktI int, table *udpGROTable, isV6 bool) 
 	can := udpPacketsCanCoalesce(pkt, uint8(iphLen), gsoSize, item, bufs, offset)
 	var pktCSumKnownInvalid bool
 	if can == coalesceAppend {
-		result := coalesceUDPPackets(pkt, &item, bufs, offset, isV6)
+		result := coalesceUDPPackets(pkt, &item, bufs, offset, isV6, skipChecksumValidation)
 		switch result {
 		case coalesceSuccess:
 			table.updateAt(item, len(items)-1)
@@ -778,7 +780,7 @@ func udpGRO(bufs [][]byte, offset int, pktI int, table *udpGROTable, isV6 bool) 
 	return groResultTableInsert
 }
 
-func handleGRO(bufs [][]byte, offset int, tcpTable *tcpGROTable, udpTable *udpGROTable, gro groDisablementFlags, toWrite *[]int) error {
+func handleGRO(bufs [][]byte, offset int, tcpTable *tcpGROTable, udpTable *udpGROTable, gro groDisablementFlags, skipChecksumValidation bool, toWrite *[]int) error {
 	for i := range bufs {
 		if offset < virtioNetHdrLen || offset > len(bufs[i])-1 {
 			return errors.New("invalid offset")
@@ -786,13 +788,13 @@ func handleGRO(bufs [][]byte, offset int, tcpTable *tcpGROTable, udpTable *udpGR
 		var result groResult
 		switch packetIsGROCandidate(bufs[i][offset:], gro) {
 		case tcp4GROCandidate:
-			result = tcpGRO(bufs, offset, i, tcpTable, false)
+			result = tcpGRO(bufs, offset, i, tcpTable, false, skipChecksumValidation)
 		case tcp6GROCandidate:
-			result = tcpGRO(bufs, offset, i, tcpTable, true)
+			result = tcpGRO(bufs, offset, i, tcpTable, true, skipChecksumValidation)
 		case udp4GROCandidate:
-			result = udpGRO(bufs, offset, i, udpTable, false)
+			result = udpGRO(bufs, offset, i, udpTable, false, skipChecksumValidation)
 		case udp6GROCandidate:
-			result = udpGRO(bufs, offset, i, udpTable, true)
+			result = udpGRO(bufs, offset, i, udpTable, true, skipChecksumValidation)
 		}
 		switch result {
 		case groResultNoop:

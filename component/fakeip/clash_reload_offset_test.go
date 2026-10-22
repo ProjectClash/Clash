@@ -195,3 +195,43 @@ func TestAnOldPoolsPendingFlushDoesNotEraseTheNewRange(t *testing.T) {
 		t.Fatalf("a late query on the old pool erased %v: %q %v", ip, host, ok)
 	}
 }
+
+func TestAReloadOntoTheOtherStoreCarriesOnFromTheOldPosition(t *testing.T) {
+	const prefix = "198.18.0.1/16"
+	memoryPool := func(t *testing.T) *Pool {
+		p, err := New(Options{IPNet: netip.MustParsePrefix(prefix), Size: 1000})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	filePool := func(t *testing.T) *Pool {
+		cache := openTestCacheSync(t, false)
+		legacy := cache.FakeIpStore()
+		legacy.PutByIP(netip.MustParseAddr("198.18.0.4"), "legacy.example.com")
+		legacy.PutByHost("legacy.example.com", netip.MustParseAddr("198.18.0.4"))
+		p := persistentPool(t, cache, prefix)
+		if !p.flushPending {
+			t.Fatal("the file pool has nothing pending; the test proves nothing")
+		}
+		return p
+	}
+	cases := map[string]struct{ old, reloaded func(t *testing.T) *Pool }{
+		"on":  {memoryPool, filePool},
+		"off": {func(t *testing.T) *Pool { return persistentPool(t, openTestCacheSync(t, false), prefix) }, memoryPool},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			old := c.old(t)
+			given := map[netip.Addr]string{}
+			for _, host := range []string{"example.com", "ab.example.com", "cdn.example.net"} {
+				given[old.Lookup(host)] = host
+			}
+			reloaded := c.reloaded(t)
+			reloaded.CloneFrom(old)
+			if ip := reloaded.Lookup("o33249.ingest.sentry.io"); given[ip] != "" {
+				t.Fatalf("the reloaded pool gave %v, %s's on the old pool, to the new name", ip, given[ip])
+			}
+		})
+	}
+}

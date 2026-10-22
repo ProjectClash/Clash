@@ -49,7 +49,7 @@ var (
 	evicting = map[string]struct{}{}
 )
 
-func evictLongestIdle(network C.NetWork, minIdle time.Duration) bool {
+func evictLongestIdle(network C.NetWork, minIdle time.Duration, reserve func()) bool {
 	evictMu.Lock()
 	var victim statistic.Tracker
 	var victimIdle time.Duration
@@ -81,6 +81,7 @@ func evictLongestIdle(network C.NetWork, minIdle time.Duration) bool {
 	id := victim.ID()
 	evicting[id] = struct{}{}
 	evictMu.Unlock()
+	reserve()
 
 	info := victim.Info()
 	log.Infoln("[Memory] quota full: closing %s session %s --> %s, idle %s, to admit a new one",
@@ -100,11 +101,15 @@ func admitTCPConnection() bool {
 	if tryAcquireTCPConnectionSlot() {
 		return true
 	}
-	if evictLongestIdle(C.TCP, tcpEvictMinIdle) {
+	if evictLongestIdle(C.TCP, tcpEvictMinIdle, reserveTCPConnectionSlot) {
 		noteTCPConnectionEvicted()
-		if waitForSlot(tryAcquireTCPConnectionSlot) {
+		if waitForSlot(tryTakeReservedTCPConnectionSlot) {
 			return true
 		}
+		cancelTCPConnectionSlotReservation()
+	}
+	if tryAcquireTCPConnectionSlot() {
+		return true
 	}
 	noteTCPConnectionRejected()
 	return false
@@ -114,11 +119,15 @@ func acquireUDPSessionSlotEvicting() bool {
 	if tryAcquireUDPSessionSlot() {
 		return true
 	}
-	if evictLongestIdle(C.UDP, udpEvictMinIdle) {
+	if evictLongestIdle(C.UDP, udpEvictMinIdle, reserveUDPSessionSlot) {
 		noteUDPSessionEvicted()
-		if waitForSlot(tryAcquireUDPSessionSlot) {
+		if waitForSlot(tryTakeReservedUDPSessionSlot) {
 			return true
 		}
+		cancelUDPSessionSlotReservation()
+	}
+	if tryAcquireUDPSessionSlot() {
+		return true
 	}
 	noteUDPSessionRejected()
 	return false

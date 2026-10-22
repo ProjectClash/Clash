@@ -61,6 +61,7 @@ type CongestionRateSample struct {
 	smoothedRTT         time.Duration
 	ackTime             time.Time
 	ackStamp            tcpDeliveryTimestamp
+	lossEvidenceInvalid bool
 	lastSent            monotonicStamp
 	lastEnd, lastOrder  uint32
 	applicationLimited  bool
@@ -116,6 +117,10 @@ func (s *CongestionRateSample) Valid() bool { return s.valid }
 
 func (s *CongestionRateSample) PacketState() uint64 { return s.packetState }
 
+func (s *CongestionRateSample) PacketLossEvidenceValid() bool {
+	return !s.lossEvidenceInvalid
+}
+
 type tcpDeliveryRateEstimator struct {
 	delivered               uint64
 	deliveredStamp          tcpDeliveryTimestamp
@@ -150,6 +155,7 @@ func (s *tcpDeliveryRateSample) observe(segment sentTCPSegment) {
 	s.schedulerLimited = segment.state.has(sentTCPSegmentDeliverySchedulerLimited)
 	s.retransmitted = segment.isRetransmitted()
 	s.packetState = segment.congestionPacketState
+	s.lossEvidenceInvalid = segment.state.has(sentTCPSegmentSACKed)
 }
 
 func (d *tcpDeliveryRateEstimator) finishRateSample(sample *tcpDeliveryRateSample, acknowledged uint32, priorInFlight, inFlight uint32, now time.Time, nowStamp monotonicStamp, minimumRTT, smoothedRTT, sampleRTT time.Duration) {

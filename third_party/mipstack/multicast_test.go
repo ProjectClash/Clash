@@ -780,6 +780,16 @@ func TestASMMulticastIPv4AndIPv6(t *testing.T) {
 			}
 			readMulticastTestUDP(t, packet, "multicast-in")
 
+			if _, err = packet.WriteToUDPAddrPort([]byte("multicast-default"), netip.AddrPortFrom(test.group, test.port)); err != nil {
+				t.Fatal(err)
+			}
+			defaultOutbound := nextMulticastTestPacket(t, stack, func(candidate ipPacket) bool {
+				return candidate.protocol == ProtocolUDP && candidate.target == test.group
+			})
+			if defaultOutbound.hopLimit != 1 {
+				t.Fatalf("multicast default hop limit = %d, want 1", defaultOutbound.hopLimit)
+			}
+
 			if err = packet.SetMulticastLoopback(true); err != nil {
 				t.Fatal(err)
 			}
@@ -820,6 +830,42 @@ func TestASMMulticastIPv4AndIPv6(t *testing.T) {
 				if valid && candidate.protocol == ProtocolUDP && candidate.target == test.group {
 					t.Fatal("zero-hop multicast escaped to the link")
 				}
+			}
+		})
+	}
+}
+
+func TestIPConnMulticastDefaultHopLimit(t *testing.T) {
+	local4 := netip.MustParseAddr("192.0.2.34")
+	local6 := netip.MustParseAddr("2001:db8::34")
+	stack := newMulticastTestStack(t, []netip.Prefix{
+		netip.MustParsePrefix("192.0.2.34/24"),
+		netip.MustParsePrefix("2001:db8::34/64"),
+	}, 1400)
+	for _, test := range []struct {
+		name    string
+		network string
+		local   netip.Addr
+		group   netip.Addr
+	}{
+		{name: "ipv4", network: "ip4:99", local: local4, group: netip.MustParseAddr("239.1.2.34")},
+		{name: "ipv6", network: "ip6:99", local: local6, group: netip.MustParseAddr("ff05::1234")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			connectionNet, err := stack.ListenIP(context.Background(), test.network, netip.Addr{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			connection := connectionNet.(*IPConn)
+			defer connection.Close()
+			if n, err := connection.WriteToIP([]byte("raw-multicast-default"), ipNetAddr(test.group)); err != nil || n != len("raw-multicast-default") {
+				t.Fatalf("raw multicast write = %d, %v", n, err)
+			}
+			outbound := nextMulticastTestPacket(t, stack, func(candidate ipPacket) bool {
+				return candidate.protocol == 99 && candidate.target == test.group
+			})
+			if outbound.source != test.local || outbound.hopLimit != 1 || string(outbound.payload) != "raw-multicast-default" {
+				t.Fatalf("raw multicast default = source %s hop %d payload %q, want %s/1/raw-multicast-default", outbound.source, outbound.hopLimit, outbound.payload, test.local)
 			}
 		})
 	}
@@ -1834,6 +1880,40 @@ func TestMulticastSocketOptionAndMembershipState(t *testing.T) {
 	}
 	if err = connection.JoinGroup(group); !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("group join after close = %v, want net.ErrClosed", err)
+	}
+}
+
+func TestSocketHopLimitDefaultsSeparateUnicastAndMulticast(t *testing.T) {
+	local := netip.MustParseAddr("192.0.2.188")
+	group := netip.MustParseAddr("239.88.0.188")
+	remote := netip.MustParseAddr("192.0.2.189")
+	stack := newMulticastTestStack(t, []netip.Prefix{netip.PrefixFrom(local, 24)}, 1400)
+	listener := ListenConfig{Options: []SocketOption{
+		SocketOptions.HopLimit(37), SocketOptions.MulticastHopLimit(5), SocketOptions.MulticastLoopback(false),
+	}}
+	connection, err := listener.ListenUDP(context.Background(), stack, "udp4", netip.AddrPortFrom(netip.IPv4Unspecified(), 48900))
+	if err != nil {
+		t.Fatal(err)
+	}
+	udp := multicastTestUDP(t, connection)
+	defer udp.Close()
+	if _, err = udp.WriteToUDPAddrPort([]byte("multicast"), netip.AddrPortFrom(group, 48901)); err != nil {
+		t.Fatal(err)
+	}
+	multicast := nextMulticastTestPacket(t, stack, func(packet ipPacket) bool {
+		return packet.protocol == ProtocolUDP && packet.target == group
+	})
+	if multicast.hopLimit != 5 {
+		t.Fatalf("multicast hop limit = %d, want independent default 5", multicast.hopLimit)
+	}
+	if _, err = udp.WriteToUDPAddrPort([]byte("unicast"), netip.AddrPortFrom(remote, 48901)); err != nil {
+		t.Fatal(err)
+	}
+	unicast := nextMulticastTestPacket(t, stack, func(packet ipPacket) bool {
+		return packet.protocol == ProtocolUDP && packet.target == remote
+	})
+	if unicast.hopLimit != 37 {
+		t.Fatalf("unicast hop limit = %d, want socket default 37", unicast.hopLimit)
 	}
 }
 

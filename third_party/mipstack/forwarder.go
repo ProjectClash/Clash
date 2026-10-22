@@ -844,7 +844,7 @@ func (f *TCPForwarder) admitSegment(segment tcpSegment, key tcpKey) (handled, ad
 		f.mu.Unlock()
 		return true, true
 	}
-	if len(f.requests) >= f.maxInFlight {
+	if len(f.requests) >= f.maxInFlight || !f.stack.network.Load().acceptsInboundDestination(key.local.Addr()) {
 		f.dropped.Add(1)
 		f.mu.Unlock()
 		f.stack.stats.inboundDroppedPackets.Add(1)

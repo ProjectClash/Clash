@@ -221,7 +221,7 @@ func (m ICMPMessage) IsError() bool {
 	if !valid {
 		return false
 	}
-	return validICMPErrorCode(protocol, m.Type, m.Code)
+	return isICMPError(protocol, m.Type, m.Code)
 }
 
 func (m ICMPMessage) ICMPError() (ICMPError, error) {
@@ -785,7 +785,7 @@ func (e ICMPError) Unwrap() error {
 	} else if !e.Reporter.Is6() {
 		return nil
 	}
-	if !validICMPErrorCode(protocol, e.Type, e.Code) {
+	if !isICMPError(protocol, e.Type, e.Code) {
 		return nil
 	}
 	switch linuxICMPErrno(e) {
@@ -915,6 +915,10 @@ func (s *Stack) handleMulticastICMPv6(packet ipPacket) error {
 }
 
 func (s *Stack) deliverICMPError(remoteError ICMPError) bool {
+	if remoteError.Type == ICMPv4TypeTimeExceeded &&
+		remoteError.Code == ICMPv4TimeExceededCodeFragmentReassembly && remoteError.Reporter.Is4() {
+		return false
+	}
 	accepted := false
 	switch remoteError.QuotedProtocol {
 	case ProtocolUDP:
@@ -1068,20 +1072,21 @@ func (s *Stack) sendFragmentReassemblyTimeout(entry *ipPacketReassemblyEntry) er
 }
 
 func packetInvokesICMPError(packet []byte) bool {
-	_, _, protocol, payload, ok := quotedIPPayload(packet)
+	source, _, protocol, payload, ok := quotedIPPayload(packet)
 	if !ok || len(payload) == 0 {
 		return false
 	}
-	if protocol == ProtocolICMPv6 {
-		return payload[0] < 128
-	}
-	if protocol == ProtocolICMPv4 {
+	if source.Is4() {
+		if protocol != ProtocolICMPv4 {
+			return false
+		}
 		switch payload[0] {
 		case ICMPv4TypeDestinationUnreachable, 4, 5, ICMPv4TypeTimeExceeded, ICMPv4TypeParameterProblem:
 			return true
 		}
+		return false
 	}
-	return false
+	return protocol == ProtocolICMPv6 && payload[0] < 128
 }
 
 func parseICMPError(packet ipPacket) (ICMPError, bool) {
@@ -1093,7 +1098,7 @@ func parseICMPError(packet ipPacket) (ICMPError, bool) {
 }
 
 func parseICMPErrorFields(reporter netip.Addr, protocol, messageType, code byte, body []byte) (ICMPError, bool) {
-	if len(body) < 4 || !validICMPErrorCode(protocol, messageType, code) {
+	if len(body) < 4 || !isICMPError(protocol, messageType, code) {
 		return ICMPError{}, false
 	}
 	quote := body[4:]
@@ -1182,6 +1187,19 @@ func cloneICMPError(networkError ICMPError) ICMPError {
 	return networkError
 }
 
+func isICMPError(protocol, messageType, code byte) bool {
+	if protocol == ProtocolICMPv6 {
+		switch messageType {
+		case ICMPv6TypePacketTooBig:
+			return true
+		case ICMPv6TypeDestinationUnreachable, ICMPv6TypeTimeExceeded, ICMPv6TypeParameterProblem:
+		default:
+			return messageType < 128
+		}
+	}
+	return validICMPErrorCode(protocol, messageType, code)
+}
+
 func validICMPErrorCode(protocol, messageType, code byte) bool {
 	switch protocol {
 	case ProtocolICMPv4:
@@ -1253,8 +1271,7 @@ func quotedIPPayload(packet []byte) (netip.Addr, netip.Addr, byte, []byte, bool)
 			}
 			switch next {
 			case IPv6ExtensionHeaderHopByHop, IPv6ExtensionHeaderRouting,
-				IPv6ExtensionHeaderDestination, IPv6ExtensionHeaderAuthentication,
-				IPv6ExtensionHeaderMobility:
+				IPv6ExtensionHeaderDestination, IPv6ExtensionHeaderAuthentication:
 				length, valid := ipv6ExtensionHeaderLength(next, payload[offset:])
 				if !valid {
 					return netip.Addr{}, netip.Addr{}, 0, nil, false

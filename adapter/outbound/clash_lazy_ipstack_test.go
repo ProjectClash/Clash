@@ -1,6 +1,7 @@
 package outbound
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/netip"
@@ -120,9 +121,7 @@ func TestStackRefusalsStayParseErrors(t *testing.T) {
 				if tc.mtu == 0 {
 					wireGuardMTU = 1408
 				}
-				clashRequireParseOutcome(t, "wireguard", "create WireGuard stack: ", clashStackError(t, mode, prefixes, wireGuardMTU), func() (io.Closer, error) {
-					return NewWireGuard(wireGuard)
-				})
+				clashRequireFirstDialOutcome(t, "create WireGuard stack: ", clashStackError(t, mode, prefixes, wireGuardMTU), wireGuard)
 
 				masque := masqueOption
 				masque.Ip, masque.Ipv6, masque.MTU, masque.IPStack.Mode = tc.ip, tc.ipv6, tc.mtu, mode
@@ -134,6 +133,28 @@ func TestStackRefusalsStayParseErrors(t *testing.T) {
 					return NewMasque(masque)
 				})
 			})
+		}
+	}
+}
+
+func clashRequireFirstDialOutcome(t *testing.T, prefix string, stackError string, option WireGuardOption) {
+	t.Helper()
+	node, err := NewWireGuard(option)
+	if err != nil {
+		t.Errorf("wireguard: parse refused settings upstream parses: %v", err)
+		return
+	}
+	defer node.Close()
+	for attempt := 1; attempt <= 2; attempt++ {
+		err = node.init0(context.Background())
+		if stackError == "" {
+			if err != nil {
+				t.Errorf("wireguard: the stack builds these settings, and dial %d failed: %v", attempt, err)
+			}
+			return
+		}
+		if want := prefix + stackError; err == nil || err.Error() != want {
+			t.Errorf("wireguard: dial %d answered %v, upstream %q", attempt, err, want)
 		}
 	}
 }

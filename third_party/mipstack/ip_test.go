@@ -568,6 +568,59 @@ func TestIPConnWriteMsgSourceAndHeaderOptions(t *testing.T) {
 	if err = connection.(*IPConn).SetWriteBuffer(0); !errors.Is(err, syscall.EINVAL) {
 		t.Fatalf("SetWriteBuffer(0) = %v, want EINVAL", err)
 	}
+	specificStack, err := New(Config{LocalAddresses: []netip.Prefix{netip.PrefixFrom(first, 32), netip.PrefixFrom(second, 32)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = specificStack.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer specificStack.Close()
+	specificNet, err := specificStack.ListenIP(context.Background(), "ip4:99", first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	specific := specificNet.(*IPConn)
+	defer specific.Close()
+	specificControl, err := (&IPv4ControlMessage{Src: second}).Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = specific.WriteMsgIP([]byte("bound-source"), specificControl, ipNetAddr(remote)); err != nil {
+		t.Fatalf("specific-bound IP packet-info source = %v", err)
+	}
+	packet, ok = parseIPPacket(readOutboundPacket(t, specificStack), false)
+	if !ok || packet.source != second || string(packet.payload) != "bound-source" {
+		t.Fatalf("specific-bound IP packet-info source = %s payload %q, want %s/bound-source", packet.source, packet.payload, second)
+	}
+	first6 := netip.MustParseAddr("2001:db8::112")
+	second6 := netip.MustParseAddr("2001:db8::113")
+	remote6 := netip.MustParseAddr("2001:db8:1::112")
+	specificV6Stack, err := New(Config{LocalAddresses: []netip.Prefix{netip.PrefixFrom(first6, 128), netip.PrefixFrom(second6, 128)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = specificV6Stack.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer specificV6Stack.Close()
+	specificV6Net, err := specificV6Stack.ListenIP(context.Background(), "ip6:99", first6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	specificV6 := specificV6Net.(*IPConn)
+	defer specificV6.Close()
+	specificV6Control, err := (&IPv6ControlMessage{Src: second6}).Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = specificV6.WriteMsgIP([]byte("bound-source-v6"), specificV6Control, ipNetAddr(remote6)); err != nil {
+		t.Fatalf("specific-bound IPv6 IP packet-info source = %v", err)
+	}
+	packet, ok = parseIPPacket(readOutboundPacket(t, specificV6Stack), false)
+	if !ok || packet.source != second6 || string(packet.payload) != "bound-source-v6" {
+		t.Fatalf("specific-bound IPv6 IP packet-info source = %s payload %q, want %s/bound-source-v6", packet.source, packet.payload, second6)
+	}
 }
 
 func TestIPConnTypedWritesAndDeadlines(t *testing.T) {
@@ -629,11 +682,11 @@ func TestIPConnTypedWritesAndDeadlines(t *testing.T) {
 	if _, err = connection.(*IPConn).WriteToIP([]byte("late"), ipNetAddr(remote)); !errors.Is(err, os.ErrDeadlineExceeded) {
 		t.Fatalf("expired WriteToIP = %v, want deadline", err)
 	}
-	if _, _, err = connection.(*IPConn).WriteMsgIP([]byte("late"), []byte{1}, ipNetAddr(remote)); !errors.Is(err, os.ErrDeadlineExceeded) {
+	if _, _, err = connection.(*IPConn).WriteMsgIP([]byte("late"), make([]byte, linuxControlHeaderSize), ipNetAddr(remote)); !errors.Is(err, os.ErrDeadlineExceeded) {
 		t.Fatalf("expired WriteMsgIP with invalid control = %v, want deadline", err)
 	}
 	wrongFamily := &net.IPAddr{IP: net.ParseIP("2001:db8::123")}
-	if _, _, err = connection.(*IPConn).WriteMsgIP([]byte("wrong-family"), []byte{1}, wrongFamily); err == nil {
+	if _, _, err = connection.(*IPConn).WriteMsgIP([]byte("wrong-family"), make([]byte, linuxControlHeaderSize), wrongFamily); err == nil {
 		t.Fatal("WriteMsgIP accepted an IPv6 destination on an IPv4 socket")
 	} else {
 		var addressError *net.AddrError
@@ -1859,7 +1912,7 @@ func TestIPBatchReadAndWrite(t *testing.T) {
 	if !bytes.Equal(messages[0].OOB[20:24], secondLocal.AsSlice()) || !bytes.Equal(messages[0].OOB[24:28], secondLocal.AsSlice()) {
 		t.Fatalf("first IP batch IPv4 packet-info fields = %x/%x, want %s", messages[0].OOB[20:24], messages[0].OOB[24:28], secondLocal)
 	}
-	if string(second) != "se" || messages[1].Flags != MessageFlagTruncated|MessageFlagControlTruncated {
+	if string(second) != "se" || messages[1].NN != 0 || messages[1].Flags != MessageFlagTruncated|MessageFlagControlTruncated {
 		t.Fatalf("second IP batch message = %+v payload %q", messages[1], second)
 	}
 	if messages[2].N != 91 || messages[2].NN != 92 || messages[2].Flags != 93 || messages[2].Addr == nil {
@@ -1952,6 +2005,55 @@ func TestIPBatchReadAndWrite(t *testing.T) {
 	connectedMessage[0].Addr = ipNetAddr(remote)
 	if n, err = connected.WriteBatch(connectedMessage, 0); n != 0 || !errors.Is(err, net.ErrWriteToConnected) {
 		t.Fatalf("addressed connected IP WriteBatch = %d, %v", n, err)
+	}
+}
+
+func TestIPBatchPreservesPendingErrorAfterPrefix(t *testing.T) {
+	local := netip.MustParseAddr("192.0.2.240")
+	remote := netip.MustParseAddr("198.51.100.240")
+	stack, err := New(Config{LocalAddresses: []netip.Prefix{netip.PrefixFrom(local, 32)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = stack.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer stack.Close()
+	netConnection, err := stack.DialIP(context.Background(), "ip4:99", netip.Addr{}, remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection := netConnection.(*IPConn)
+	defer connection.Close()
+	for index, payload := range [][]byte{[]byte("prefix"), []byte("suffix")} {
+		if err = writeTestPacket(stack, buildIPPacket(remote, local, 99, payload, uint16(index+1), true)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var network *networkState
+	first := SocketMessage{Buffers: [][]byte{make([]byte, 16)}}
+	if err = connection.readBatchMessage(&first, 0, true, true, &network); err != nil || first.N != len("prefix") {
+		t.Fatalf("prefix IP batch message = %+v, %v", first, err)
+	}
+	connection.deliverError(remote, ICMPError{Reporter: remote, Type: ICMPv4TypeDestinationUnreachable, Code: ICMPv4DestinationUnreachableCodeProtocol})
+	connection.mu.Lock()
+	pending := connection.errorState.pending
+	connection.mu.Unlock()
+	if pending == nil {
+		t.Fatal("IP batch pending error was not queued")
+	}
+	second := SocketMessage{Buffers: [][]byte{make([]byte, 16)}, N: 91, NN: 92, Flags: 93}
+	readErr := connection.readBatchMessage(&second, MessageFlagDontWait, false, false, &network)
+	var networkError ICMPError
+	if readErr != pending || !errors.As(readErr, &networkError) || second.N != 91 || second.NN != 92 || second.Flags != 93 {
+		t.Fatalf("pending IP error after batch prefix = %+v, %v", second, readErr)
+	}
+	if count, readErr := connection.ReadBatch([]SocketMessage{{Buffers: [][]byte{make([]byte, 1)}}}, MessageFlagDontWait); count != 0 || !errors.As(readErr, &networkError) {
+		t.Fatalf("pending IP error was not deferred = %d, %v", count, readErr)
+	}
+	tail := make([]byte, 16)
+	if count, readErr := connection.ReadBatch([]SocketMessage{{Buffers: [][]byte{tail}}}, MessageFlagDontWait); count != 1 || readErr != nil || string(tail[:len("suffix")]) != "suffix" {
+		t.Fatalf("IP suffix after deferred error = %d, %v, %q", count, readErr, tail)
 	}
 }
 

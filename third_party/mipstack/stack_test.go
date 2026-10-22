@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -388,7 +389,7 @@ func TestSocketMessagePeekTruncationAndErrorQueue(t *testing.T) {
 	shortControl := make([]byte, 8)
 	short := []SocketMessage{{Buffers: [][]byte{shortPayload}, OOB: shortControl}}
 	if count, readErr := connection.ReadBatch(short, MessageFlagErrorQueue|MessageFlagPeek); readErr != nil || count != 1 || short[0].N != len(shortPayload) ||
-		short[0].NN != len(shortControl) || short[0].Flags != MessageFlagErrorQueue|MessageFlagTruncated|MessageFlagControlTruncated || !bytes.Equal(shortPayload, quotedPayload[:len(shortPayload)]) {
+		short[0].NN != 0 || short[0].Flags != MessageFlagErrorQueue|MessageFlagTruncated|MessageFlagControlTruncated || !bytes.Equal(shortPayload, quotedPayload[:len(shortPayload)]) {
 		t.Fatalf("short peek error-queue read = %d message %+v payload %q, %v", count, short[0], shortPayload, readErr)
 	}
 	if count, readErr := connection.ReadBatch([]SocketMessage{{Buffers: [][]byte{make([]byte, 1)}}}, MessageFlagErrorQueue); count != 0 || !errors.Is(readErr, syscall.EAGAIN) {
@@ -399,7 +400,7 @@ func TestSocketMessagePeekTruncationAndErrorQueue(t *testing.T) {
 	fullPayload := make([]byte, 2)
 	fullControl := make([]byte, 128)
 	full := []SocketMessage{{Buffers: [][]byte{fullPayload}, OOB: fullControl}}
-	if count, readErr := connection.ReadBatch(full, MessageFlagErrorQueue|MessageFlagTruncated); readErr != nil || count != 1 || full[0].N != len(quotedPayload) ||
+	if count, readErr := connection.ReadBatch(full, MessageFlagErrorQueue|MessageFlagTruncated); readErr != nil || count != 1 || full[0].N != len(fullPayload) ||
 		full[0].Flags != MessageFlagErrorQueue|MessageFlagTruncated || full[0].Addr.(*net.UDPAddr).AddrPort() != remote {
 		t.Fatalf("full-length error-queue read = %d message %+v, %v", count, full[0], readErr)
 	}
@@ -1231,6 +1232,127 @@ func TestSocketDeadlineRefreshAndClear(t *testing.T) {
 	}
 }
 
+func TestSocketDeadlineReusesLiveTimer(t *testing.T) {
+	var deadline socketDeadline
+	defer deadline.stopLocked()
+	future := time.Now().Add(time.Hour)
+	deadline.setLocked(future)
+	timer, generation := deadline.timer, deadline.done
+	for _, value := range []time.Time{future.Add(time.Hour), future.Add(-time.Minute), future} {
+		deadline.setLocked(value)
+		if deadline.timer != timer || deadline.done != generation {
+			t.Fatal("future deadline update replaced the live timer or generation")
+		}
+	}
+	deadline.setLocked(time.Time{})
+	if deadline.timer != nil || deadline.done != generation {
+		t.Fatal("clearing a live deadline retained its timer or replaced its generation")
+	}
+	select {
+	case <-generation:
+		t.Fatal("clearing a live deadline closed its generation")
+	default:
+	}
+	deadline.setLocked(future)
+	if deadline.timer == nil || deadline.timer == timer || deadline.done != generation {
+		t.Fatal("rearming a cleared deadline did not create a timer for the existing generation")
+	}
+	deadline.stopLocked()
+	if deadline.timer != nil {
+		t.Fatal("stopping a reused timer retained its handle")
+	}
+}
+
+func TestSocketDeadlineReusedTimerExpires(t *testing.T) {
+	var deadline socketDeadline
+	defer deadline.stopLocked()
+	deadline.setLocked(time.Now().Add(time.Hour))
+	timer, generation := deadline.timer, deadline.done
+	deadline.setLocked(time.Now().Add(50 * time.Millisecond))
+	select {
+	case <-generation:
+	case <-time.After(time.Second):
+		t.Fatal("rearmed deadline did not close its shared generation")
+	}
+	deadline.setLocked(time.Now().Add(time.Hour))
+	if deadline.timer == nil || deadline.timer == timer || deadline.done == generation {
+		t.Fatal("refreshing a fired timer reused its callback or closed generation")
+	}
+	select {
+	case <-deadline.done:
+		t.Fatal("refreshed deadline is already expired")
+	default:
+	}
+}
+
+func TestSocketDeadlineStoppedCallbackCannotExpireRearmedDeadline(t *testing.T) {
+	for _, stopFirst := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stop-first-%t", stopFirst), func(t *testing.T) {
+			var deadline socketDeadline
+			deadline.waitLocked()
+			initial := deadline.done
+			started, release := make(chan struct{}), make(chan struct{})
+			deadline.timer = time.AfterFunc(0, func() {
+				close(started)
+				<-release
+				close(initial)
+			})
+			select {
+			case <-started:
+			case <-time.After(time.Second):
+				close(release)
+				t.Fatal("deadline callback did not start")
+			}
+			finished := make(chan chan struct{}, 1)
+			joined := make(chan struct{})
+			go func() {
+				defer close(joined)
+				if stopFirst {
+					deadline.stopLocked()
+				}
+				deadline.setLocked(time.Now().Add(time.Hour))
+				finished <- deadline.done
+			}()
+			t.Cleanup(func() {
+				select {
+				case <-release:
+				default:
+					close(release)
+				}
+				select {
+				case <-joined:
+					deadline.stopLocked()
+				case <-time.After(time.Second):
+					t.Error("deadline worker did not finish")
+				}
+			})
+			var rearmed chan struct{}
+			select {
+			case rearmed = <-finished:
+				t.Fatal("deadline replacement returned before the running callback completed")
+			case <-time.After(25 * time.Millisecond):
+			}
+			close(release)
+			if rearmed == nil {
+				select {
+				case rearmed = <-finished:
+				case <-time.After(time.Second):
+					t.Fatal("deadline did not rearm after the callback")
+				}
+			}
+			<-initial
+			if rearmed == initial {
+				t.Fatal("rearmed deadline reused the stopped callback generation")
+			}
+			select {
+			case <-rearmed:
+				t.Fatal("old callback expired the rearmed deadline")
+			default:
+			}
+		})
+	}
+}
+
 func TestSocketDeadlineZeroDoesNotAllocateChannel(t *testing.T) {
 	var deadline socketDeadline
 	deadline.setLocked(time.Time{})
@@ -1433,6 +1555,325 @@ func TestPendingReadDeadlineUpdates(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) { testMutableDeadline(t, test.set, test.operation) })
+	}
+}
+
+func TestDatagramEmptyReadPreservesReceiveState(t *testing.T) {
+	for _, network := range []string{"udp4", "udp6", "ip4:99", "ip6:99"} {
+		t.Run(network, func(t *testing.T) {
+			local, remote := netip.MustParseAddr("192.0.2.241"), netip.MustParseAddr("192.0.2.242")
+			if network == "udp6" || network == "ip6:99" {
+				local, remote = netip.MustParseAddr("2001:db8::241"), netip.MustParseAddr("2001:db8::242")
+			}
+			stack, err := New(Config{LocalAddresses: []netip.Prefix{netip.PrefixFrom(local, local.BitLen())}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stack.Close()
+			if err = stack.Start(); err != nil {
+				t.Fatal(err)
+			}
+			var connection interface {
+				Read([]byte) (int, error)
+				ReadFrom([]byte) (int, net.Addr, error)
+				ReadWithBuffer(func(int) []byte) (int, error)
+				ReadBatch([]SocketMessage, int) (int, error)
+				SetReadDeadline(time.Time) error
+				Close() error
+			}
+			var enqueue func([]byte)
+			if network == "udp4" || network == "udp6" {
+				dialed, err := stack.DialUDP(context.Background(), network, netip.AddrPortFrom(local, 5300), netip.AddrPortFrom(remote, 5301))
+				if err != nil {
+					t.Fatal(err)
+				}
+				c := dialed.(*UDPConn)
+				c.errorState = &datagramSocketErrorState{pending: &net.OpError{Op: "read", Err: syscall.ECONNREFUSED}}
+				connection = c
+				enqueue = func(payload []byte) { c.enqueue(payload, c.remote, local, ipPacketOptions{}) }
+			} else {
+				dialed, err := stack.DialIP(context.Background(), network, local, remote)
+				if err != nil {
+					t.Fatal(err)
+				}
+				c := dialed.(*IPConn)
+				c.errorState = &datagramSocketErrorState{pending: &net.OpError{Op: "read", Err: syscall.ECONNREFUSED}}
+				connection = c
+				enqueue = func(payload []byte) {
+					c.enqueuePacket(ipPacket{payload: payload, source: remote, target: local}, ipPacketOptions{})
+				}
+			}
+			defer connection.Close()
+			payload := []byte("queued")
+			enqueue(payload)
+			if err := connection.SetReadDeadline(time.Now().Add(-time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			for _, buffer := range [][]byte{nil, make([]byte, 0)} {
+				if n, err := connection.Read(buffer); n != 0 || err != nil {
+					t.Fatalf("empty Read with ready data, error, and expired deadline = %d, %v", n, err)
+				}
+			}
+			if err := connection.SetReadDeadline(time.Time{}); err != nil {
+				t.Fatal(err)
+			}
+			buffer := make([]byte, len(payload))
+			if n, err := connection.Read(buffer); n != 0 || !errors.Is(err, syscall.ECONNREFUSED) {
+				t.Fatalf("pending error after empty Read = %d, %v", n, err)
+			}
+			if n, err := connection.Read(buffer); n != len(payload) || err != nil || !bytes.Equal(buffer, payload) {
+				t.Fatalf("queued data after empty Read = %q, %d, %v", buffer, n, err)
+			}
+			if err := connection.SetReadDeadline(time.Now().Add(-time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			if n, err := connection.Read(nil); n != 0 || err != nil {
+				t.Fatalf("empty Read without queued data = %d, %v", n, err)
+			}
+			if n, _, err := connection.ReadFrom(buffer); n != 0 || !errors.Is(err, os.ErrDeadlineExceeded) {
+				t.Fatalf("ReadFrom with expired deadline = %d, %v", n, err)
+			}
+			if err := connection.SetReadDeadline(time.Time{}); err != nil {
+				t.Fatal(err)
+			}
+			enqueue(payload)
+			if n, _, err := connection.ReadFrom(nil); n != 0 || err != nil {
+				t.Fatalf("ReadFrom(nil) = %d, %v", n, err)
+			}
+			message := []SocketMessage{{Buffers: [][]byte{buffer}}}
+			if n, err := connection.ReadBatch(message, MessageFlagDontWait); n != 0 || !errors.Is(err, syscall.EAGAIN) {
+				t.Fatalf("ReadFrom(nil) did not consume its datagram: %d, %v", n, err)
+			}
+			enqueue(payload)
+			calls := 0
+			if n, err := connection.ReadWithBuffer(func(sizeHint int) []byte {
+				calls++
+				if sizeHint != len(payload) {
+					t.Errorf("size hint = %d, want %d", sizeHint, len(payload))
+				}
+				return nil
+			}); n != 0 || err != nil || calls != 1 {
+				t.Fatalf("empty callback result = %d, %v, calls %d", n, err, calls)
+			}
+			if n, err := connection.ReadBatch(message, MessageFlagDontWait); n != 0 || !errors.Is(err, syscall.EAGAIN) {
+				t.Fatalf("empty callback result did not consume its datagram: %d, %v", n, err)
+			}
+			if err := connection.Close(); err != nil {
+				t.Fatal(err)
+			}
+			for _, buffer := range [][]byte{nil, make([]byte, 0)} {
+				if n, err := connection.Read(buffer); n != 0 || !errors.Is(err, net.ErrClosed) {
+					t.Fatalf("empty Read after Close = %d, %v", n, err)
+				}
+			}
+		})
+	}
+}
+
+func TestDatagramPeekPreservesReadNotification(t *testing.T) {
+	for _, network := range []string{"udp4", "udp6", "ip4:99", "ip6:99"} {
+		t.Run(network, func(t *testing.T) {
+			local, remote := netip.MustParseAddr("192.0.2.243"), netip.MustParseAddr("192.0.2.244")
+			if network == "udp6" || network == "ip6:99" {
+				local, remote = netip.MustParseAddr("2001:db8::243"), netip.MustParseAddr("2001:db8::244")
+			}
+			stack, err := New(Config{LocalAddresses: []netip.Prefix{netip.PrefixFrom(local, local.BitLen())}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stack.Close()
+			if err = stack.Start(); err != nil {
+				t.Fatal(err)
+			}
+			var connection interface {
+				ReadBatch([]SocketMessage, int) (int, error)
+				Close() error
+			}
+			var notified <-chan struct{}
+			var queued func() (int, int)
+			payload := []byte("peek")
+			if network == "udp4" || network == "udp6" {
+				dialed, err := stack.DialUDP(context.Background(), network, netip.AddrPortFrom(local, 5300), netip.AddrPortFrom(remote, 5301))
+				if err != nil {
+					t.Fatal(err)
+				}
+				c := dialed.(*UDPConn)
+				c.mu.Lock()
+				notified = c.receiveNotificationLocked()
+				c.mu.Unlock()
+				c.enqueue(payload, c.remote, local, ipPacketOptions{})
+				connection = c
+				queued = func() (int, int) { c.mu.Lock(); defer c.mu.Unlock(); return c.receive.len(), c.queuedBytes }
+			} else {
+				dialed, err := stack.DialIP(context.Background(), network, local, remote)
+				if err != nil {
+					t.Fatal(err)
+				}
+				c := dialed.(*IPConn)
+				c.mu.Lock()
+				notified = c.receiveNotificationLocked()
+				c.mu.Unlock()
+				c.enqueuePacket(ipPacket{payload: payload, source: remote, target: local}, ipPacketOptions{})
+				connection = c
+				queued = func() (int, int) { c.mu.Lock(); defer c.mu.Unlock(); return c.receive.len(), c.queuedBytes }
+			}
+			defer connection.Close()
+			packets, retained := queued()
+			message := []SocketMessage{{Buffers: [][]byte{make([]byte, len(payload))}}}
+			for iteration := 0; iteration < 3; iteration++ {
+				select {
+				case <-notified:
+				default:
+					t.Fatal("queued datagram lost its read notification")
+				}
+				if n, err := connection.ReadBatch(message, MessageFlagPeek); n != 1 || err != nil || message[0].N != len(payload) || !bytes.Equal(message[0].Buffers[0], payload) {
+					t.Fatalf("peek = %d, %v, message %+v", n, err, message[0])
+				}
+				if count, size := queued(); count != packets || size != retained {
+					t.Fatalf("peek changed queue accounting: %d/%d, want %d/%d", count, size, packets, retained)
+				}
+			}
+			select {
+			case <-notified:
+			default:
+				t.Fatal("successful peek did not wake the next reader")
+			}
+			if n, err := connection.ReadBatch(message, MessageFlagDontWait); n != 1 || err != nil {
+				t.Fatalf("consume after peek = %d, %v", n, err)
+			}
+			if count, size := queued(); count != 0 || size != 0 {
+				t.Fatalf("consumed queue = %d/%d", count, size)
+			}
+			select {
+			case <-notified:
+				t.Fatal("empty queue retained a stale read notification")
+			default:
+			}
+		})
+	}
+}
+
+func TestDatagramConcurrentPeekReaders(t *testing.T) {
+	for _, network := range []string{"udp4", "udp6", "ip4:99", "ip6:99"} {
+		t.Run(network, func(t *testing.T) {
+			local, remote := netip.MustParseAddr("192.0.2.243"), netip.MustParseAddr("192.0.2.244")
+			if network == "udp6" || network == "ip6:99" {
+				local, remote = netip.MustParseAddr("2001:db8::243"), netip.MustParseAddr("2001:db8::244")
+			}
+			stack, err := New(Config{LocalAddresses: []netip.Prefix{netip.PrefixFrom(local, local.BitLen())}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stack.Close()
+			if err = stack.Start(); err != nil {
+				t.Fatal(err)
+			}
+			var connection interface {
+				ReadBatch([]SocketMessage, int) (int, error)
+				ReadFrom([]byte) (int, net.Addr, error)
+				SetReadDeadline(time.Time) error
+				Close() error
+			}
+			udp := network == "udp4" || network == "udp6"
+			if udp {
+				dialed, dialErr := stack.DialUDP(context.Background(), network, netip.AddrPortFrom(local, 5300), netip.AddrPortFrom(remote, 5301))
+				if dialErr != nil {
+					t.Fatal(dialErr)
+				}
+				connection = dialed.(*UDPConn)
+			} else {
+				dialed, dialErr := stack.DialIP(context.Background(), network, local, remote)
+				if dialErr != nil {
+					t.Fatal(dialErr)
+				}
+				connection = dialed.(*IPConn)
+			}
+			var readers sync.WaitGroup
+			t.Cleanup(func() {
+				_ = connection.Close()
+				joined := make(chan struct{})
+				go func() {
+					readers.Wait()
+					close(joined)
+				}()
+				select {
+				case <-joined:
+				case <-time.After(time.Second):
+					t.Error("peek readers did not exit after socket closure")
+				}
+			})
+			if err = connection.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			for iteration := 0; iteration < 32; iteration++ {
+				payload := []byte{'p', 'e', 'e', 'k', byte(iteration)}
+				started := make(chan struct{}, 2)
+				results := make(chan error, 2)
+				for reader := 0; reader < 2; reader++ {
+					readers.Add(1)
+					go func() {
+						defer readers.Done()
+						buffer := make([]byte, len(payload))
+						message := []SocketMessage{{Buffers: [][]byte{buffer}}}
+						started <- struct{}{}
+						count, readErr := connection.ReadBatch(message, MessageFlagPeek)
+						if readErr == nil && (count != 1 || message[0].N != len(payload) || !bytes.Equal(buffer, payload)) {
+							readErr = errors.New("peek did not return the current datagram")
+						}
+						results <- readErr
+					}()
+				}
+				<-started
+				<-started
+				wire := buildIPPacket(remote, local, 99, payload, 0, false)
+				if udp {
+					wire = buildTestUDP(remote, local, 5301, 5300, payload)
+				}
+				if err = writeTestPacket(stack, wire); err != nil {
+					t.Fatal(err)
+				}
+				for reader := 0; reader < 2; reader++ {
+					if err = <-results; err != nil {
+						t.Fatalf("iteration %d peek reader: %v", iteration, err)
+					}
+				}
+				buffer := make([]byte, len(payload))
+				if n, _, readErr := connection.ReadFrom(buffer); n != len(payload) || readErr != nil || !bytes.Equal(buffer, payload) {
+					t.Fatalf("consume after concurrent peeks = %d, %v, %q", n, readErr, buffer)
+				}
+				message := []SocketMessage{{Buffers: [][]byte{buffer}}}
+				if count, readErr := connection.ReadBatch(message, MessageFlagDontWait); count != 0 || !errors.Is(readErr, syscall.EAGAIN) {
+					t.Fatalf("consumed datagram remained readable: %d, %v", count, readErr)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkDatagramEmptyRead(b *testing.B) {
+	for _, network := range []string{"udp4", "ip4:99"} {
+		b.Run(network, func(b *testing.B) {
+			local, remote := netip.MustParseAddr("192.0.2.245"), netip.MustParseAddr("192.0.2.246")
+			stack, err := New(Config{LocalAddresses: []netip.Prefix{netip.PrefixFrom(local, 32)}})
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.Cleanup(func() { _ = stack.Close() })
+			var connection net.Conn
+			if network == "udp4" {
+				connection = newUDPConn(stack, network, 5300, false, local, netip.AddrPortFrom(remote, 5301), datagramSocketOptionSet{})
+			} else {
+				connection = newIPConn(stack, network, 99, local, remote, socketOptionSet{})
+			}
+			b.Cleanup(func() { _ = connection.Close() })
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if n, err := connection.Read(nil); n != 0 || err != nil {
+					b.Fatalf("Read = %d, %v", n, err)
+				}
+			}
+		})
 	}
 }
 

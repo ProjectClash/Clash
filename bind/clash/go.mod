@@ -2,29 +2,29 @@ module github.com/ProjectClash/Clash/bind/clash
 
 go 1.26.0
 
-toolchain go1.26.9
+toolchain go1.26.10
 
 require (
 	github.com/coder/websocket v1.8.12
 	github.com/dlclark/regexp2 v1.12.0
 	github.com/easytier/easytier/easytier-go v0.0.0-20260918161347-e313ba8efb84
-	github.com/enfein/mieru/v3 v3.38.0
+	github.com/enfein/mieru/v3 v3.38.1
 	github.com/google/pprof v0.0.0-20240727154555-813a5fbdbec8
 	github.com/klauspost/compress v1.17.9
 	github.com/metacubex/chi v0.1.1
 	github.com/metacubex/connect-ip-go v0.0.0-20260727083417-67ccdb0cf771
 	github.com/metacubex/http v0.1.8
-	github.com/ProjectClash/Clash v1.19.32
-	github.com/metacubex/mipstack v0.0.0-20260930071539-961d4b1c1983
+	github.com/ProjectClash/Clash v1.19.33
+	github.com/metacubex/mipstack v0.0.0-20261019124225-9a80a07eaeb9
 	github.com/metacubex/quic-go v0.61.1-0.20260727080200-2548683b76f4
 	github.com/metacubex/sing v0.5.8
 	github.com/metacubex/sing-shadowsocks v0.2.13
 	github.com/metacubex/sing-shadowsocks2 v0.2.8
-	github.com/metacubex/sing-tun v0.4.27
+	github.com/metacubex/sing-tun v0.4.28
 	github.com/metacubex/ssh v0.1.0
 	github.com/metacubex/tailscale v0.0.0-20260821153257-ff0ecd818181
 	github.com/metacubex/tailscale-wireguard-go v0.0.0-20260725073821-e61ab99cede2
-	github.com/metacubex/tls v0.1.8
+	github.com/metacubex/tls v0.1.9
 	github.com/metacubex/wireguard-go v0.0.0-20250820062549-a6cecdd7f57f
 	github.com/miekg/dns v1.1.63
 	github.com/oschwald/maxminddb-golang v1.12.0
@@ -104,7 +104,7 @@ require (
 	github.com/metacubex/sing-mux v0.3.12 // indirect
 	github.com/metacubex/sing-quic v0.0.0-20260904234848-1c242664697a // indirect
 	github.com/metacubex/sing-vmess v0.2.5 // indirect
-	github.com/metacubex/sing-wireguard v0.0.0-20260826105301-c3ae17d19f9e // indirect
+	github.com/metacubex/sing-wireguard v0.0.0-20261002050126-e5fa1a607406 // indirect
 	github.com/metacubex/smux v0.0.0-20260105030934-d0c8756d3141 // indirect
 	github.com/metacubex/tfo-go v0.0.0-20260623020846-376a77860b8c // indirect
 	github.com/metacubex/utls v1.8.8 // indirect

@@ -3,7 +3,6 @@ package outbound
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net"
 	"net/netip"
 	"os"
@@ -12,14 +11,9 @@ import (
 	"time"
 
 	C "github.com/ProjectClash/Clash/constant"
-	"github.com/ProjectClash/Clash/log"
 
-	amneziav3 "github.com/metacubex/amneziawg-go/device"
-	amnezia "github.com/metacubex/amneziawg-go/device_v1"
-	"github.com/metacubex/wireguard-go/device"
 	"github.com/metacubex/wireguard-go/tun"
 
-	E "github.com/metacubex/sing/common/exceptions"
 	M "github.com/metacubex/sing/common/metadata"
 	N "github.com/metacubex/sing/common/network"
 )
@@ -29,8 +23,6 @@ type clashWireGuardDevice struct {
 	closed   bool
 	builds   int
 	releases int
-	ipStack  IPStackOption
-	mtu      uint32
 	built    atomic.Pointer[clashWireGuardBuilt]
 	released time.Time
 
@@ -122,7 +114,7 @@ func (d *clashWireGuardDevice) handles() (wireguardDevice, wireguardGoDevice) {
 
 const clashRehandshakeGap = 50 * time.Millisecond
 
-func (w *WireGuard) clashBuildDevice() error {
+func (w *WireGuard) clashAwaitRehandshakeGap() {
 	d := &w.clashDevice
 	d.mu.Lock()
 	wait := clashRehandshakeGap - time.Since(d.released)
@@ -130,41 +122,24 @@ func (w *WireGuard) clashBuildDevice() error {
 	if wait > 0 && wait <= clashRehandshakeGap {
 		time.Sleep(wait)
 	}
+}
+
+func (w *WireGuard) clashForgetRebuildFailure() {
+	d := &w.clashDevice
+	d.mu.Lock()
+	released := d.releases != 0
+	d.mu.Unlock()
+	if released {
+		w.initErr = nil
+	}
+}
+
+func (w *WireGuard) clashPublish(tunDevice wireguardDevice, wgDevice wireguardGoDevice) error {
+	d := &w.clashDevice
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.closed {
 		return errOutboundClosed
-	}
-	if d.built.Load() != nil {
-		return nil
-	}
-	stack, err := newIPStack(d.ipStack, w.localPrefixes, d.mtu)
-	if err != nil {
-		return E.Cause(err, "create WireGuard stack")
-	}
-	tunDevice, err := newWireguardDevice(stack)
-	if err != nil {
-		_ = stack.Close()
-		return E.Cause(err, "create WireGuard device")
-	}
-	name := w.option.Name
-	logger := &device.Logger{
-		Verbosef: func(format string, args ...interface{}) {
-			log.SingLogger.Debug(fmt.Sprintf("[WG](%s) %s", name, fmt.Sprintf(format, args...)))
-		},
-		Errorf: func(format string, args ...interface{}) {
-			log.SingLogger.Error(fmt.Sprintf("[WG](%s) %s", name, fmt.Sprintf(format, args...)))
-		},
-	}
-	var wgDevice wireguardGoDevice
-	if w.option.AmneziaWGOption != nil {
-		if w.option.AmneziaWGOption.Version == 3 {
-			wgDevice = amneziav3.NewDevice(tunDevice, w.bind, logger, w.option.Workers)
-		} else {
-			wgDevice = amnezia.NewDevice(tunDevice, w.bind, logger, w.option.Workers)
-		}
-	} else {
-		wgDevice = device.NewDevice(tunDevice, w.bind, logger, w.option.Workers)
 	}
 	d.built.Store(&clashWireGuardBuilt{tun: tunDevice, device: wgDevice, up: make(chan struct{})})
 	d.builds++

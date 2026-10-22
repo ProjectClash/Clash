@@ -3,6 +3,7 @@ package tun
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"os"
@@ -11,8 +12,9 @@ import (
 	"unsafe"
 
 	"github.com/metacubex/sing-tun/internal/gtcpip/header"
-	"github.com/metacubex/sing-tun/internal/rawfile_darwin"
-	"github.com/metacubex/sing-tun/internal/stopfd_darwin"
+	rawfile "github.com/metacubex/sing-tun/internal/rawfile_darwin"
+	stopfd "github.com/metacubex/sing-tun/internal/stopfd_darwin"
+	"github.com/metacubex/sing-tun/internal/systemconfiguration"
 	"github.com/metacubex/sing/common"
 	"github.com/metacubex/sing/common/buf"
 	E "github.com/metacubex/sing/common/exceptions"
@@ -36,12 +38,13 @@ type NativeTun struct {
 	msgHdrsOutput []rawfile.MsgHdrX
 	buffers       []*buf.Buffer
 	stopFd        stopfd.StopFD
-	poller       *rawfile.Poller
-	options      Options
-	inet4Address [4]byte
-	inet6Address [16]byte
-	routeSet     bool
-	writeMsgX    bool
+	poller          *rawfile.Poller
+	options         Options
+	inet4Address    [4]byte
+	inet6Address    [16]byte
+	routeSet        bool
+	writeMsgX       bool
+	dnsRegistration io.Closer
 
 	writeAccess sync.Mutex
 }
@@ -60,6 +63,14 @@ func newIovecBuffer(mtu int) iovecBuffer {
 }
 
 func (b *iovecBuffer) nextIovecs() []unix.Iovec {
+	if b.mtu <= 65535-PacketOffset {
+		if b.buffer == nil {
+			b.buffer = buf.NewSize(b.mtu + PacketOffset)
+			b.iovecs[0] = b.buffer.Iovec(b.buffer.Cap())
+			b.buffer.Advance(PacketOffset)
+		}
+		return b.iovecs[:1]
+	}
 	if b.iovecs[0].Len == 0 {
 		headBuffer := make([]byte, PacketOffset)
 		b.iovecs[0].Base = &headBuffer[0]
@@ -147,6 +158,10 @@ func New(options Options) (Tun, error) {
 	if len(options.Inet6Address) > 0 {
 		nativeTun.inet6Address = options.Inet6Address[0].Addr().As16()
 	}
+	if err := nativeTun.configureDNS(); err != nil {
+		nativeTun.Close()
+		return nil, E.Cause(err, "set DNS")
+	}
 	return nativeTun, nil
 }
 
@@ -214,13 +229,14 @@ func (t *NativeTun) Close() error {
 	if !platformTunRequiresFileDescriptor {
 		defer flushDNSCache()
 	}
+	dnsErr := common.Close(t.dnsRegistration)
 	t.stopFd.Stop()
 	err := t.tunFile.Close()
 	if t.poller != nil {
 		_ = t.poller.Close()
 	}
 	t.stopFd.Close()
-	return err
+	return E.Errors(dnsErr, err)
 }
 
 const utunControlName = "com.apple.net.utun_control"
@@ -435,7 +451,7 @@ func (t *NativeTun) BatchRead() ([]*buf.Buffer, error) {
 		iovecs := t.iovecs[i].nextIovecs()
 		t.msgHdrs[i] = rawfile.MsgHdrX{}
 		t.msgHdrs[i].Msg.Iov = &iovecs[0]
-		t.msgHdrs[i].Msg.Iovlen = 2
+		t.msgHdrs[i].Msg.Iovlen = int32(len(iovecs))
 	}
 	n, errno := rawfile.BlockingRecvMMsgUntilStoppedPolled(t.poller, t.tunFd, t.msgHdrs)
 	if errno != 0 {
@@ -518,6 +534,26 @@ func (t *NativeTun) BatchWrite(buffers []*buf.Buffer) error {
 
 func (t *NativeTun) TXChecksumOffload() bool {
 	return false
+}
+
+func (t *NativeTun) configureDNS() error {
+	if platformTunRequiresFileDescriptor || t.options.FileDescriptor != 0 || t.options.DNSModeOrDefault() == DNSModeDisabled {
+		return nil
+	}
+	servers, err := t.options.DNSServerAddress()
+	if err != nil {
+		return err
+	}
+	if len(servers) == 0 {
+		return nil
+	}
+	registration, err := systemconfiguration.RegisterDNS(t.options.Name, servers)
+	if err != nil {
+		return err
+	}
+	t.dnsRegistration = registration
+	flushDNSCache()
+	return nil
 }
 
 func useSocket(domain, typ, proto int, block func(socketFd int) error) error {

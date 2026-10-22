@@ -5452,6 +5452,73 @@ func TestICMPForwarderRepliesOnlyResponder(t *testing.T) {
 	}
 }
 
+func TestUDPForwardedIPv4ReassemblyTimeout(t *testing.T) {
+	local := netip.MustParseAddr("192.0.2.197")
+	remote, intercepted := netip.MustParseAddr("198.51.100.197"), netip.MustParseAddr("203.0.113.197")
+	stack, err := New(Config{LocalAddresses: []netip.Prefix{netip.PrefixFrom(local, 32)}, Promiscuous: true, MTU: 1280})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stack.Close()
+	if err = stack.Start(); err != nil {
+		t.Fatal(err)
+	}
+	var connection *UDPConn
+	var acceptErr error
+	forwarder, err := NewUDPForwarder(stack, UDPForwarderOptions{}, func(request *UDPForwarderRequest) {
+		connection, acceptErr = request.Accept(SocketOptions.ReceiveErrors(true))
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer forwarder.Close()
+	payload := mustTestWire((UDPDatagram{Source: netip.AddrPortFrom(remote, 40197), Destination: netip.AddrPortFrom(intercepted, 5353), Payload: []byte("request")}).MarshalBinary())
+	if err = writeTestPacket(stack, mustTestWire((IPPacket{Source: remote, Destination: intercepted, Protocol: ProtocolUDP, HopLimit: 64, Payload: payload}).MarshalBinary())); err != nil {
+		t.Fatal(err)
+	}
+	if acceptErr != nil || connection == nil {
+		t.Fatalf("forwarded socket = %v, %v", connection, acceptErr)
+	}
+	defer connection.Close()
+	_ = connection.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err = connection.Write([]byte("reply")); err != nil {
+		t.Fatal(err)
+	}
+	quote := readOutboundPacket(t, stack)
+	for index, code := range []uint8{ICMPv4TimeExceededCodeFragmentReassembly, ICMPv4TimeExceededCodeTTLInTransit, ICMPv4TimeExceededCodeFragmentReassembly} {
+		message, err := (ICMPError{Reporter: remote, Type: ICMPv4TypeTimeExceeded, Code: code, QuotedPacket: quote}).ICMPMessage(intercepted)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = writeTestPacket(stack, mustTestWire((IPPacket{Source: remote, Destination: intercepted, Protocol: ProtocolICMPv4, HopLimit: 64, Payload: mustTestWire(message.MarshalBinary())}).MarshalBinary())); err != nil {
+			t.Fatal(err)
+		}
+		if index == 0 {
+			if info := connection.Info(); info.ICMPErrors != 0 || info.ErrorQueueEntries != 0 || info.LastError != nil {
+				t.Fatalf("forwarded socket retained a reassembly timeout: %+v", info)
+			}
+			if n, err := connection.Write([]byte("still writable")); err != nil || n != len("still writable") {
+				t.Fatalf("forwarded write after reassembly timeout = %d, %v", n, err)
+			}
+			_ = readOutboundPacket(t, stack)
+		}
+	}
+	if info := connection.Info(); info.ICMPErrors != 1 || info.ErrorQueueEntries != 1 {
+		t.Fatalf("forwarded socket retained something other than the TTL error: %+v", info)
+	}
+	buffer := make([]byte, 64)
+	var networkError ICMPError
+	if n, readErr := connection.Read(buffer); n != 0 || !errors.As(readErr, &networkError) || networkError.Code != ICMPv4TimeExceededCodeTTLInTransit {
+		t.Fatalf("forwarded pending error = %d, %v", n, readErr)
+	}
+	if queued, queueErr := connection.ReadError(); queueErr != nil || !errors.As(queued, &networkError) || networkError.Code != ICMPv4TimeExceededCodeTTLInTransit {
+		t.Fatalf("forwarded extended error = %v, %v", queued, queueErr)
+	}
+	if n, readErr := connection.Read(buffer); readErr != nil || !bytes.Equal(buffer[:n], []byte("request")) {
+		t.Fatalf("forwarded queued data = %d, %v", n, readErr)
+	}
+}
+
 func BenchmarkUDPForwarderReply(b *testing.B) {
 	local := netip.MustParseAddr("192.0.2.200")
 	remote := netip.MustParseAddr("192.0.2.201")
@@ -5842,5 +5909,77 @@ func TestUDPForwarderListenCreationOptionsValidateBeforeClaim(t *testing.T) {
 	defer result.connection.Close()
 	if info := result.connection.Info(); info.RemoteAddress.IsValid() || info.ReceiveQueueCapacity != 321 || !info.ReceiveErrors {
 		t.Fatalf("forwarded UDP listener creation policy = %+v", info)
+	}
+}
+
+func TestTCPForwarderRevalidatesSYNAdmission(t *testing.T) {
+	for _, ipv6 := range []bool{false, true} {
+		t.Run(fmt.Sprintf("IPv6-%t", ipv6), func(t *testing.T) {
+			local, remote, intercepted := netip.MustParseAddr("192.0.2.247"), netip.MustParseAddr("192.0.2.248"), netip.MustParseAddr("198.51.100.247")
+			if ipv6 {
+				local, remote, intercepted = netip.MustParseAddr("2001:db8::247"), netip.MustParseAddr("2001:db8::248"), netip.MustParseAddr("2001:db8:1::247")
+			}
+			stack := newForwarderTestStack(t, local, true)
+			requests := make(chan *TCPForwarderRequest, 2)
+			forwarder, err := NewTCPForwarder(stack, TCPForwarderOptions{MaxInFlight: 1}, func(request *TCPForwarderRequest) {
+				requests <- request
+				<-request.Done()
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer forwarder.Close()
+			key := tcpKey{local: netip.AddrPortFrom(intercepted, 8080), remote: netip.AddrPortFrom(remote, 5300)}
+			segment := tcpSegment{flags: TCPFlagSYN, sequence: 1000}
+			previous := stack.network.Load()
+			if !previous.acceptsInboundDestination(intercepted) {
+				t.Fatal("original network policy did not admit intercepted destination")
+			}
+			if handled, admitted := forwarder.admitSegment(segment, key); !handled || !admitted {
+				t.Fatal("initial request was not admitted")
+			}
+			var first *TCPForwarderRequest
+			select {
+			case first = <-requests:
+			case <-time.After(time.Second):
+				t.Fatal("initial handler did not start")
+			}
+			if err = stack.UpdateConfig(Config{LocalAddresses: []netip.Prefix{netip.PrefixFrom(local, local.BitLen())}, MTU: 1400}); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-first.Done():
+			default:
+				t.Fatal("configuration update retained an invalid pending request")
+			}
+			if !previous.acceptsInboundDestination(intercepted) {
+				t.Fatal("immutable policy snapshot changed")
+			}
+			if handled, admitted := forwarder.admitSegment(segment, key); !handled || admitted {
+				t.Fatalf("stale SYN admission = handled %t, admitted %t", handled, admitted)
+			}
+			if forwarder.handleTimeWaitSegment(segment, key) {
+				t.Fatal("rejected SYN was allowed to replace its TIME-WAIT owner")
+			}
+			if info := forwarder.Info(); info.Pending != 0 || info.Requests != 1 {
+				t.Fatalf("invalid SYN consumed request capacity: %+v", info)
+			}
+			key.local = netip.AddrPortFrom(local, 8080)
+			wire := buildTestTCP(remote, local, key.remote.Port(), key.local.Port(), segment.sequence, 0, TCPFlagSYN, 65535, nil, nil)
+			if err = writeTestPacket(stack, wire); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case request := <-requests:
+				if request.Flow().Destination != key.local {
+					t.Fatalf("accepted destination = %v, want %v", request.Flow().Destination, key.local)
+				}
+				if err = request.Drop(); err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("valid SYN could not use the released capacity")
+			}
+		})
 	}
 }

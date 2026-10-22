@@ -83,7 +83,11 @@ func GSOSplit(in []byte, options GSOOptions, outBufs [][]byte, sizes []int, outO
 		if options.NeedsCsum {
 			initial := binary.BigEndian.Uint16(in[cSumAt:])
 			in[cSumAt], in[cSumAt+1] = 0, 0
-			binary.BigEndian.PutUint16(in[cSumAt:], ^checksum.Checksum(in[options.CsumStart:], initial))
+			csum := ^checksum.Checksum(in[options.CsumStart:], initial)
+			if options.CsumOffset == 6 {
+				csum = header.NormalizeUDPChecksum(csum)
+			}
+			binary.BigEndian.PutUint16(in[cSumAt:], csum)
 		}
 		sizes[0] = copy(outBufs[0][outOffset:], in)
 		return 1, nil
@@ -185,6 +189,9 @@ func GSOSplit(in []byte, options GSOOptions, outBufs [][]byte, sizes []int, outO
 		lenForPseudo := uint16(transportHeaderLen + segmentDataLen)
 		transportCSum := checksum.Combine(pseudoSumBase, lenForPseudo)
 		transportCSum = ^checksum.Checksum(out[options.CsumStart:totalLen], transportCSum)
+		if protocol == ipProtoUDP {
+			transportCSum = header.NormalizeUDPChecksum(transportCSum)
+		}
 		binary.BigEndian.PutUint16(out[options.CsumStart+options.CsumOffset:], transportCSum)
 
 		nextSegmentDataAt += int(options.GSOSize)

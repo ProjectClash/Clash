@@ -55,7 +55,7 @@ func TestPublicCongestionControllerAPI(t *testing.T) {
 	_, _, _, _, _ = sample.PriorDeliveredBytes(), sample.DeliveredBytes(), sample.AcknowledgedBytes(), sample.LostBytes(), sample.PriorBytesInFlight()
 	_, _, _, _, _ = sample.BytesInFlight(), sample.Interval(), sample.RTT(), sample.SmoothedRTT(), sample.ACKTime()
 	_, _, _, _, _, _, _ = sample.ApplicationLimited(), sample.SchedulerLimited(), sample.Retransmitted(), sample.InRecovery(), sample.InFastRecovery(), sample.ACKDelayed(), sample.Valid()
-	_, _ = sample.PacketState(), sample.TailLossProbeACK()
+	_, _, _ = sample.PacketState(), sample.PacketLossEvidenceValid(), sample.TailLossProbeACK()
 
 	name := fmt.Sprintf("external-test-%d", externalCongestionName.Add(1))
 	factory, err := mipstack.NewCongestionControlFactory(mipstack.CongestionControlDefinition{

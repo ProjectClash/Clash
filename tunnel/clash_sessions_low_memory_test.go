@@ -45,6 +45,9 @@ func withSessionTable(t *testing.T, trackers ...statistic.Tracker) {
 	prior := sessionTable
 	sessionTable = func(f func(statistic.Tracker) bool) {
 		for _, tracker := range trackers {
+			if quota, ok := tracker.(*quotaTracker); ok && quota.closed.Load() != 0 {
+				continue
+			}
 			if !f(tracker) {
 				return
 			}
@@ -59,6 +62,7 @@ func fillTCPSlots(t *testing.T) {
 	priorRejected, priorEvicted := rejectedTCPConnectionTotal.Load(), evictedTCPConnectionTotal.Load()
 	t.Cleanup(func() {
 		activeTCPConnectionSlots.Store(0)
+		reservedTCPConnectionSlots.Store(0)
 		rejectedTCPConnectionTotal.Store(priorRejected)
 		evictedTCPConnectionTotal.Store(priorEvicted)
 	})
@@ -117,6 +121,7 @@ func fillUDPSlots(t *testing.T) {
 	priorRejected, priorEvicted := rejectedUDPSessionTotal.Load(), evictedUDPSessionTotal.Load()
 	t.Cleanup(func() {
 		activeUDPSessionSlots.Store(0)
+		reservedUDPSessionSlots.Store(0)
 		rejectedUDPSessionTotal.Store(priorRejected)
 		evictedUDPSessionTotal.Store(priorEvicted)
 	})
@@ -206,5 +211,59 @@ func TestAFullUDPQuotaAnswersTheNewSessionUnreachable(t *testing.T) {
 	}
 	if active := UDPSessionAdmissionSnapshot().Active; active != lowMemoryUDPSessionLimit {
 		t.Fatalf("a refused session changed the active count to %d", active)
+	}
+}
+
+func TestASlotAnEvictionFreesIsTheEvictingArrivals(t *testing.T) {
+	fillTCPSlots(t)
+	reserveTCPConnectionSlot()
+	releaseTCPConnectionSlot()
+	if tryAcquireTCPConnectionSlot() {
+		t.Fatal("a flow arriving meanwhile took the slot the eviction freed")
+	}
+	if !tryTakeReservedTCPConnectionSlot() {
+		t.Fatal("the evicting flow could not take the slot its eviction freed")
+	}
+	if active, reserved := activeTCPConnectionSlots.Load(), reservedTCPConnectionSlots.Load(); active != lowMemoryTCPConnectionAdmissionLimit || reserved != 0 {
+		t.Fatalf("active %d reserved %d after the take; want the quota full and nothing reserved", active, reserved)
+	}
+
+	fillUDPSlots(t)
+	reserveUDPSessionSlot()
+	releaseUDPSessionSlot()
+	if tryAcquireUDPSessionSlot() {
+		t.Fatal("a UDP session arriving meanwhile took the slot the eviction freed")
+	}
+	if !tryTakeReservedUDPSessionSlot() {
+		t.Fatal("the evicting UDP session could not take the slot its eviction freed")
+	}
+}
+
+func TestARefusedEvictionLeavesNoReservation(t *testing.T) {
+	fillTCPSlots(t)
+	busy := newQuotaTracker(C.TCP, tcpEvictMinIdle-time.Second, func() { releaseTCPConnectionSlot() })
+	withSessionTable(t, busy)
+	if admitTCPConnection() {
+		t.Fatal("a flow was admitted over the quota with nothing idle to make room")
+	}
+	if reserved := reservedTCPConnectionSlots.Load(); reserved != 0 {
+		t.Fatalf("%d slots stay reserved after a refusal", reserved)
+	}
+}
+
+func TestASlotThatFreesWhileNothingIsIdleIsTaken(t *testing.T) {
+	fillTCPSlots(t)
+	busy := newQuotaTracker(C.TCP, tcpEvictMinIdle-time.Second, nil)
+	prior := sessionTable
+	sessionTable = func(f func(statistic.Tracker) bool) {
+		releaseTCPConnectionSlot()
+		f(busy)
+	}
+	t.Cleanup(func() { sessionTable = prior })
+	if !admitTCPConnection() {
+		t.Fatal("a flow was refused while a slot was free")
+	}
+	if reserved := reservedTCPConnectionSlots.Load(); reserved != 0 {
+		t.Fatalf("%d slots stay reserved", reserved)
 	}
 }

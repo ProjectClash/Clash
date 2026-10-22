@@ -394,6 +394,8 @@ func (doh *dnsOverHTTPS) createClient(ctx context.Context) (*http.Client, error)
 // HTTP3 is enabled in the upstream options).  If this attempt is successful,
 // it returns an HTTP3 transport, otherwise it returns the H1/H2 transport.
 func (doh *dnsOverHTTPS) createTransport(ctx context.Context) (t http.RoundTripper, err error) {
+	// http.Transport dials in a context detached from the request, so a dial
+	// that the query has given up on must still end on its own.
 	transport := &http.Transport{
 		DisableCompression: true,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {

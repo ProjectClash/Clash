@@ -28,7 +28,7 @@ func TestBBRCongestionControl(t *testing.T) {
 	if bbrState(t, &controller).bandwidth != 20000 {
 		t.Fatalf("BBR initial bandwidth = %v, want 20000", bbrState(t, &controller).bandwidth)
 	}
-	_, _ = controller.onDataSend(mss, mss, start, 1, 0, window, 0, 0, 0)
+	_, _ = controller.onDataSend(mss, mss, start, 1, 0, window, 0, 0, 0, 0)
 	if delay := controller.pacingDelay(start, mss, window, 0, mss, 100*time.Millisecond, ^uint32(0)); delay >= 100*time.Millisecond {
 		t.Fatalf("BBR startup pacing delay = %v, want less than 100ms", delay)
 	}
@@ -198,16 +198,51 @@ func TestBBRProbeBandwidthUsesDeliveryClock(t *testing.T) {
 
 func TestBBRLongTermPolicerDetection(t *testing.T) {
 	start := time.Unix(100, 0)
-	bbr := bbrCongestionControl{delivered: 1000, totalLost: 300}
+	bbr := bbrCongestionControl{delivered: 1000, totalLost: 300, deliveredAt: start}
 	bbr.updateLongTermBandwidth(bbrSample(tcpDeliveryRateSample{losses: 300, ackTime: start}))
 	for interval := 1; interval <= 2; interval++ {
 		bbr.longTermRounds = bbrLongTermMinimumRounds
 		bbr.delivered += 10_000
 		bbr.totalLost += 3000
+		bbr.deliveredAt = start.Add(time.Duration(interval) * time.Second)
 		bbr.updateLongTermBandwidth(bbrSample(tcpDeliveryRateSample{losses: 3000, ackTime: start.Add(time.Duration(interval) * time.Second)}))
 	}
 	if !bbr.longTermUseBandwidth || bbr.longTermBandwidth != 10_000 {
 		t.Fatalf("policer model = use %t rate %v", bbr.longTermUseBandwidth, bbr.longTermBandwidth)
+	}
+}
+
+func TestBBRPolicerClockFollowsDeliveryEvents(t *testing.T) {
+	start := time.Unix(100, 0)
+	for _, interval := range []time.Duration{time.Second, 2 * time.Hour} {
+		bbr := newBBRCongestionControl()
+		state := CongestionState{CongestionWindow: 20_000, MaximumSegmentSize: 1000, DeliveredBytes: 1000}
+		bbr.HandleCongestionEvent(&CongestionEvent{Type: CongestionEventInitialize, Time: start, State: &state})
+		state.LostBytes = 300
+		bbr.HandleCongestionEvent(&CongestionEvent{Type: CongestionEventTimeout, Time: start.Add(time.Second), State: &state})
+		if !bbr.longTermLastStamp.Equal(start) {
+			t.Fatalf("timeout before first ACK moved delivery boundary to %v, want %v", bbr.longTermLastStamp, start)
+		}
+		state.DeliveredBytes += 10_000
+		state.LostBytes += 3000
+		deliveredAt := start.Add(interval)
+		sample := tcpDeliveryRateSample{acked: 10_000, ackTime: deliveredAt}
+		bbr.HandleCongestionEvent(&CongestionEvent{Type: CongestionEventACK, Time: deliveredAt, State: &state, RateSample: &sample})
+		sample = tcpDeliveryRateSample{ackTime: deliveredAt.Add(time.Second)}
+		bbr.HandleCongestionEvent(&CongestionEvent{Type: CongestionEventACK, Time: sample.ackTime, State: &state, RateSample: &sample})
+		if !bbr.deliveredAt.Equal(deliveredAt) {
+			t.Fatalf("zero-delivery ACK moved clock to %v, want %v", bbr.deliveredAt, deliveredAt)
+		}
+		bbr.longTermRounds = bbrLongTermMinimumRounds
+		bbr.HandleCongestionEvent(&CongestionEvent{Type: CongestionEventTimeout, Time: deliveredAt.Add(10 * time.Second), State: &state})
+		if want := 10_000 / interval.Seconds(); bbr.longTermBandwidth != want || !bbr.longTermLastStamp.Equal(deliveredAt) {
+			t.Fatalf("policer interval %v = rate %f stamp %v, want %f and %v", interval, bbr.longTermBandwidth, bbr.longTermLastStamp, want, deliveredAt)
+		}
+		restart := deliveredAt.Add(20 * time.Second)
+		bbr.HandleCongestionEvent(&CongestionEvent{Type: CongestionEventPacketSent, Time: restart, State: &state, PacketBytes: 1000, OutstandingBytes: 0})
+		if !bbr.deliveredAt.Equal(restart) {
+			t.Fatalf("empty-flight restart = %v, want %v", bbr.deliveredAt, restart)
+		}
 	}
 }
 
@@ -298,7 +333,7 @@ func TestBBRInitialPacingQuantumAllowsTenSegments(t *testing.T) {
 			t.Fatalf("initial segment %d pacing delay = %v", segment+1, delay)
 		}
 		flight := uint32(segment * mss)
-		_, _ = controller.onDataSend(mss, mss, start, monotonicStamp(segment+1), flight, 10*mss, flight, 0, 0)
+		_, _ = controller.onDataSend(mss, mss, start, monotonicStamp(segment+1), flight, 10*mss, flight, flight, 0, 0)
 	}
 	if delay := controller.pacingDelay(start, mss, 10*mss, 10*mss, mss, 100*time.Millisecond, ^uint32(0)); delay <= 0 {
 		t.Fatalf("post-initial-quantum pacing delay = %v", delay)
@@ -309,7 +344,7 @@ func TestBBRPacedBatchBoundsFutureCredit(t *testing.T) {
 	const mss = 1000
 	start := time.Unix(100, 0)
 	controller := newTCPCongestionController(CongestionControlBBR)
-	controller.initialize(start, 0, time.Millisecond, 100*mss, 100*mss, mss, 1)
+	controller.initialize(CongestionPhaseOpen, start, 0, time.Millisecond, 100*mss, 100*mss, mss, 1)
 	controller.pacingSegments = tcpPacingInitialBurst
 	bbrState(t, &controller).pacingRate = 1_000_000
 	bbrState(t, &controller).nextSend = start
@@ -319,7 +354,7 @@ func TestBBRPacedBatchBoundsFutureCredit(t *testing.T) {
 			t.Fatalf("paced byte %d delayed by %v before credit exhaustion", sent, delay)
 		}
 		flight := uint32(sent + mss)
-		_, _ = controller.onDataSend(mss, mss, start, monotonicStamp(sent+1), flight, 100*mss, flight, 0, 0)
+		_, _ = controller.onDataSend(mss, mss, start, monotonicStamp(sent+1), flight, 100*mss, flight, flight, 0, 0)
 	}
 	if delay := controller.pacingDelay(start, mss, 100*mss, uint32(2*budget), mss, time.Millisecond, 100*mss); delay <= 0 {
 		t.Fatalf("sender released more than one future %d-byte pacing group", budget)
@@ -391,7 +426,7 @@ func TestBBRLatePacingWakeMarksDeliverySampleSchedulerLimited(t *testing.T) {
 	const mss = 1000
 	start := time.Unix(100, 0)
 	controller := newTCPCongestionController(CongestionControlBBR)
-	controller.initialize(start, 0, 10*time.Millisecond, 20*mss, 20*mss, mss, 1)
+	controller.initialize(CongestionPhaseOpen, start, 0, 10*time.Millisecond, 20*mss, 20*mss, mss, 1)
 	bbr := bbrState(t, &controller)
 	bbr.pacingRate = 1_000_000
 	bbr.nextSend = start.Add(10 * time.Millisecond)
@@ -662,14 +697,14 @@ func TestBBRExpiredMinimumRTTIgnoresDelayedACK(t *testing.T) {
 func TestBBRIdleRestartResetsSamplingInterval(t *testing.T) {
 	controller := newTCPCongestionController(CongestionControlBBR)
 	now := time.Unix(150, 0)
-	controller.initialize(now, 0, 0, 10_000, 10_000, 1000, 1)
+	controller.initialize(CongestionPhaseOpen, now, 0, 0, 10_000, 10_000, 1000, 1)
 	bbrState(t, &controller).bandwidth = 100000
 	bbrState(t, &controller).pacingRate = 100000
 	controller.delivery.firstSent = 10
 	controller.delivery.deliveredStamp = 10
 	bbrState(t, &controller).nextSend = time.Unix(200, 0)
 	stamp := monotonicStamp(20*time.Microsecond) + 1
-	snapshot, _ := controller.onDataSend(1000, 1000, now, stamp, 0, 10_000, 0, 0, 0)
+	snapshot, _ := controller.onDataSend(1000, 1000, now, stamp, 0, 10_000, 0, 0, 0, 0)
 	if snapshot.firstSent != tcpDeliveryTimestampAt(stamp) || snapshot.deliveredStamp != tcpDeliveryTimestampAt(stamp) || bbrState(t, &controller).nextSend.Before(now) || !bbrState(t, &controller).idleRestart {
 		t.Fatalf("BBR idle restart state = first %d delivered %d next %v", snapshot.firstSent, snapshot.deliveredStamp, bbrState(t, &controller).nextSend)
 	}
@@ -682,14 +717,14 @@ func TestBBRIdleRestartUsesNeutralPacingAndSkipsProbeRTT(t *testing.T) {
 	const mss = 1000
 	controller := newTCPCongestionController(CongestionControlBBR)
 	start := time.Unix(100, 0)
-	controller.initialize(start, 10*time.Millisecond, 10*time.Millisecond, 10*mss, 10*mss, mss, 1)
+	controller.initialize(CongestionPhaseOpen, start, 10*time.Millisecond, 10*time.Millisecond, 10*mss, 10*mss, mss, 1)
 	bbrState(t, &controller).mode = bbrProbeBandwidth
 	bbrState(t, &controller).cycleIndex = 0
 	bbrState(t, &controller).bandwidth = 100000
 	bbrState(t, &controller).pacingRate = 100000
 	bbrState(t, &controller).minimumRTT = 10 * time.Millisecond
 	bbrState(t, &controller).minimumRTTStamp = start.Add(-bbrMinRTTWindow)
-	_, _ = controller.onDataSend(mss, mss, start, 1, 0, 10*mss, 0, 0, 0)
+	_, _ = controller.onDataSend(mss, mss, start, 1, 0, 10*mss, 0, 0, 0, 0)
 	if gain := bbrState(t, &controller).pacingGain(); gain != bbrProbeBandwidthGains[0] {
 		t.Fatalf("BBR idle restart saved pacing gain = %v, want %v", gain, bbrProbeBandwidthGains[0])
 	}
@@ -840,7 +875,7 @@ func TestBBRSpuriousRecoveryUndoRetainsDeliveryAccounting(t *testing.T) {
 	controller.delivery.delivered = 1000
 	controller.syncDeliveryState()
 	var undo tcpRecoveryUndo
-	undo.begin(false, 2000, 20_000, 20_000, 10_000, &controller, rttEstimator{})
+	undo.begin(false, 2000, 20_000, 20_000, 10_000, &controller, rttEstimator{}, time.Unix(100, 0))
 	controller.delivery.delivered = 5000
 	controller.syncDeliveryState()
 	bbrState(t, &controller).delivered = 5000

@@ -29,28 +29,18 @@ type synCookieOptions struct {
 	timestampNow     uint32
 }
 
-func (state *tcpPassiveState) synCookieKey(now time.Time, windowScale uint8) ([16]byte, uint64, uint8, error) {
+func (state *tcpPassiveState) synCookieKey(now time.Time) ([16]byte, uint64, error) {
 	state.cookieMu.Lock()
 	defer state.cookieMu.Unlock()
 	if !state.cookieSet {
 		if _, err := rand.Read(state.cookieKey[:]); err != nil {
-			return [16]byte{}, 0, 0, err
+			return [16]byte{}, 0, err
 		}
 		state.cookieEpoch = now
 		state.cookieSet = true
 	}
 	period := synCookiePeriodNumber(now, state.cookieEpoch)
-	if !state.cookieScaleSet || period > state.cookieScalePeriod {
-		if state.cookieScaleSet {
-			state.previousScaleSet = true
-			state.previousScalePeriod = state.cookieScalePeriod
-			state.previousWindowScale = state.cookieWindowScale
-		}
-		state.cookieScaleSet = true
-		state.cookieScalePeriod = period
-		state.cookieWindowScale = windowScale
-	}
-	return state.cookieKey, period, state.cookieWindowScale, nil
+	return state.cookieKey, period, nil
 }
 
 func (state *tcpPassiveState) noteSYNCookie(period uint64) {
@@ -62,17 +52,14 @@ func (state *tcpPassiveState) noteSYNCookie(period uint64) {
 	state.cookieMu.Unlock()
 }
 
-func (state *tcpPassiveState) recentSYNCookieState(now time.Time) ([16]byte, uint64, [2]uint64, [2]uint8, [2]bool, bool) {
+func (state *tcpPassiveState) recentSYNCookieState(now time.Time) ([16]byte, uint64, bool) {
 	state.cookieMu.Lock()
 	defer state.cookieMu.Unlock()
 	period := synCookiePeriodNumber(now, state.cookieEpoch)
 	if !state.cookieSet || !state.cookieActive || period < state.cookiePeriod || period-state.cookiePeriod > 1 {
-		return [16]byte{}, 0, [2]uint64{}, [2]uint8{}, [2]bool{}, false
+		return [16]byte{}, 0, false
 	}
-	periods := [2]uint64{state.cookieScalePeriod, state.previousScalePeriod}
-	scales := [2]uint8{state.cookieWindowScale, state.previousWindowScale}
-	set := [2]bool{state.cookieScaleSet, state.previousScaleSet}
-	return state.cookieKey, period, periods, scales, set, true
+	return state.cookieKey, period, true
 }
 
 func (state *tcpPassiveState) sendSYNCookie(stack *Stack, listener *TCPListener, key tcpKey, syn tcpSegment, now time.Time) error {
@@ -81,26 +68,31 @@ func (state *tcpPassiveState) sendSYNCookie(stack *Stack, listener *TCPListener,
 		defaults = applyTCPSocketOptions(defaults, listener.options)
 	}
 	configuredScale := tcpReceiveWindowScaleFor(defaults.MaximumReceiveBuffer)
-	secret, period, windowScale, err := state.synCookieKey(now, configuredScale)
+	secret, period, err := state.synCookieKey(now)
 	if err != nil {
 		return err
 	}
 	options, data := encodeSYNCookieOptions(syn, key.remote.Addr())
 	authenticatedData := synCookieAuthenticatedData(data, options.timestamp, options.ecn)
-	sequence := synCookieSequence(secret, key, syn.sequence, period, data, authenticatedData)
+	var generation uint64
+	if listener != nil {
+		generation = listener.cookieGeneration
+	}
+	sequence := synCookieSequence(secret, key, generation, syn.sequence, period, data, authenticatedData)
 	localMSS := tcpMSSForMTU(stack.mtuFor(key.remote.Addr()), key.local.Addr())
 	if localMSS < 1 {
 		return errors.New("mipstack: MTU is too small for TCP")
 	}
 	timestamp := stack.tcpTimestamp()
 	if options.timestamp {
-		timestamp &^= 1
-		if options.ecn {
-			timestamp |= 1
-		}
+		timestamp = synCookieTimestamp(timestamp, options.ecn)
 	}
 	var optionStorage [40]byte
-	tcpOptions := tcpPassiveSYNOptions(optionStorage[:0], localMSS, options.sack, options.windowScaling, options.timestamp, windowScale, timestamp, options.timestampNow)
+	advertisedScale := configuredScale
+	if listener != nil {
+		advertisedScale = listener.recordSYNCookieScale(period, configuredScale)
+	}
+	tcpOptions := tcpPassiveSYNOptions(optionStorage[:0], localMSS, options.sack, options.windowScaling, options.timestamp, advertisedScale, timestamp, options.timestampNow)
 	flags := byte(TCPFlagSYN | TCPFlagACK)
 	if options.ecn {
 		flags |= TCPFlagECE
@@ -114,11 +106,22 @@ func (state *tcpPassiveState) sendSYNCookie(stack *Stack, listener *TCPListener,
 	return stack.tryWriteTCPControl(key.local.Addr(), key.remote.Addr(), key.local.Port(), key.remote.Port(), sequence, syn.sequence+1, flags, uint16(receiveWindow), tcpOptions, nil, stack.mtuFor(key.remote.Addr()), defaults.TrafficClass, 0, defaults.FlowLabel, flowLabelSet, outputFlowKey{})
 }
 
-func (state *tcpPassiveState) validateSYNCookie(key tcpKey, ack tcpSegment, now time.Time) (uint32, synCookieOptions, bool, bool) {
+func synCookieTimestamp(raw uint32, ecn bool) uint32 {
+	timestamp := raw &^ 1
+	if ecn {
+		timestamp |= 1
+	}
+	if tcpSequenceGreater(timestamp, raw) {
+		timestamp -= 2
+	}
+	return timestamp
+}
+
+func (state *tcpPassiveState) validateSYNCookie(key tcpKey, ack tcpSegment, now time.Time, listener *TCPListener) (uint32, synCookieOptions, bool, bool) {
 	if ack.flags&TCPFlagACK == 0 || ack.flags&(TCPFlagSYN|TCPFlagRST) != 0 {
 		return 0, synCookieOptions{}, false, false
 	}
-	secret, period, scalePeriods, windowScales, scalesSet, active := state.recentSYNCookieState(now)
+	secret, period, active := state.recentSYNCookieState(now)
 	if !active {
 		return 0, synCookieOptions{}, false, false
 	}
@@ -143,31 +146,25 @@ func (state *tcpPassiveState) validateSYNCookie(key tcpKey, ack tcpSegment, now 
 	}
 	valid := false
 	matchedTimestamp, matchedECN := false, false
-	localWindowScale := uint8(0)
+	matchedPeriod := uint64(0)
+	var generation uint64
+	if listener != nil {
+		generation = listener.cookieGeneration
+	}
 	for attempt := uint64(0); attempt < 2; attempt++ {
 		if attempt > period {
 			break
 		}
 		candidatePeriod := period - attempt
-		candidateScale, scaleFound := uint8(0), false
-		for index := range scalePeriods {
-			if scalesSet[index] && scalePeriods[index] == candidatePeriod {
-				candidateScale, scaleFound = windowScales[index], true
-				break
-			}
-		}
-		if !scaleFound {
-			continue
-		}
 		for candidateIndex := 0; candidateIndex < candidateCount; candidateIndex++ {
 			candidate := candidates[candidateIndex]
 			authenticatedData := synCookieAuthenticatedData(data, candidate.timestamp, candidate.ecn)
-			expected := synCookieSequence(secret, key, clientSequence, candidatePeriod, data, authenticatedData)
+			expected := synCookieSequence(secret, key, generation, clientSequence, candidatePeriod, data, authenticatedData)
 			if subtle.ConstantTimeEq(int32(expected), int32(serverSequence)) == 1 {
 				valid = true
 				matchedTimestamp = candidate.timestamp
 				matchedECN = candidate.ecn
-				localWindowScale = candidateScale
+				matchedPeriod = candidatePeriod
 			}
 		}
 	}
@@ -182,23 +179,28 @@ func (state *tcpPassiveState) validateSYNCookie(key tcpKey, ack tcpSegment, now 
 	if options.timestamp {
 		options.timestampNow = timestampValue
 	}
-	options.ecn = timestampPresent && timestampEcho != 0 && matchedECN
-	options.localWindowScale = localWindowScale
+	options.ecn = timestampPresent && matchedECN
+	if listener != nil && options.windowScaling {
+		localScale, ok := listener.lookupSYNCookieScale(matchedPeriod)
+		if !ok {
+			return 0, synCookieOptions{}, false, true
+		}
+		options.localWindowScale = localScale
+	}
 	if !timestampPresent {
 		options.sack = false
 		options.windowScaling = false
 		options.windowScale = 0
 		options.localWindowScale = 0
-	} else if timestampEcho == 0 {
-		options.sack = false
-		options.windowScaling = true
-		options.windowScale = 0
 	}
 	return serverSequence, options, true, true
 }
 
 func encodeSYNCookieOptions(syn tcpSegment, remoteAddress netip.Addr) (synCookieOptions, uint32) {
 	mss, scale, scaling, sack, timestamp, timestampValue := parseTCPOptions(syn.optionBytes(), defaultTCPPeerMSS(remoteAddress), 65535)
+	if !timestamp {
+		scale, scaling, sack = 0, false, false
+	}
 	mssIndex := 0
 	for index, value := range synCookieMSSValues {
 		if int(value) > mss {
@@ -255,8 +257,8 @@ func synCookiePeriodNumber(now, epoch time.Time) uint64 {
 	return uint64(elapsed / synCookiePeriod)
 }
 
-func synCookieSequence(secret [16]byte, key tcpKey, clientSequence uint32, period uint64, data, authenticatedData uint32) uint32 {
-	var input [51]byte
+func synCookieSequence(secret [16]byte, key tcpKey, generation uint64, clientSequence uint32, period uint64, data, authenticatedData uint32) uint32 {
+	var input [59]byte
 	if key.local.Addr().Is6() {
 		input[0] = 6
 	} else {
@@ -268,9 +270,10 @@ func synCookieSequence(secret [16]byte, key tcpKey, clientSequence uint32, perio
 	copy(input[17:33], remote[:])
 	binary.BigEndian.PutUint16(input[33:35], key.local.Port())
 	binary.BigEndian.PutUint16(input[35:37], key.remote.Port())
-	binary.BigEndian.PutUint32(input[37:41], clientSequence)
-	binary.BigEndian.PutUint64(input[41:49], period)
-	binary.BigEndian.PutUint16(input[49:51], uint16(authenticatedData))
+	binary.BigEndian.PutUint64(input[37:45], generation)
+	binary.BigEndian.PutUint32(input[45:49], clientSequence)
+	binary.BigEndian.PutUint64(input[49:57], period)
+	binary.BigEndian.PutUint16(input[57:59], uint16(authenticatedData))
 	tag := uint32(sipHash24(secret, input[:])) &^ synCookieDataMask
 	return tag | data
 }

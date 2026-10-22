@@ -50,6 +50,70 @@ func TestTCPDeliveryRateSampleUsesClockTieTransmissionOrder(t *testing.T) {
 	}
 }
 
+func TestTCPDeliveryRateSampleSeparatesSACKProbeEligibility(t *testing.T) {
+	stamp := monotonicStamp(time.Second) + 1
+	estimator := tcpDeliveryRateEstimator{}
+	segment := sentTCPSegment{
+		sequence: 1, end: 1001,
+		state:                 sentTCPSegmentTransmitted | sentTCPSegmentSACKed,
+		congestionPacketState: 0x1234,
+		hostQueue:             packetQueueTicket{queuedAt: stamp},
+		delivery:              tcpDeliverySnapshot{firstSent: 1, deliveredStamp: 1, deliveredFlags: 100},
+	}
+	var sample tcpDeliveryRateSample
+	sample.observe(segment)
+	if sample.packetState != 0x1234 || sample.PacketLossEvidenceValid() {
+		t.Fatalf("SACK sample metadata = %#x/%t, want original/invalid", sample.packetState, sample.PacketLossEvidenceValid())
+	}
+	estimator.finishRateSample(&sample, 100, 100, 0, time.Unix(100, 0), stamp+monotonicStamp(time.Millisecond), 0, 0, 0)
+
+	segment.state &^= sentTCPSegmentSACKed
+	segment.congestionPacketState = 0x5678
+	sample = tcpDeliveryRateSample{}
+	sample.observe(segment)
+	if !sample.PacketLossEvidenceValid() {
+		t.Fatal("fresh transmission remained marked as SACK-invalid")
+	}
+	estimator.finishRateSample(&sample, 100, 100, 0, time.Unix(100, 0), stamp+monotonicStamp(2*time.Millisecond), 0, 0, 0)
+	if sample.packetState != 0x5678 {
+		t.Fatalf("fresh sample metadata = %#x, want %#x", sample.packetState, uint64(0x5678))
+	}
+}
+
+func TestTCPDeliveryRateSampleUsesSelectedGenerationLossEvidence(t *testing.T) {
+	base := sentTCPSegment{
+		sequence: 1, end: 1001,
+		hostQueue: packetQueueTicket{queuedAt: monotonicStamp(1)},
+		delivery:  tcpDeliverySnapshot{firstSent: 1, deliveredStamp: 1},
+	}
+	for _, test := range []struct {
+		name        string
+		olderSACKed bool
+		newerSACKed bool
+		wantValid   bool
+	}{
+		{name: "newer ordinary generation", olderSACKed: true, wantValid: true},
+		{name: "newer SACK generation", newerSACKed: true, wantValid: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			older, newer := base, base
+			older.state = sentTCPSegmentTransmitted
+			older.state.set(sentTCPSegmentSACKed, test.olderSACKed)
+			older.congestionPacketState = 1
+			newer.state = sentTCPSegmentTransmitted
+			newer.state.set(sentTCPSegmentSACKed, test.newerSACKed)
+			newer.hostQueue.queuedAt = monotonicStamp(2)
+			newer.congestionPacketState = 2
+			var sample tcpDeliveryRateSample
+			sample.observe(older)
+			sample.observe(newer)
+			if sample.packetState != 2 || sample.PacketLossEvidenceValid() != test.wantValid {
+				t.Fatalf("selected generation = state %#x/%t, want packet state 2/evidence %t", sample.packetState, sample.PacketLossEvidenceValid(), test.wantValid)
+			}
+		})
+	}
+}
+
 func TestTCPDeliveryRateSampleRejectsSACKReneging(t *testing.T) {
 	controller := newTCPCongestionController(CongestionControlBBR)
 	sample := tcpDeliveryRateSample{

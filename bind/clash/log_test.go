@@ -145,3 +145,36 @@ func TestRecentLogRingHonorsConfiguredMaximum(t *testing.T) {
 		t.Fatalf("bounded ring = %v", got)
 	}
 }
+
+func TestSetupLinesGoToTheNextWriterOnce(t *testing.T) {
+	t.Cleanup(func() { logrus.SetOutput(os.Stdout) })
+	logRedirectMu.Lock()
+	attached := activeLogWriter
+	logRedirectMu.Unlock()
+	stopLogRedirect(attached)
+
+	release := holdSetupLogs()
+	logrus.Warnln("clash setup hold probe")
+	release()
+
+	first := newRecordingPlatform()
+	writer := redirectLogs(first)
+	select {
+	case line := <-first.lines:
+		if !strings.Contains(line, "clash setup hold probe") {
+			t.Fatalf("the first writer was given %q before Setup's line", line)
+		}
+	default:
+		t.Fatal("the line Setup wrote never reached the writer attached after it")
+	}
+	stopLogRedirect(writer)
+
+	second := newRecordingPlatform()
+	writer = redirectLogs(second)
+	t.Cleanup(func() { stopLogRedirect(writer) })
+	select {
+	case line := <-second.lines:
+		t.Fatalf("a later writer was given %q again", line)
+	default:
+	}
+}

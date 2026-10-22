@@ -11,13 +11,13 @@ English · [简体中文](README.zh-CN.md)
 [![Telegram Channel](https://img.shields.io/badge/Telegram-Channel-26A5E4?logo=telegram&logoColor=white)](https://t.me/clashbyclash)
 [![Telegram Group](https://img.shields.io/badge/Telegram-Group-26A5E4?logo=telegram&logoColor=white)](https://t.me/+t__WNRvjUbk3M2Nl)
 
-Clash is a proxy kernel based on **mihomo v1.19.32**, with Go bindings and build tooling for Apple applications. It produces `Clash.xcframework` for iOS, macOS and tvOS.
+Clash is a proxy kernel based on **mihomo v1.19.33**, with Go bindings and build tooling for Apple applications. It produces `Clash.xcframework` for iOS, macOS and tvOS.
 
 To install the official app, use the App Store link above. This repository is for developers building or integrating the kernel.
 
 ## Upstream history and modifications
 
-Clash is an independent derivative of [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo), based on [v1.19.32](https://github.com/MetaCubeX/mihomo/tree/v1.19.32), commit `88dcbf7f1614a67c3b36b848ee3592dfa92ada36`. It is not affiliated with MetaCubeX. The upstream project asks unaffiliated downstream projects not to use “mihomo” in their names.
+Clash is an independent derivative of [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo), based on [v1.19.33](https://github.com/MetaCubeX/mihomo/tree/v1.19.33), commit `3f27ef39f8c96bbfbc8b0b9bb10f5c9ef60149d8`. It is not affiliated with MetaCubeX. The upstream project asks unaffiliated downstream projects not to use “mihomo” in their names.
 
 This repository retains the original mihomo commits and contributor identities. Its first source publication records the accumulated Clash adaptations in one commit, joining the existing README history with the official upstream baseline. Later changes are published as separate logical commits; stable upstream upgrades retain the official upstream commits as merge parents. Compare the upstream baseline with a Clash revision to inspect the Apple bindings, SDK build tools and kernel modifications. This initial publication does not reconstruct the development history of those adaptations.
 
@@ -35,7 +35,7 @@ The upstream GPL-3.0 license remains in [LICENSE](LICENSE). See [NOTICE](NOTICE)
 
 | Component | Current reference |
 | --- | --- |
-| Upstream engine | mihomo **v1.19.32**, recorded in [`UPSTREAM_VERSION`](UPSTREAM_VERSION) |
+| Upstream engine | mihomo **v1.19.33**, recorded in [`UPSTREAM_VERSION`](UPSTREAM_VERSION) |
 | Released Apple SDK | [`v1.19.32-clash.3`](https://github.com/ProjectClash/Clash/releases/tag/v1.19.32-clash.3) |
 | Client integration | Kernel and Adapter commits pinned in the Client's [`Dependencies.lock.json`](https://github.com/ProjectClash/Clash-Client/blob/main/Dependencies.lock.json) |
 
@@ -56,7 +56,7 @@ The iOS and tvOS SDK slices use `no_easytier` and do not include EasyTier. The m
 
 ## Build the Apple SDK
 
-Use macOS with the full Xcode installation and the iOS, macOS and tvOS SDKs. The binding module declares Go 1.26.0 and selects toolchain Go 1.26.9 in [`bind/clash/go.mod`](bind/clash/go.mod); allow Go to obtain that toolchain, or install it explicitly.
+Use macOS with the full Xcode installation and the iOS, macOS and tvOS SDKs. The binding module declares Go 1.26.0 and selects toolchain Go 1.26.10 in [`bind/clash/go.mod`](bind/clash/go.mod); allow Go to obtain that toolchain, or install it explicitly.
 
 To build the current released SDK, clone the repository with its history and tags, check out the release, then install the pinned gomobile tools:
 

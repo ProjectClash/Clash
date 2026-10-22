@@ -715,8 +715,9 @@ func (c *UDPConn) readMsgUDPAddrPort(buffer, oob []byte) (n, oobn, flags int, so
 		err = c.operationError("read", c.remoteAddr(), controlErr)
 		return
 	}
-	oobn = copy(oob, control)
-	if oobn < len(control) {
+	var controlTruncated bool
+	oobn, controlTruncated = copyLinuxControlMessages(oob, control)
+	if controlTruncated {
 		flags |= MessageFlagControlTruncated
 	}
 	return
@@ -727,7 +728,7 @@ func (c *UDPConn) ReadBatch(messages []SocketMessage, flags int) (int, error) {
 		return 0, c.operationError("read", c.remoteAddr(), syscall.EOPNOTSUPP)
 	}
 	if flags&MessageFlagErrorQueue != 0 {
-		return c.readErrorBatch(messages, flags)
+		return c.readErrorBatch(messages)
 	}
 	var network *networkState
 	for index := range messages {
@@ -766,8 +767,8 @@ func (c *UDPConn) readBatchMessage(message *SocketMessage, flags int, wait, cons
 	if truncated {
 		resultFlags |= MessageFlagTruncated
 	}
-	oobn := copy(message.OOB, control)
-	if oobn < len(control) {
+	oobn, controlTruncated := copyLinuxControlMessages(message.OOB, control)
+	if controlTruncated {
 		resultFlags |= MessageFlagControlTruncated
 	}
 	message.N, message.NN, message.Flags = n, oobn, resultFlags
@@ -780,6 +781,14 @@ func (c *UDPConn) readBatchMessage(message *SocketMessage, flags int, wait, cons
 }
 
 func (c *UDPConn) Read(buffer []byte) (int, error) {
+	if len(buffer) == 0 {
+		select {
+		case <-c.closed:
+			return 0, c.operationError("read", c.remoteAddr(), net.ErrClosed)
+		default:
+		}
+		return 0, nil
+	}
 	n, _, _, _, _, err := c.readDatagram(buffer, nil)
 	if err != nil {
 		return n, c.operationError("read", c.remoteAddr(), err)
@@ -878,6 +887,10 @@ func (c *UDPConn) readDatagramBuffers(buffers [][]byte, wait, consumeErrors, pee
 				c.mu.Unlock()
 				return 0, netip.AddrPort{}, netip.Addr{}, ipPacketOptions{}, false, pending
 			}
+		} else if c.errorState != nil && c.errorState.pending != nil {
+			pending := c.errorState.pending
+			c.mu.Unlock()
+			return 0, netip.AddrPort{}, netip.Addr{}, ipPacketOptions{}, false, pending
 		}
 		var datagram udpDatagram
 		var ok bool
@@ -889,8 +902,8 @@ func (c *UDPConn) readDatagramBuffers(buffers [][]byte, wait, consumeErrors, pee
 		if ok {
 			if !peek {
 				c.queuedBytes -= udpDatagramSize(datagram.payload)
-				c.notifyReceiveLocked()
 			}
+			c.notifyReceiveLocked()
 			n = copyMessagePayload(buffers, datagram.payload)
 			truncated = n < len(datagram.payload)
 			if truncated && returnLength {
@@ -929,7 +942,7 @@ func (c *UDPConn) readDatagramBuffers(buffers [][]byte, wait, consumeErrors, pee
 	}
 }
 
-func (c *UDPConn) readErrorBatch(messages []SocketMessage, flags int) (int, error) {
+func (c *UDPConn) readErrorBatch(messages []SocketMessage) (int, error) {
 	for index := range messages {
 		c.mu.Lock()
 		select {
@@ -941,7 +954,7 @@ func (c *UDPConn) readErrorBatch(messages []SocketMessage, flags int) (int, erro
 			return 0, c.operationError("read", c.remoteAddr(), net.ErrClosed)
 		default:
 		}
-		ok, err := c.errorState.readMessage(&messages[index], flags)
+		ok, err := c.errorState.readMessage(&messages[index])
 		if !ok {
 			c.mu.Unlock()
 			if index != 0 {
@@ -991,6 +1004,9 @@ func (c *UDPConn) WriteToUDP(payload []byte, address *net.UDPAddr) (int, error) 
 	}
 	if address == nil {
 		return 0, c.operationError("write", nil, errors.New("mipstack: UDP destination is required"))
+	}
+	if address.Port < 0 || address.Port > 65535 {
+		return 0, c.operationError("write", address, syscall.EINVAL)
 	}
 	return c.writeToUDPAddrPort(payload, address.AddrPort(), address)
 }
@@ -1090,6 +1106,9 @@ func (c *UDPConn) WriteMsgUDP(payload, oob []byte, address *net.UDPAddr) (n, oob
 	} else {
 		if address == nil {
 			return 0, 0, c.operationError("write", nil, errors.New("mipstack: UDP destination is required"))
+		}
+		if address.Port < 0 || address.Port > 65535 {
+			return 0, 0, c.operationError("write", address, syscall.EINVAL)
 		}
 		target = address.AddrPort()
 	}
@@ -1239,16 +1258,14 @@ func (c *UDPConn) prepareWrite(target netip.AddrPort, packetInfoSource netip.Add
 	if err = c.writeError(); err != nil {
 		return udpWriteParameters{}, err
 	}
-	options, pathMTUDiscovery, receiveErrors, pendingErr := c.writeOptions(options)
+	multicastTarget := target.Addr().IsMulticast()
+	options, pathMTUDiscovery, receiveErrors, pendingErr := c.writeOptions(options, multicastTarget)
 	if pendingErr != nil {
 		return udpWriteParameters{}, pendingErr
 	}
 	requestedSource := c.local
 	packetInfoSource = packetInfoSource.Unmap()
 	if packetInfoSource.IsValid() && !packetInfoSource.IsUnspecified() {
-		if !c.local.IsUnspecified() && packetInfoSource != c.local {
-			return udpWriteParameters{}, syscall.EADDRNOTAVAIL
-		}
 		requestedSource = packetInfoSource
 	}
 	var source netip.Addr
@@ -1642,6 +1659,9 @@ func udpAddrPort(address net.Addr) (netip.AddrPort, error) {
 		if udp == nil {
 			return netip.AddrPort{}, errors.New("mipstack: UDP destination is required")
 		}
+		if udp.Port < 0 || udp.Port > 65535 {
+			return netip.AddrPort{}, syscall.EINVAL
+		}
 		return udp.AddrPort(), nil
 	}
 	result, err := netip.ParseAddrPort(address.String())
@@ -1955,9 +1975,9 @@ func (c *UDPConn) SetFlowLabel(label uint32) error {
 	}
 }
 
-func (c *UDPConn) writeOptions(options ipPacketOptions) (ipPacketOptions, PathMTUDiscovery, bool, error) {
+func (c *UDPConn) writeOptions(options ipPacketOptions, multicast bool) (ipPacketOptions, PathMTUDiscovery, bool, error) {
 	c.mu.Lock()
-	options = options.withDefaults(c.defaultOptions)
+	options = options.withDefaults(c.defaultOptions, multicast)
 	pathMTUDiscovery := c.pathMTUDiscovery
 	receiveErrors := c.receiveErrors
 	pending := c.errorState.takePending()

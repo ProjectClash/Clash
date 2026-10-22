@@ -110,13 +110,20 @@ func (c *cubicCongestionControl) restoreRecoveryCheckpoint() {
 }
 
 func (c *cubicCongestionControl) onSend(now time.Time, flight uint32) {
-	if !c.applicationLimited.IsZero() {
-		if !c.epochStart.IsZero() && now.After(c.applicationLimited) {
-			c.epochStart = c.epochStart.Add(now.Sub(c.applicationLimited))
+	if !c.epochStart.IsZero() {
+		idleSince := c.applicationLimited
+		if idleSince.IsZero() && flight == 0 {
+			idleSince = c.lastSend
 		}
+		if !idleSince.IsZero() && now.After(idleSince) {
+			c.epochStart = c.epochStart.Add(now.Sub(idleSince))
+			if c.epochStart.After(now) {
+				c.epochStart = now
+			}
+		}
+	}
+	if !c.applicationLimited.IsZero() {
 		c.applicationLimited = time.Time{}
-	} else if flight == 0 && !c.epochStart.IsZero() && !c.lastSend.IsZero() && now.After(c.lastSend) {
-		c.epochStart = c.epochStart.Add(now.Sub(c.lastSend))
 	}
 	c.lastSend = now
 }
@@ -173,6 +180,9 @@ func (c *cubicCongestionControl) onACK(window, acknowledged uint32, mss int, now
 	if c.epochStart.IsZero() {
 		c.epochStart = now
 		c.estimate = current
+		if c.priorWindow == 0 {
+			c.priorWindow = current
+		}
 		if c.afterTimeout {
 			c.lastMaximum = current
 			c.origin = current
@@ -192,8 +202,13 @@ func (c *cubicCongestionControl) onACK(window, acknowledged uint32, mss int, now
 	}
 	c.estimate += alpha * float64(acknowledged) / float64(window)
 	elapsed := now.Sub(c.epochStart).Seconds()
-	curve := 0.4*math.Pow(elapsed-c.k, 3) + c.origin
-	target := 0.4*math.Pow(elapsed+smoothedRTT.Seconds()-c.k, 3) + c.origin
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	curveOffset := elapsed - c.k
+	targetOffset := elapsed + smoothedRTT.Seconds() - c.k
+	curve := 0.4*(curveOffset*curveOffset*curveOffset) + c.origin
+	target := 0.4*(targetOffset*targetOffset*targetOffset) + c.origin
 	if target < current {
 		target = current
 	} else if maximum := 1.5 * current; target > maximum {

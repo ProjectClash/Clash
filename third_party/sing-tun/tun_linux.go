@@ -217,7 +217,7 @@ func (t *NativeTun) BatchWrite(buffers [][]byte, offset int) (int, error) {
 	)
 	t.gsoToWrite = t.gsoToWrite[:0]
 	if t.vnetHdr {
-		err := handleGRO(buffers, offset, t.tcpGROTable, t.udpGROTable, t.gro, &t.gsoToWrite)
+		err := handleGRO(buffers, offset, t.tcpGROTable, t.udpGROTable, t.gro, !t.txChecksumOffload, &t.gsoToWrite)
 		if err != nil {
 			return 0, err
 		}
@@ -385,7 +385,12 @@ func (t *NativeTun) configure(tunLink netlink.Link) error {
 		return err
 	}
 
-	t.setSearchDomainForSystemdResolved()
+	if t.options.DNSModeOrDefault() != DNSModeDisabled {
+		err = t.setSearchDomainForSystemdResolved()
+		if err != nil {
+			return E.Cause(err, "set search domain")
+		}
+	}
 
 	if t.options.AutoRoute && runtime.GOOS == "android" {
 		t.interfaceCallback = t.options.InterfaceMonitor.RegisterCallback(t.routeUpdate)
@@ -420,7 +425,9 @@ func (t *NativeTun) Close() error {
 	if t.interfaceCallback != nil {
 		t.options.InterfaceMonitor.UnregisterCallback(t.interfaceCallback)
 	}
-	t.unsetSearchDomainForSystemdResolved()
+	if t.options.DNSModeOrDefault() != DNSModeDisabled {
+		t.unsetSearchDomainForSystemdResolved()
+	}
 	t.unsetAddresses()
 	return E.Errors(t.unsetRoute(), t.unsetRules(), common.Close(common.PtrOrNil(t.tunFile)))
 }
@@ -1012,37 +1019,24 @@ func (t *NativeTun) routeUpdate(_ *control.Interface, flags int) {
 	}
 }
 
-func (t *NativeTun) setSearchDomainForSystemdResolved() {
-	if t.options.EXP_DisableDNSHijack {
-		return
-	}
+func (t *NativeTun) setSearchDomainForSystemdResolved() error {
 	ctlPath, err := exec.LookPath("resolvectl")
 	if err != nil {
-		return
+		return nil
 	}
-	dnsServer := t.options.DNSServers
-	if len(dnsServer) == 0 {
-		if len(t.options.Inet4Address) > 0 && HasNextAddress(t.options.Inet4Address[0], 1) {
-			dnsServer = append(dnsServer, t.options.Inet4Address[0].Addr().Next())
-		}
-		if len(t.options.Inet6Address) > 0 && HasNextAddress(t.options.Inet6Address[0], 1) {
-			dnsServer = append(dnsServer, t.options.Inet6Address[0].Addr().Next())
-		}
-	}
-	if len(dnsServer) == 0 {
-		return
+	dnsServer, err := t.options.DNSServerAddress()
+	if err != nil {
+		return err
 	}
 	go func() {
 		_ = shell.Exec(ctlPath, "domain", t.options.Name, "~.").Run()
 		_ = shell.Exec(ctlPath, "default-route", t.options.Name, "true").Run()
 		_ = shell.Exec(ctlPath, append([]string{"dns", t.options.Name}, common.Map(dnsServer, netip.Addr.String)...)...).Run()
 	}()
+	return nil
 }
 
 func (t *NativeTun) unsetSearchDomainForSystemdResolved() {
-	if t.options.EXP_DisableDNSHijack {
-		return
-	}
 	ctlPath, err := exec.LookPath("resolvectl")
 	if err != nil {
 		return

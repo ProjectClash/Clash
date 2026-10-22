@@ -5,6 +5,12 @@ package tunnel
 
 func tryAcquireUDPSessionSlot() bool { return true }
 
+func reserveUDPSessionSlot() {}
+
+func cancelUDPSessionSlotReservation() {}
+
+func tryTakeReservedUDPSessionSlot() bool { return true }
+
 func releaseUDPSessionSlot() {}
 
 func noteUDPSessionRejected() {}

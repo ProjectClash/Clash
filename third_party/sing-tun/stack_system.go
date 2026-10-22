@@ -1009,9 +1009,9 @@ func (w *systemUDPPacketWriter4) WritePacket(buffer *buf.Buffer, destination M.S
 	udpHdr.SetSourcePort(destination.Port)
 	udpHdr.SetLength(uint16(buffer.Len() + header.UDPMinimumSize))
 	if !w.txChecksumOffload {
-		udpHdr.SetChecksum(^checksum.Checksum(udpHdr.Payload(), udpHdr.CalculateChecksum(
+		udpHdr.SetChecksum(header.NormalizeUDPChecksum(^checksum.Checksum(udpHdr.Payload(), udpHdr.CalculateChecksum(
 			header.PseudoHeaderChecksum(header.UDPProtocolNumber, ipHdr.SourceAddressSlice(), ipHdr.DestinationAddressSlice(), ipHdr.PayloadLength()),
-		)))
+		))))
 	} else {
 		udpHdr.SetChecksum(0)
 	}
@@ -1053,9 +1053,9 @@ func (w *systemUDPPacketWriter6) WritePacket(buffer *buf.Buffer, destination M.S
 	udpHdr.SetSourcePort(destination.Port)
 	udpHdr.SetLength(udpLen)
 	if !w.txChecksumOffload {
-		udpHdr.SetChecksum(^checksum.Checksum(udpHdr.Payload(), udpHdr.CalculateChecksum(
+		udpHdr.SetChecksum(header.NormalizeUDPChecksum(^checksum.Checksum(udpHdr.Payload(), udpHdr.CalculateChecksum(
 			header.PseudoHeaderChecksum(header.UDPProtocolNumber, ipHdr.SourceAddressSlice(), ipHdr.DestinationAddressSlice(), ipHdr.PayloadLength()),
-		)))
+		))))
 	} else {
 		udpHdr.SetChecksum(0)
 	}

@@ -287,6 +287,7 @@ type CongestionEvent struct {
 	PreviousMaximumSegmentSize int
 	PreviousPhase CongestionPhase
 	MarkApplicationLimited bool
+	PacketLossEvidenceValid bool
 	Recovery CongestionRecovery
 	Pacing CongestionPacing
 	Diagnostics CongestionDiagnostics

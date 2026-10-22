@@ -386,6 +386,16 @@ var deviationRules = []deviationRule{
 		mechanism:   tunRoutingIsApplesMechanism,
 	},
 	{
+		field:       "tun.dns-mode",
+		category:    deviationForced,
+		effective:   "not set: the app sets this device's DNS to the tunnel",
+		reason:      "on Apple the tunnel's DNS is set by the app's network settings, not by the core, so whether the core sets it has nothing to choose",
+		source:      "bind/clash/override.go overrideTunForIOS; Apple NEPacketTunnelNetworkSettings.dnsSettings",
+		recoverable: false,
+		applies:     underPacketTunnel,
+		mechanism:   "sing-tun's configureDNS registers the tunnel address as the system DNS only for a utun it opened itself; the extension hands it a descriptor and installs NEDNSSettings itself (TunOptions.GetDNSServerAddress)",
+	},
+	{
 		field:       "tun.auto-detect-interface",
 		category:    deviationForced,
 		effective:   "false: the extension decides its own egress interface",

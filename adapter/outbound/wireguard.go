@@ -24,8 +24,11 @@ import (
 	"github.com/ProjectClash/Clash/dns"
 	"github.com/ProjectClash/Clash/log"
 
+	amneziav3 "github.com/metacubex/amneziawg-go/device"
+	amnezia "github.com/metacubex/amneziawg-go/device_v1"
 	"github.com/metacubex/mipstack"
 	wireguard "github.com/metacubex/sing-wireguard"
+	"github.com/metacubex/wireguard-go/device"
 	"github.com/metacubex/wireguard-go/tun"
 
 	"github.com/metacubex/sing/common/debug"
@@ -51,6 +54,9 @@ type WireGuard struct {
 	tunDevice wireguardDevice
 	resolver  resolver.Resolver
 
+	runCtx        context.Context
+	runCancel     context.CancelFunc
+	deviceMutex   sync.Mutex
 	initOk        atomic.Bool
 	initMutex     sync.Mutex
 	initErr       error
@@ -384,7 +390,8 @@ func NewWireGuard(option WireGuardOption) (*WireGuard, error) {
 		}
 	}
 	singDialer = clashBindDialer{Dialer: singDialer, dials: &outbound.clashDevice.bindDials}
-	outbound.bind = wireguard.NewClientBind(context.Background(), wgSingErrorHandler{outbound.Name()}, singDialer, isConnect, outbound.connectAddr.AddrPort(), reserved)
+	outbound.runCtx, outbound.runCancel = context.WithCancel(context.Background())
+	outbound.bind = wireguard.NewClientBind(outbound.runCtx, wgSingErrorHandler{outbound.Name()}, singDialer, isConnect, outbound.connectAddr.AddrPort(), reserved)
 
 	if outbound.bind == nil {
 		return nil, E.New("failed to create wireguard client bind")
@@ -454,11 +461,8 @@ func NewWireGuard(option WireGuardOption) (*WireGuard, error) {
 		}
 		option.AmneziaWGOption.HeaderProtectionKey = hex.EncodeToString(bytes)
 	}
-	outbound.option = option
-
-	mtu := option.MTU
-	if mtu == 0 {
-		mtu = 1408
+	if option.MTU == 0 {
+		option.MTU = 1408
 	}
 	option.IPStack.normalize()
 	if err = option.IPStack.validate(); err != nil {
@@ -468,16 +472,11 @@ func NewWireGuard(option WireGuardOption) (*WireGuard, error) {
 		return nil, E.New("missing local address")
 	}
 
+	outbound.option = option
 	if option.AmneziaWGOption != nil {
 		outbound.bind.SetParseReserved(false) // AmneziaWG don't need parse reserved
 	}
-	outbound.clashDevice.ipStack, outbound.clashDevice.mtu = option.IPStack, uint32(mtu)
 	outbound.tunDevice, outbound.device = outbound.clashDevice.handles()
-	if clashIPStackMayRefuse(outbound.localPrefixes, uint32(mtu)) {
-		if err = outbound.clashBuildDevice(); err != nil {
-			return nil, err
-		}
-	}
 
 	var has6 bool
 	for _, address := range outbound.localPrefixes {
@@ -490,7 +489,6 @@ func NewWireGuard(option WireGuardOption) (*WireGuard, error) {
 	if option.RemoteDnsResolve && len(option.Dns) > 0 {
 		nss, err := dns.ParseNameServer(option.Dns)
 		if err != nil {
-			outbound.device.Close()
 			return nil, err
 		}
 		for i := range nss {
@@ -530,7 +528,7 @@ func (w *WireGuard) init(ctx context.Context) error {
 	return nil
 }
 
-func (w *WireGuard) init0(ctx context.Context) error {
+func (w *WireGuard) init0(ctx context.Context) (err error) {
 	if w.initOk.Load() {
 		return nil
 	}
@@ -543,6 +541,10 @@ func (w *WireGuard) init0(ctx context.Context) error {
 	if w.initErr != nil {
 		return w.initErr
 	}
+	if err = w.runCtx.Err(); err != nil {
+		return err
+	}
+	defer w.clashForgetRebuildFailure()
 	w.serverAddrMutex.Lock()
 	defer w.serverAddrMutex.Unlock()
 
@@ -554,27 +556,73 @@ func (w *WireGuard) init0(ctx context.Context) error {
 		// let us can retry domain resolve in next time
 		return err
 	}
+	if err = ctx.Err(); err != nil {
+		return err
+	}
+	w.clashAwaitRehandshakeGap()
+
+	stack, err := newIPStack(w.option.IPStack, w.localPrefixes, uint32(w.option.MTU))
+	if err != nil {
+		w.initErr = E.Cause(err, "create WireGuard stack")
+		return w.initErr
+	}
+	tunDevice, err := newWireguardDevice(stack)
+	if err != nil {
+		_ = stack.Close()
+		w.initErr = E.Cause(err, "create WireGuard device")
+		return w.initErr
+	}
+
+	logger := &device.Logger{
+		Verbosef: func(format string, args ...interface{}) {
+			log.SingLogger.Debug(fmt.Sprintf("[WG](%s) %s", w.option.Name, fmt.Sprintf(format, args...)))
+		},
+		Errorf: func(format string, args ...interface{}) {
+			log.SingLogger.Error(fmt.Sprintf("[WG](%s) %s", w.option.Name, fmt.Sprintf(format, args...)))
+		},
+	}
+	var wgDevice wireguardGoDevice
+	if w.option.AmneziaWGOption != nil {
+		if w.option.AmneziaWGOption.Version == 3 {
+			wgDevice = amneziav3.NewDevice(tunDevice, w.bind, logger, w.option.Workers)
+		} else {
+			wgDevice = amnezia.NewDevice(tunDevice, w.bind, logger, w.option.Workers)
+		}
+	} else {
+		wgDevice = device.NewDevice(tunDevice, w.bind, logger, w.option.Workers)
+	}
+	defer func() {
+		if err != nil {
+			wgDevice.Close()
+		}
+	}()
 
 	if debug.Enabled {
 		log.SingLogger.Trace(fmt.Sprintf("[WG](%s) created wireguard ipc conf: \n %s", w.option.Name, ipcConf))
 	}
-	if err = w.clashBuildDevice(); err != nil {
-		return err
-	}
-	err = w.device.IpcSet(ipcConf)
+	err = wgDevice.IpcSet(ipcConf)
 	if err != nil {
 		w.initErr = E.Cause(err, "setup wireguard")
 		return w.initErr
 	}
 	w.serverAddrTime.Store(time.Now())
 
-	err = w.tunDevice.Start()
+	err = tunDevice.Start()
 	if err != nil {
 		w.initErr = err
 		return w.initErr
 	}
-	w.clashDeviceUp()
 
+	w.deviceMutex.Lock()
+	defer w.deviceMutex.Unlock()
+	err = w.runCtx.Err()
+	if err != nil {
+		return err
+	}
+	if err = w.clashPublish(tunDevice, wgDevice); err != nil {
+		return err
+	}
+	w.clashDeviceUp()
 	w.initOk.Store(true)
 	return nil
 }
@@ -777,8 +825,12 @@ func (w *WireGuard) genIpcConf(ctx context.Context, updateOnly bool) (string, er
 
 // Close implements C.ProxyAdapter
 func (w *WireGuard) Close() error {
-	if w.device != nil {
-		w.device.Close()
+	w.runCancel()
+	w.deviceMutex.Lock()
+	wgDevice := w.device
+	w.deviceMutex.Unlock()
+	if wgDevice != nil {
+		wgDevice.Close()
 	}
 	return nil
 }

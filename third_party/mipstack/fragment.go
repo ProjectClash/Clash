@@ -491,9 +491,7 @@ func (r *ipPacketReassemblyState) finishWire() []byte {
 		return nil
 	}
 	dontFragment := !r.v6 && r.maxDFSize != 0 && r.maxDFSize == r.maxSize
-	packet := buildReassembledPacket(r, dontFragment)
-	setPacketECN(packet, ecn)
-	return packet
+	return buildReassembledPacket(r, dontFragment, ecn)
 }
 
 func (s *Stack) runFragmentCleaner() {
@@ -617,13 +615,14 @@ func fragmentRangeState(pieces []fragmentPiece, start, end int) (covered, overla
 	return false, true
 }
 
-func buildReassembledPacket(state *ipPacketReassemblyState, dontFragment bool) []byte {
+func buildReassembledPacket(state *ipPacketReassemblyState, dontFragment bool, ecn byte) []byte {
 	if !state.v6 {
 		if len(state.header) < 20 || len(state.header)+state.total > 65535 {
 			return nil
 		}
 		packet := make([]byte, len(state.header)+state.total)
 		copy(packet, state.header)
+		packet[1] |= ecn
 		for _, piece := range state.pieces {
 			copy(packet[len(state.header)+piece.offset:], piece.data)
 		}
@@ -642,6 +641,7 @@ func buildReassembledPacket(state *ipPacketReassemblyState, dontFragment bool) [
 	}
 	packet := make([]byte, len(state.header)+state.total)
 	copy(packet, state.header)
+	packet[1] |= ecn << 4
 	packet[state.nextHeader] = state.protocol
 	for _, piece := range state.pieces {
 		copy(packet[len(state.header)+piece.offset:], piece.data)
@@ -856,12 +856,8 @@ func ipv6FirstFragmentUpperLayerLength(protocol byte, payload []byte) (int, bool
 
 func fragmentECN(mask byte) (byte, bool) {
 	switch mask {
-	case 1 << 0:
+	case 1 << 0, 1 << 1, 1 << 2, 1<<1 | 1<<2:
 		return 0, true
-	case 1 << 1:
-		return 1, true
-	case 1 << 2:
-		return 2, true
 	case 1 << 3, 1<<3 | 1<<1, 1<<3 | 1<<2, 1<<3 | 1<<1 | 1<<2:
 		return 3, true
 	default:

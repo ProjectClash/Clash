@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ProjectClash/Clash/component/dialer"
 	"github.com/ProjectClash/Clash/component/resolver"
 	"github.com/ProjectClash/Clash/config"
 	"github.com/ProjectClash/Clash/dns"
@@ -147,6 +148,11 @@ type scriptDNSTestAnswer struct {
 	} `json:"error"`
 }
 
+func scriptDNSTestScene(stub *scriptDNSStub) string {
+	return fmt.Sprintf("server asked %d times, default interface %q index %d, tunnel %s",
+		stub.hits.Load(), dialer.DefaultInterface.Load(), publishedInterfaceIndex.Load(), tunnel.Status())
+}
+
 func askScriptDNS(t *testing.T, request any) scriptDNSTestAnswer {
 	t.Helper()
 	text, ok := request.(string)
@@ -239,8 +245,11 @@ func TestScriptDNSQueryToANamedServerIsNotCached(t *testing.T) {
 
 	for i := 0; i < 2; i++ {
 		answer := askScriptDNS(t, map[string]any{"domain": "example.com", "server": stub.addr, "types": []string{"A"}})
-		if answer.Error != nil || answer.FromCache {
-			t.Fatalf("call %d: %+v", i, answer)
+		if answer.Error != nil {
+			t.Fatalf("call %d: %+v (%s)", i, *answer.Error, scriptDNSTestScene(stub))
+		}
+		if answer.FromCache {
+			t.Fatalf("call %d said fromCache: %+v", i, answer)
 		}
 	}
 	if stub.hits.Load() != 2 {
@@ -356,7 +365,7 @@ func TestScriptDNSQueryAsksAtMostEightAtATime(t *testing.T) {
 	wait.Wait()
 	close(failures)
 	for failure := range failures {
-		t.Fatalf("a queued query failed: %s", failure)
+		t.Fatalf("a queued query failed: %s (%s)", failure, scriptDNSTestScene(stub))
 	}
 	if most := stub.maxInFlight.Load(); most > 8 || most < 2 {
 		t.Fatalf("at most eight at a time and more than one: the server saw %d at once", most)
