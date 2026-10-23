@@ -37,6 +37,7 @@ func GoVersion() string {
 }
 
 func FreeMemory() {
+	dropKeptParse()
 	debug.FreeOSMemory()
 }
 

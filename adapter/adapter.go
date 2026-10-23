@@ -9,6 +9,8 @@ import (
 	"net"
 	"net/url"
 	"strings"
+	"sync"
+	stdatomic "sync/atomic"
 	"time"
 
 	"github.com/ProjectClash/Clash/common/atomic"
@@ -31,6 +33,7 @@ type internalProxyState struct {
 	alive   atomic.Bool
 	history *queue.Queue[C.DelayHistory]
 	asked   string
+	failure stdatomic.Pointer[URLTestFailure]
 }
 
 type Proxy struct {
@@ -38,9 +41,11 @@ type Proxy struct {
 	alive   atomic.Bool
 	history nodeHistory
 	extra   proxyStates
+	failure stdatomic.Pointer[URLTestFailure]
+	records sync.Mutex
 	now func() time.Time
 	urlTests urlTestFlights
-	clashRecorded func(url string, record C.DelayHistory, alive bool, urlRecord C.DelayHistory, urlAlive bool, asked string)
+	clashRecorded func(url string, record C.DelayHistory, alive bool, failure *URLTestFailure, urlRecord C.DelayHistory, urlAlive bool, urlFailure *URLTestFailure, asked string)
 }
 
 type URLTestOutcome struct {
@@ -248,6 +253,8 @@ func (p *Proxy) urlTest(ctx context.Context, url string, expectedStatus utils.In
 
 func (p *Proxy) urlTestOnce(ctx context.Context, url string, expectedStatus utils.IntRanges[uint16]) (t uint16, satisfied bool, status int, err error) {
 	defer func() {
+		p.records.Lock()
+		defer p.records.Unlock()
 		alive := err == nil
 		record := C.DelayHistory{Time: time.Now()}
 		if alive {
@@ -256,6 +263,8 @@ func (p *Proxy) urlTestOnce(ctx context.Context, url string, expectedStatus util
 
 		p.alive.Store(alive)
 		historyRecord, historyAlive := record, alive
+		failure, urlFailure := ClassifyURLTestFailure(err, true, status), ClassifyURLTestFailure(err, satisfied, status)
+		p.failure.Store(failure)
 		p.history.Put(record)
 		if p.history.Len() > defaultHistoriesNum {
 			p.history.Pop()
@@ -274,13 +283,14 @@ func (p *Proxy) urlTestOnce(ctx context.Context, url string, expectedStatus util
 		}
 
 		state.alive.Store(alive)
+		state.failure.Store(urlFailure)
 		state.history.Put(record)
 		if state.history.Len() > defaultHistoriesNum {
 			state.history.Pop()
 		}
 
 		if p.clashRecorded != nil {
-			p.clashRecorded(url, historyRecord, historyAlive, record, alive, expectedStatus.String())
+			p.clashRecorded(url, historyRecord, historyAlive, failure, record, alive, urlFailure, expectedStatus.String())
 		}
 	}()
 

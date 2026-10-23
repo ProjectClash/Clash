@@ -4,10 +4,13 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/netip"
 	"reflect"
+	"runtime/debug"
 	"strings"
+	"sync/atomic"
 
 	P "github.com/ProjectClash/Clash/constant/provider"
 	"github.com/ProjectClash/Clash/log"
@@ -65,6 +68,10 @@ type finalizedDocument struct {
 }
 
 func finalizeMergedDocument(mergedYAML string, merged *yaml.Node, resourceMapJSON string, orderReference string, orderRoot *yaml.Node, before, after []string, ruleProviders map[string]json.RawMessage) (finalizedDocument, error) {
+	return finalizeParsedDocument(mergedYAML, merged, nil, resourceMapJSON, orderReference, orderRoot, before, after, ruleProviders)
+}
+
+func finalizeParsedDocument(mergedYAML string, merged *yaml.Node, parsed *publishParsed, resourceMapJSON string, orderReference string, orderRoot *yaml.Node, before, after []string, ruleProviders map[string]json.RawMessage) (finalizedDocument, error) {
 	var rm resourceMap
 	if resourceMapJSON != "" {
 		if err := json.Unmarshal([]byte(resourceMapJSON), &rm); err != nil {
@@ -72,18 +79,25 @@ func finalizeMergedDocument(mergedYAML string, merged *yaml.Node, resourceMapJSO
 		}
 	}
 	var rules *RuleCatalog
-	if merged == nil && rm.RuleIndexDirectory != "" && finalizeReadsRulesInPlace {
-		if catalog, err := openRuleCatalog(mergedYAML); err == nil {
-			rules = catalog
-			defer catalog.Close()
-		}
+	if parsed != nil && (merged != nil || parsed.sections != publishSectionsOf(rm)) {
+		parsed.release()
+		parsed = nil
 	}
-	if merged == nil && (rm.NodeLibraryDirectory != "" || rm.RuleIndexDirectory != "") {
-		document, err := yaml.ClashParseDocument(readOnlyBytes(mergedYAML), streamedSections(rm, reflect.TypeOf(map[string]any{}), rules != nil)...)
+	if parsed != nil {
+		merged, rules = parsed.document, parsed.rules
+		if rules != nil {
+			rules.text = mergedYAML
+			defer rules.Close()
+		}
+	} else if merged == nil && (rm.NodeLibraryDirectory != "" || rm.RuleIndexDirectory != "") {
+		document, catalog, err := parseForPublish(mergedYAML, publishSectionsOf(rm))
 		if err != nil {
 			return finalizedDocument{}, err
 		}
-		merged = document
+		merged, rules = document, catalog
+		if rules != nil {
+			defer rules.Close()
+		}
 	}
 	if merged == nil {
 		var document yaml.Node
@@ -139,6 +153,18 @@ func finalizeMergedDocument(mergedYAML string, merged *yaml.Node, resourceMapJSO
 		moduleRuleSetNames(names, root, ruleProviders)
 		addLibraryNames(names, root["x-clash-node-library"])
 	}
+	var indexed chan ruleIndexCompiled
+	if !ruleCarried && rm.RuleIndexDirectory != "" && viewed {
+		if available := finalizeAvailableMemory(); available <= 0 || available >= compileBesideHeadroom {
+			indexed = make(chan ruleIndexCompiled, 1)
+			go compileRuleIndexBeside(rm, names, written, before, after, indexed)
+			defer func() {
+				if indexed != nil {
+					<-indexed
+				}
+			}()
+		}
+	}
 	reference, carried := root["x-clash-node-library"]
 	if carried && publishedNodeLibraryHere(reference) != nil && !nodesOnlyInLibrary(root, reference) {
 		carried = false
@@ -162,8 +188,18 @@ func finalizeMergedDocument(mergedYAML string, merged *yaml.Node, resourceMapJSO
 		}
 		root["x-clash-rule-index"] = reference
 	} else if rm.RuleIndexDirectory != "" && viewed {
-		if err := writeRuleIndex(root, rm, names, written, before, after); err != nil {
-			return finalizedDocument{}, err
+		if indexed == nil {
+			indexed = make(chan ruleIndexCompiled, 1)
+			compileRuleIndexBeside(rm, names, written, before, after, indexed)
+		}
+		compiled := <-indexed
+		indexed = nil
+		if compiled.err != nil {
+			return finalizedDocument{}, compiled.err
+		}
+		if compiled.reference != nil {
+			delete(root, "rules")
+			root["x-clash-rule-index"] = compiled.reference
 		}
 	} else if discarded {
 		values := make([]any, 0, len(before)+written.n+len(after))
@@ -529,6 +565,85 @@ func (buffer *boundedBuffer) Write(data []byte) (int, error) {
 		return 0, fmt.Errorf("decoded provider exceeds %d bytes", buffer.maximum)
 	}
 	return buffer.Buffer.Write(data)
+}
+
+const compileBesideHeadroom = 512 << 20
+
+var finalizeAvailableMemory = availableMemory
+
+type publishSections struct {
+	nodes, rules, inPlace bool
+}
+
+func publishSectionsOf(rm resourceMap) publishSections {
+	return publishSections{nodes: rm.NodeLibraryDirectory != "", rules: rm.RuleIndexDirectory != "", inPlace: finalizeReadsRulesInPlace}
+}
+
+var publishParses atomic.Int64
+
+func parseForPublish(text string, sections publishSections) (*yaml.Node, *RuleCatalog, error) {
+	var rm resourceMap
+	if sections.nodes {
+		rm.NodeLibraryDirectory = "-"
+	}
+	if sections.rules {
+		rm.RuleIndexDirectory = "-"
+	}
+	var scanned chan ruleCatalogScan
+	if sections.rules && sections.inPlace {
+		scanned = make(chan ruleCatalogScan, 1)
+		go scanRuleCatalog(text, scanned)
+	}
+	publishParses.Add(1)
+	document, err := yaml.ClashParseDocument(readOnlyBytes(text), streamedSections(rm, reflect.TypeOf(map[string]any{}), scanned != nil)...)
+	var rules *RuleCatalog
+	if scanned != nil {
+		if scan := <-scanned; scan.err == nil {
+			rules = scan.catalog
+		} else if !errors.Is(scan.err, ErrRuleCatalogIsPublished) {
+			publishParses.Add(1)
+			document, err = yaml.ClashParseDocument(readOnlyBytes(text), streamedSections(rm, reflect.TypeOf(map[string]any{}), false)...)
+		}
+	}
+	if err != nil {
+		if rules != nil {
+			rules.Close()
+		}
+		return nil, nil, err
+	}
+	return document, rules, nil
+}
+
+type ruleIndexCompiled struct {
+	reference map[string]any
+	err       error
+}
+
+func compileRuleIndexBeside(rm resourceMap, names ruleNames, lines ruleLines, before, after []string, compiled chan<- ruleIndexCompiled) {
+	var answer ruleIndexCompiled
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			answer = ruleIndexCompiled{err: appCallPanicked("FinalizeForIOS (rule index)", recovered, debug.Stack())}
+		}
+		compiled <- answer
+	}()
+	answer.reference, answer.err = ruleIndexReference(rm, names, lines, before, after)
+}
+
+type ruleCatalogScan struct {
+	catalog *RuleCatalog
+	err     error
+}
+
+func scanRuleCatalog(document string, scanned chan<- ruleCatalogScan) {
+	var scan ruleCatalogScan
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			scan = ruleCatalogScan{err: fmt.Errorf("%w: %v", ErrRuleCatalogUnreadable, recovered)}
+		}
+		scanned <- scan
+	}()
+	scan.catalog, scan.err = openRuleCatalog(document)
 }
 
 var finalizeReadsRulesInPlace = true

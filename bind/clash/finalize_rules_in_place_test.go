@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/ProjectClash/Clash/common/clashsum"
 )
 
 var libraryChecksum = regexp.MustCompile(`(nodes-[0-9a-f]+\.library\n\s+sha256: )[0-9a-f]+`)
@@ -44,7 +46,7 @@ func TestAPublishReadingTheRulesInPlacePublishesWhatHoldingThemDoes(t *testing.T
 				files := map[string][]byte{}
 				entries, _ := os.ReadDir(dir)
 				for _, entry := range entries {
-					if strings.HasPrefix(entry.Name(), ruleIndexPrefix) {
+					if strings.HasPrefix(entry.Name(), ruleIndexPrefix) && !strings.HasSuffix(entry.Name(), clashsum.ProofSuffix) {
 						data, _ := os.ReadFile(filepath.Join(dir, entry.Name()))
 						files[entry.Name()] = data
 					}
@@ -72,5 +74,25 @@ func TestAPublishReadingTheRulesInPlacePublishesWhatHoldingThemDoes(t *testing.T
 				}
 			}
 		})
+	}
+}
+
+func TestAPublishOfATextTheCatalogCannotReadCompilesItsRules(t *testing.T) {
+	document := "\xef\xbb\xbfproxies:\n  - {name: P, type: direct}\nrules:\n  - DOMAIN,a.example,P\n  - DOMAIN-SUFFIX,b.example,DIRECT\n  - MATCH,P\n"
+	if _, err := openRuleCatalog(document); err == nil {
+		t.Fatal("the catalog read a text with a byte-order mark: the test no longer reaches the second parse")
+	}
+	dir := t.TempDir()
+	resources, _ := json.Marshal(map[string]any{"runtimeProfile": RuntimeProfileIOSPacketTunnel, "ruleIndexDirectory": dir, "nodeLibraryDirectory": dir})
+	finalized, err := FinalizeForIOS(document, string(resources))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := parseAfterLookups(finalized.Value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := cfg.RuleTable.Len(); n != 3 {
+		t.Fatalf("the published configuration runs %d rules, want 3", n)
 	}
 }

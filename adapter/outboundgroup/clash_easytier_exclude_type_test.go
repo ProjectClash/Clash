@@ -29,7 +29,7 @@ func TestAGroupExcludesTheEasyTierPlaceholderByItsDeclaredType(t *testing.T) {
 		"Vmess|EasyTier": {"block", "DIRECT"},
 		"Direct":         {"mesh", "block"},
 	} {
-		compatible, err := provider.NewCompatibleProvider("members", members, nil)
+		compatible, err := provider.NewCompatibleProvider("members", members, provider.NewHealthCheck(members, "", 0, 0, true, nil))
 		if err != nil {
 			t.Fatal(err)
 		}

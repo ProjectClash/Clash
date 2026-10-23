@@ -155,7 +155,7 @@ func TestAURLsRecordsAreMadeForTheNodesTestedWithIt(t *testing.T) {
 	}
 	slot := nodes.At(1).(*libraryNode)
 	for u := 0; u < libraryURLLimit; u++ {
-		slot.recorded(fmt.Sprintf("http://u%d.example/", u), C.DelayHistory{Delay: 10}, true, C.DelayHistory{Delay: 10}, true, "")
+		slot.recorded(fmt.Sprintf("http://u%d.example/", u), C.DelayHistory{Delay: 10}, true, nil, C.DelayHistory{Delay: 10}, true, nil, "")
 	}
 	made := 0
 	nodes.rangeURLRecords(func(url string, records *urlRecordSet) { made += records.madeChunks() })
@@ -170,11 +170,11 @@ func TestAURLsRecordsAreMadeForTheNodesTestedWithIt(t *testing.T) {
 func TestALibraryKeepsTheRecordsOfALimitedNumberOfURLs(t *testing.T) {
 	nodes := libraryNodesForTest(t, 2)
 	slot := nodes.At(0).(*libraryNode)
-	slot.recorded("http://kept.example/", C.DelayHistory{Delay: 5}, true, C.DelayHistory{Delay: 5}, true, "")
+	slot.recorded("http://kept.example/", C.DelayHistory{Delay: 5}, true, nil, C.DelayHistory{Delay: 5}, true, nil, "")
 	for u := 0; u < 100; u++ {
-		slot.recorded(fmt.Sprintf("http://u%d.example/", u), C.DelayHistory{Delay: 10}, true, C.DelayHistory{Delay: 10}, true, "")
+		slot.recorded(fmt.Sprintf("http://u%d.example/", u), C.DelayHistory{Delay: 10}, true, nil, C.DelayHistory{Delay: 10}, true, nil, "")
 		if u%10 == 0 {
-			slot.recorded("http://kept.example/", C.DelayHistory{Delay: 5}, true, C.DelayHistory{Delay: 5}, true, "")
+			slot.recorded("http://kept.example/", C.DelayHistory{Delay: 5}, true, nil, C.DelayHistory{Delay: 5}, true, nil, "")
 		}
 	}
 	urls := 0
@@ -189,8 +189,8 @@ func TestALibraryKeepsTheRecordsOfALimitedNumberOfURLs(t *testing.T) {
 
 func TestHealthCountsAreWhatTheNodeListSays(t *testing.T) {
 	nodes := libraryNodesForTest(t, 4)
-	nodes.At(0).(*libraryNode).recorded("http://a.example/", C.DelayHistory{Time: time.Now(), Delay: 10}, true, C.DelayHistory{Time: time.Now(), Delay: 10}, true, "")
-	nodes.At(1).(*libraryNode).recorded("http://a.example/", C.DelayHistory{Time: time.Now()}, false, C.DelayHistory{Time: time.Now()}, false, "")
+	nodes.At(0).(*libraryNode).recorded("http://a.example/", C.DelayHistory{Time: time.Now(), Delay: 10}, true, nil, C.DelayHistory{Time: time.Now(), Delay: 10}, true, nil, "")
+	nodes.At(1).(*libraryNode).recorded("http://a.example/", C.DelayHistory{Time: time.Now()}, false, nil, C.DelayHistory{Time: time.Now()}, false, nil, "")
 	plain := make(C.ProxySlice, 3)
 	for i := range plain {
 		built, _, err := BuildLibraryNode(map[string]any{"name": fmt.Sprintf("plain %d", i), "type": "http", "server": "127.0.0.1", "port": 1})

@@ -7,11 +7,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/ProjectClash/Clash/common/clashsum"
 	"github.com/ProjectClash/Clash/config"
 	C "github.com/ProjectClash/Clash/constant"
 	"github.com/ProjectClash/Clash/rules/clashindex"
@@ -104,13 +107,36 @@ func TestFinalizeCompilesTheRulesIntoAnIndex(t *testing.T) {
 		}
 	}
 	before, _ := os.Stat(path)
+	proof := path + clashsum.ProofSuffix
+	proofBefore, err := os.Stat(proof)
+	if err != nil {
+		t.Fatalf("no proof beside the index: %v", err)
+	}
 	time.Sleep(10 * time.Millisecond)
 	again, _ := finalizeWithRuleIndex(t, document, dir)
 	if again != published {
 		t.Fatal("publishing the same rules again named another index")
 	}
-	if after, _ := os.Stat(path); !after.ModTime().After(before.ModTime()) {
+	if after, _ := os.Stat(proof); !after.ModTime().Equal(proofBefore.ModTime()) {
+		t.Fatal("an index marked a moment ago was marked again")
+	}
+	if after, _ := os.Stat(path); !after.ModTime().Equal(before.ModTime()) {
+		t.Fatal("a use set the index's own time")
+	}
+	earlier := time.Now().Add(-nodeLibraryMarkEvery - time.Second)
+	for _, file := range []string{path, proof} {
+		if err := os.Chtimes(file, earlier, earlier); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if again, _ = finalizeWithRuleIndex(t, document, dir); again != published {
+		t.Fatal("publishing the same rules again named another index")
+	}
+	if after, _ := os.Stat(proof); !after.ModTime().After(earlier.Add(time.Second)) {
 		t.Fatal("an index used again is not marked used")
+	}
+	if after, _ := os.Stat(path); !after.ModTime().Equal(earlier.Truncate(time.Microsecond)) && !after.ModTime().Equal(earlier) {
+		t.Fatalf("a use set the index's own time: %v, written %v", after.ModTime(), earlier)
 	}
 	republished, _ := finalizeWithRuleIndex(t, published, dir)
 	if !strings.Contains(republished, filepath.Base(path)) {
@@ -137,7 +163,7 @@ func TestARuleIndexStaysWhileTheAppKeepsItAndGoesAfter(t *testing.T) {
 	_, other := finalizeWithRuleIndex(t, ruleIndexTestDocument(61), dir)
 	stale := other["x-clash-rule-index"].(map[string]any)["path"].(string)
 	old := time.Now().Add(-time.Hour)
-	for _, path := range []string{kept, stale} {
+	for _, path := range []string{kept, stale, kept + clashsum.ProofSuffix, stale + clashsum.ProofSuffix} {
 		if err := os.Chtimes(path, old, old); err != nil {
 			t.Fatal(err)
 		}
@@ -150,6 +176,12 @@ func TestARuleIndexStaysWhileTheAppKeepsItAndGoesAfter(t *testing.T) {
 	}
 	if _, err := os.Stat(stale); err == nil {
 		t.Fatal("an index no configuration keeps stayed")
+	}
+	if _, err := os.Stat(stale + clashsum.ProofSuffix); err == nil {
+		t.Fatal("an index removed left its proof")
+	}
+	if _, err := os.Stat(kept + clashsum.ProofSuffix); err != nil {
+		t.Fatal("the index kept lost its proof")
 	}
 	libraries, _ := filepath.Glob(filepath.Join(dir, nodeLibraryPrefix+"*"))
 	if len(libraries) == 0 {
@@ -428,4 +460,128 @@ func TestARepublishCompilesAgainAnIndexThatIsNotTheCompilers(t *testing.T) {
 		}
 		return true
 	})
+}
+
+func TestAPublishedConfigurationIsNotHashedAgain(t *testing.T) {
+	dir := t.TempDir()
+	document := ruleIndexTestDocument(3000)
+	published, _ := finalizeWithRuleIndex(t, document, dir)
+	time.Sleep(300 * time.Millisecond)
+	finalizeWithRuleIndex(t, document, dir)
+	source := filepath.Join(t.TempDir(), "published.yaml")
+	if err := os.WriteFile(source, []byte(published), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	steps := []struct {
+		name string
+		step func() error
+	}{
+		{"published again", func() error { finalizeWithRuleIndex(t, document, dir); return nil }},
+		{"the published text published again", func() error { finalizeWithRuleIndex(t, published, dir); return nil }},
+		{"planned", func() error {
+			_, err := PlanResourcesForProfileAtPath(source, RuntimeProfileIOSPacketTunnel)
+			return err
+		}},
+		{"its catalog opened", func() error {
+			catalog, err := OpenRuleCatalogForPublishedAtPath(source)
+			if err == nil {
+				catalog.Close()
+			}
+			return err
+		}},
+	}
+	for _, s := range steps {
+		before := clashsum.Hashed()
+		if err := s.step(); err != nil {
+			t.Fatalf("%s: %v", s.name, err)
+		}
+		if hashes := clashsum.Hashed() - before; hashes != 0 {
+			t.Errorf("%s: hashed %d times, want none", s.name, hashes)
+		}
+	}
+}
+
+func TestATunnelStartedAfterAPublishReadsTheIndexAndLibraryOnce(t *testing.T) {
+	dir := t.TempDir()
+	published, root := finalizeWithRuleIndex(t, ruleIndexTestDocument(3000), dir)
+	if _, ok := root["x-clash-node-library"]; !ok {
+		t.Fatal("no node library published")
+	}
+	text := filepath.Join(t.TempDir(), "published.yaml")
+	if err := os.WriteFile(text, []byte(published), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	start := func() string {
+		t.Helper()
+		command := exec.Command(os.Args[0], "-test.run=^TestATunnelStartCountsItsHashes$", "-test.v", "-test.count=1")
+		command.Env = append(os.Environ(), tunnelStartHashesEnvironmentKey+"="+text)
+		output, err := command.CombinedOutput()
+		if err != nil || !strings.Contains(string(output), "--- PASS: TestATunnelStartCountsItsHashes") {
+			t.Fatalf("the tunnel's child failed (%v):\n%s", err, output)
+		}
+		for _, line := range strings.Split(string(output), "\n") {
+			if _, counted, ok := strings.Cut(line, "hashed: "); ok {
+				return strings.TrimSpace(counted)
+			}
+		}
+		t.Fatalf("the tunnel's child said nothing:\n%s", output)
+		return ""
+	}
+	if got := start(); got != "0 0" {
+		t.Fatalf("a tunnel started on a published configuration hashed its files (start, reload): %s, want 0 0", got)
+	}
+	proofs, _ := filepath.Glob(filepath.Join(dir, "*"+clashsum.ProofSuffix))
+	if len(proofs) != 2 {
+		t.Fatalf("proofs beside the index and the library: %v", proofs)
+	}
+	for _, proof := range proofs {
+		if err := os.Remove(proof); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := start(); got == "0 0" {
+		t.Fatal("without the proofs the tunnel's start hashed nothing: the count does not see the hashes")
+	}
+}
+
+const tunnelStartHashesEnvironmentKey = "CLASH_TEST_TUNNEL_START_HASHES"
+
+func TestATunnelStartCountsItsHashes(t *testing.T) {
+	path := os.Getenv(tunnelStartHashesEnvironmentKey)
+	if path == "" {
+		t.Skip("run by TestATunnelStartedAfterAPublishReadsTheIndexAndLibraryOnce")
+	}
+	text, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.ClashRuleIndexesVerified.Store(true)
+	var counts []string
+	for range 2 {
+		before := clashsum.Hashed()
+		if _, err := parseAfterLookups(string(text)); err != nil {
+			t.Fatal(err)
+		}
+		counts = append(counts, fmt.Sprint(clashsum.Hashed()-before))
+	}
+	t.Logf("hashed: %s", strings.Join(counts, " "))
+}
+
+func TestAPublishShortOfMemoryCompilesItsIndexAfterItsLibrary(t *testing.T) {
+	document := ruleIndexTestDocument(300)
+	beside, _ := finalizeWithRuleIndex(t, document, t.TempDir())
+	saved := finalizeAvailableMemory
+	readings := 0
+	finalizeAvailableMemory = func() int64 { readings++; return 64 << 20 }
+	t.Cleanup(func() { finalizeAvailableMemory = saved })
+	after, _ := finalizeWithRuleIndex(t, document, t.TempDir())
+	if readings == 0 {
+		t.Fatal("the publish did not ask how much memory is left")
+	}
+	strip := func(text string) string {
+		return regexp.MustCompile(`(path|sha256): \S+`).ReplaceAllString(text, "$1: x")
+	}
+	if strip(beside) != strip(after) {
+		t.Fatalf("compiled after the library:\n%s\nbeside it:\n%s", after, beside)
+	}
 }

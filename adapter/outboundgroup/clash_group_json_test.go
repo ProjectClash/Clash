@@ -18,7 +18,7 @@ func TestGroupsWriteTheirMarshalJSON(t *testing.T) {
 	}
 	empty := adapter.NewProxy(outbound.NewCompatible())
 	for _, filter := range []string{"", "matches nothing"} {
-		compatible, err := provider.NewCompatibleProvider("members", members, nil)
+		compatible, err := provider.NewCompatibleProvider("members", members, provider.NewHealthCheck(members, "", 0, 0, true, nil))
 		if err != nil {
 			t.Fatal(err)
 		}

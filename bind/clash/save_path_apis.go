@@ -65,13 +65,18 @@ var savePathRereads atomic.Int64
 var finalizedTreeFallbacks atomic.Int64
 
 func finalizeForIOSWithOptionsUnguarded(mergedYAML, resourceMapJSON, optionsJSON string) (*StringBox, error) {
+	return finalizeParsedWithOptions(mergedYAML, nil, resourceMapJSON, optionsJSON)
+}
+
+func finalizeParsedWithOptions(mergedYAML string, parsed *publishParsed, resourceMapJSON, optionsJSON string) (*StringBox, error) {
 	var options finalizeOptions
 	if err := decodeSavePathOptions(optionsJSON, &options); err != nil {
+		parsed.release()
 		return nil, bridgeSafeError(err)
 	}
 	finalize := func(orderReference string) (*StringBox, error) {
 		return withCompactHeap(func() (*StringBox, error) {
-			finalized, err := finalizeMergedDocument(mergedYAML, nil, resourceMapJSON, orderReference, nil, options.PrependRules, options.AppendRules, options.RuleProviders)
+			finalized, err := finalizeParsedDocument(mergedYAML, nil, parsed, resourceMapJSON, orderReference, nil, options.PrependRules, options.AppendRules, options.RuleProviders)
 			if err != nil {
 				return nil, err
 			}
@@ -93,8 +98,12 @@ func finalizeForIOSWithOptionsUnguarded(mergedYAML, resourceMapJSON, optionsJSON
 
 func FinalizeForIOSWithOptionsAtPath(path, resourceMapJSON, optionsJSON string) (*StringBox, error) {
 	out, err := recoverAppCall("FinalizeForIOSWithOptionsAtPath", func() (*StringBox, error) {
-		return withDocumentAt(path, func(text string) (*StringBox, error) {
-			return finalizeForIOSWithOptionsUnguarded(text, resourceMapJSON, optionsJSON)
+		return withDocumentAtKeyed(path, func(text string, key publishParseKey, keyed bool) (*StringBox, error) {
+			var parsed *publishParsed
+			if keyed {
+				parsed = takeKeptParse(key)
+			}
+			return finalizeParsedWithOptions(text, parsed, resourceMapJSON, optionsJSON)
 		})
 	})
 	if err != nil {

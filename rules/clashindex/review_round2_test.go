@@ -4,9 +4,13 @@ import (
 	"encoding/binary"
 	"net/netip"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"testing"
+	"time"
 
+	"github.com/ProjectClash/Clash/common/clashsum"
 	C "github.com/ProjectClash/Clash/constant"
 	"github.com/ProjectClash/Clash/rules/clashindex"
 )
@@ -196,4 +200,45 @@ func TestPastTheBoundsMissesAreLeftOutNotWrong(t *testing.T) {
 			}
 		})
 	})
+}
+
+func TestAnIndexOpenedAgainUnchangedIsNotHashedAgain(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("no change time on this platform")
+	}
+	directory := t.TempDir()
+	write := func(name string, lines ...string) (string, [32]byte) {
+		c := &corpus{lines: lines, subRules: map[string][]C.Rule{}}
+		_, data := c.compile(t, true)
+		path := filepath.Join(directory, name)
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path, [32]byte(data[len(data)-32:])
+	}
+	path, sum := write("a.index", "DOMAIN,a.example,REJECT", "MATCH,DIRECT")
+	other, otherSum := write("b.index", "DOMAIN,b.example,REJECT", "MATCH,DIRECT")
+	time.Sleep(300 * time.Millisecond)
+	opens := []struct {
+		name  string
+		open  func(string, [32]byte) (*clashindex.Index, error)
+		path  string
+		sum   [32]byte
+		wants int64
+	}{
+		{"first", clashindex.OpenVerified, path, sum, 1},
+		{"again", clashindex.OpenVerified, path, sum, 0},
+		{"again for the tunnel", clashindex.Open, path, sum, 0},
+		{"another", clashindex.OpenVerified, other, otherSum, 1},
+		{"the first after another", clashindex.OpenVerified, path, sum, 0},
+	}
+	for _, o := range opens {
+		before := clashsum.Hashed()
+		if _, err := o.open(o.path, o.sum); err != nil {
+			t.Fatalf("%s: %v", o.name, err)
+		}
+		if hashes := clashsum.Hashed() - before; hashes != o.wants {
+			t.Errorf("%s open hashed %d times, want %d", o.name, hashes, o.wants)
+		}
+	}
 }

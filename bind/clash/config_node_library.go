@@ -16,7 +16,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/dlclark/regexp2"
@@ -24,6 +23,7 @@ import (
 	"github.com/ProjectClash/Clash/adapter"
 	"github.com/ProjectClash/Clash/adapter/outbound"
 	adapterprovider "github.com/ProjectClash/Clash/adapter/provider"
+	"github.com/ProjectClash/Clash/common/clashsum"
 	"github.com/ProjectClash/Clash/constant"
 )
 
@@ -97,11 +97,11 @@ func catalogProviderLibraries(root map[string]any, directory string, staged map[
 			if err != nil {
 				continue
 			}
-			if writeLibraryFile(libraryPath, library) != nil {
+			if writeLibraryFile(libraryPath, library, true) != nil {
 				continue
 			}
 			stub := adapterprovider.ClashNodeLibraryStub(filepath.Base(libraryPath), [sha256.Size]byte(library[len(library)-sha256.Size:]), count) + "\n"
-			if writeLibraryFile(stubPath, []byte(stub)) != nil {
+			if writeLibraryFile(stubPath, []byte(stub), false) != nil {
 				continue
 			}
 		}
@@ -172,7 +172,7 @@ func writeNodeLibrary(root map[string]any, directory string) error {
 		}
 		data := buffer.Bytes()
 		sum = data[len(data)-sha256.Size:]
-		if err := writeLibraryFile(path, data); err != nil {
+		if err := writeLibraryFile(path, data, true); err != nil {
 			return fmt.Errorf("node library: %w", err)
 		}
 	}
@@ -198,30 +198,6 @@ func writeNodeLibrary(root map[string]any, directory string) error {
 	return nil
 }
 
-func builtNodeLibrary(path string) ([]byte, error) {
-	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Size() < sha256.Size {
-		return nil, fmt.Errorf("node library: %s is not one", path)
-	}
-	hash := sha256.New()
-	if _, err := io.CopyN(hash, file, info.Size()-sha256.Size); err != nil {
-		return nil, err
-	}
-	trailer := make([]byte, sha256.Size)
-	if _, err := io.ReadFull(file, trailer); err != nil {
-		return nil, err
-	}
-	if !bytes.Equal(hash.Sum(nil), trailer) {
-		return nil, fmt.Errorf("node library: %s is damaged", path)
-	}
-	return trailer, nil
-}
-
 var nodeLibraryBuilder = sync.OnceValue(func() string {
 	builder := "CNL1\x00" + constant.Version + "\x00" + runtime.Version()
 	executable, err := os.Executable()
@@ -235,7 +211,7 @@ var nodeLibraryBuilder = sync.OnceValue(func() string {
 	return builder + "\x00" + executable + "\x00" + fmt.Sprint(info.Size(), info.ModTime().UnixNano())
 })
 
-func writeLibraryFile(path string, data []byte) error {
+func writeLibraryFile(path string, data []byte, summed bool) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
@@ -253,7 +229,13 @@ func writeLibraryFile(path string, data []byte) error {
 	if err != nil {
 		return err
 	}
-	return os.Rename(file.Name(), path)
+	if err := os.Rename(file.Name(), path); err != nil {
+		return err
+	}
+	if summed && len(data) >= sha256.Size {
+		clashsum.ProveWritten(path, [sha256.Size]byte(data[len(data)-sha256.Size:]))
+	}
+	return nil
 }
 
 const catalogLibraryLifetime = 7 * 24 * time.Hour
@@ -265,16 +247,46 @@ var nodeLibraryFilesMu sync.Mutex
 func usedNodeLibrary(path string, companions ...string) ([]byte, error) {
 	nodeLibraryFilesMu.Lock()
 	defer nodeLibraryFilesMu.Unlock()
-	sum, err := builtNodeLibrary(path)
-	if err != nil {
-		return nil, err
-	}
 	now := time.Now()
-	for _, file := range append([]string{path}, companions...) {
-		_ = os.Chtimes(file, now, now)
+	marked := func(file string) bool {
+		info, err := os.Stat(file)
+		if err != nil {
+			return false
+		}
+		since := now.Sub(info.ModTime())
+		return since >= 0 && since < nodeLibraryMarkEvery
+	}
+	touch := !marked(path+clashsum.ProofSuffix) && !marked(path)
+	whole, left, err := clashsum.Persist(path, touch)
+	if err != nil {
+		if errors.Is(err, clashsum.ErrNotWhole) {
+			return nil, fmt.Errorf("node library: %s is damaged", path)
+		}
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("node library: %s is not one", path)
+	}
+	sum := whole[:]
+	if !left && touch {
+		_ = os.Chtimes(path, now, now)
+	}
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		if resolved, err := filepath.EvalSymlinks(path); err == nil {
+			if _, left, err := clashsum.Persist(resolved, !marked(resolved+clashsum.ProofSuffix) && !marked(resolved)); err == nil && !left {
+				_ = os.Chtimes(resolved, now, now)
+			}
+		}
+	}
+	for _, file := range companions {
+		if !marked(file) {
+			_ = os.Chtimes(file, now, now)
+		}
 	}
 	return sum, nil
 }
+
+const nodeLibraryMarkEvery = time.Minute
 
 func PruneNodeLibraries(directory, keep string) error {
 	_, err := recoverAppCall("PruneNodeLibraries", func() (struct{}, error) {
@@ -330,6 +342,20 @@ func pruneFiles(directory string, keeps []string, staleName func(name string) bo
 	}
 	for _, entry := range entries {
 		name := entry.Name()
+		if main, isProof := strings.CutSuffix(name, clashsum.ProofSuffix); isProof && staleName(main) {
+			if _, err := os.Lstat(filepath.Join(directory, main)); errors.Is(err, os.ErrNotExist) {
+				if err := os.Remove(filepath.Join(directory, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+					return err
+				}
+			}
+			continue
+		}
+		if strings.HasPrefix(name, clashsum.ProofTemporaryPrefix) {
+			if err := removeUnusedNodeLibrary(filepath.Join(directory, name)); err != nil {
+				return err
+			}
+			continue
+		}
 		if !staleName(name) || kept[resolved(filepath.Join(realDirectory, name))] {
 			continue
 		}
@@ -360,10 +386,16 @@ func removeUnusedNodeLibrary(path string) error {
 			used = target.ModTime()
 		}
 	}
+	if proof, err := os.Lstat(path + clashsum.ProofSuffix); err == nil && proof.ModTime().After(used) {
+		used = proof.ModTime()
+	}
 	if time.Since(used) < lifetime {
 		return nil
 	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.Remove(path + clashsum.ProofSuffix); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return nil

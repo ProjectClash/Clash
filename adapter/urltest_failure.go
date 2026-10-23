@@ -11,6 +11,9 @@ type URLTestFailure struct {
 	Kind string
 	Errno string
 	Message string
+	HTTPStatus int
+
+	errno syscall.Errno
 }
 
 const (
@@ -32,6 +35,7 @@ func ClassifyURLTestFailure(err error, satisfied bool, status int) *URLTestFailu
 	switch {
 	case err == nil && !satisfied:
 		failure.Kind = URLTestFailureStatus
+		failure.HTTPStatus = status
 		if failure.Message == "" {
 			failure.Message = unexpectedStatusSentence(status)
 		}
@@ -50,6 +54,52 @@ func ClassifyURLTestFailure(err error, satisfied bool, status int) *URLTestFailu
 	var errno syscall.Errno
 	if errors.As(err, &errno) {
 		failure.Errno = errnoName(errno)
+		failure.errno = errno
+	}
+	return failure
+}
+
+const (
+	failureKindShift   = 12
+	failurePayloadMask = 1<<failureKindShift - 1
+)
+
+var failureKinds = [...]string{"", URLTestFailureTimeout, URLTestFailureCanceled, URLTestFailureStatus, URLTestFailureUnknown, "dial", "read", "write"}
+
+func (f *URLTestFailure) code() uint16 {
+	if f == nil {
+		return 0
+	}
+	kind := 4
+	for i, known := range failureKinds {
+		if i > 0 && known == f.Kind {
+			kind = i
+			break
+		}
+	}
+	payload := uint16(f.errno)
+	if f.Kind == URLTestFailureStatus {
+		payload = uint16(f.HTTPStatus)
+	}
+	if int(payload) > failurePayloadMask {
+		payload = 0
+	}
+	return uint16(kind)<<failureKindShift | payload
+}
+
+func failureOfCode(code uint16) *URLTestFailure {
+	kind := int(code >> failureKindShift)
+	if code == 0 || kind >= len(failureKinds) || kind == 0 {
+		return nil
+	}
+	failure := &URLTestFailure{Kind: failureKinds[kind]}
+	payload := int(code & failurePayloadMask)
+	switch {
+	case failure.Kind == URLTestFailureStatus:
+		failure.HTTPStatus = payload
+	case payload != 0:
+		failure.errno = syscall.Errno(payload)
+		failure.Errno = errnoName(failure.errno)
 	}
 	return failure
 }

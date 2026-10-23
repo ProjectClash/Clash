@@ -498,6 +498,8 @@ type RawConfig struct {
 	ClashIPRewrite []string `yaml:"x-clash-ip-rewrite" json:"x-clash-ip-rewrite"`
 	ClashBlockQUIC string `yaml:"x-clash-block-quic" json:"x-clash-block-quic"`
 	ClashProxyHosts map[string]any `yaml:"x-clash-proxy-hosts" json:"x-clash-proxy-hosts"`
+
+	ClashRules ClashRuleSource `yaml:"-" json:"-"`
 }
 
 // Parse config

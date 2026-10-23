@@ -113,13 +113,13 @@ func proxyDelaysPageJSON(proxies map[string]C.Proxy, providers map[string]P.Prox
 			b = appendJSONString(b, fixed)
 			comma = true
 		}
-		extra = node.AppendURLDelays(extra[:0])
-		record, measured := node.LastDelay()
-		if measured || len(extra) > 0 {
+		var records adapter.DelaySnapshot
+		records, extra = node.DelaySnapshot(extra[:0])
+		if records.Measured || len(extra) > 0 {
 			if comma {
 				b = append(b, ',')
 			}
-			b = appendDelayRecords(b, node, record, measured, extra)
+			b = appendDelayRecords(b, records, extra)
 		}
 		b = append(b, '}')
 	}
@@ -254,15 +254,14 @@ func appendProxyDelay(b []byte, name string, proxy C.Proxy, extra []adapter.URLD
 	if _, isGroup := node.Adapter().(outboundgroup.ProxyGroup); isGroup {
 		return b, extra, first, false
 	}
-	extra = node.AppendURLDelays(extra[:0])
-	record, measured := node.LastDelay()
-	if !measured && len(extra) == 0 {
+	records, extra := node.DelaySnapshot(extra[:0])
+	if !records.Measured && len(extra) == 0 {
 		return b, extra, first, false
 	}
 	if since > 0 {
 		newest := int64(0)
-		if measured {
-			newest = record.Time.UnixMilli()
+		if records.Measured {
+			newest = records.Record.Time.UnixMilli()
 		}
 		for _, state := range extra {
 			if state.Recorded && state.Record.Time.UnixMilli() > newest {
@@ -278,15 +277,16 @@ func appendProxyDelay(b []byte, name string, proxy C.Proxy, extra []adapter.URLD
 	}
 	b = appendJSONString(b, name)
 	b = append(b, ':', '{')
-	b = appendDelayRecords(b, node, record, measured, extra)
+	b = appendDelayRecords(b, records, extra)
 	return append(b, '}'), extra, false, true
 }
 
-func appendDelayRecords(b []byte, node delayNode, record C.DelayHistory, measured bool, extra []adapter.URLDelay) []byte {
+func appendDelayRecords(b []byte, records adapter.DelaySnapshot, extra []adapter.URLDelay) []byte {
 	b = append(b, `"alive":`...)
-	b = strconv.AppendBool(b, node.AliveForTestUrl(""))
-	if measured {
-		b = appendDelayRecord(b, record)
+	b = strconv.AppendBool(b, records.Alive)
+	if records.Measured {
+		b = appendDelayRecord(b, records.Record)
+		b = appendDelayFailure(b, records.Failure)
 	}
 	if len(extra) > 0 {
 		b = append(b, `,"extra":{`...)
@@ -299,6 +299,7 @@ func appendDelayRecords(b []byte, node delayNode, record C.DelayHistory, measure
 			b = strconv.AppendBool(b, state.Alive)
 			if state.Recorded {
 				b = appendDelayRecord(b, state.Record)
+				b = appendDelayFailure(b, state.Failure)
 			}
 			b = append(b, '}')
 		}
@@ -313,6 +314,27 @@ func appendDelayRecord(b []byte, record C.DelayHistory) []byte {
 	b = append(b, `,"time":"`...)
 	b = record.Time.AppendFormat(b, time.RFC3339Nano)
 	return append(b, '"')
+}
+
+func appendDelayFailure(b []byte, failure *adapter.URLTestFailure) []byte {
+	if failure == nil {
+		return b
+	}
+	b = append(b, `,"failure":{"kind":`...)
+	b = appendJSONString(b, failure.Kind)
+	if failure.Errno != "" {
+		b = append(b, `,"errno":`...)
+		b = appendJSONString(b, failure.Errno)
+	}
+	if failure.HTTPStatus != 0 {
+		b = append(b, `,"httpStatus":`...)
+		b = strconv.AppendInt(b, int64(failure.HTTPStatus), 10)
+	}
+	if failure.Message != "" {
+		b = append(b, `,"message":`...)
+		b = appendJSONString(b, failure.Message)
+	}
+	return append(b, '}')
 }
 
 func appendJSONString(b []byte, s string) []byte { return adapter.AppendJSONString(b, s) }

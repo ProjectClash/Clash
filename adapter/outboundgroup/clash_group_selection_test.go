@@ -20,7 +20,7 @@ func TestASelectionIsReadWhileItIsSet(t *testing.T) {
 		members = append(members, adapter.NewProxy(outbound.NewDirectWithOption(outbound.DirectOption{Name: fmt.Sprintf("N %d", i)})))
 	}
 	empty := adapter.NewProxy(outbound.NewCompatible())
-	compatible, err := provider.NewCompatibleProvider("members", members, nil)
+	compatible, err := provider.NewCompatibleProvider("members", members, provider.NewHealthCheck(members, "", 0, 0, true, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func TestAFallbackPastADeadPinTakesTheNextAliveMember(t *testing.T) {
 			t.Fatalf("%s measured alive at a closed port", dead.Name())
 		}
 	}
-	compatible, err := provider.NewCompatibleProvider("members", members, nil)
+	compatible, err := provider.NewCompatibleProvider("members", members, provider.NewHealthCheck(members, "", 0, 0, true, nil))
 	if err != nil {
 		t.Fatal(err)
 	}

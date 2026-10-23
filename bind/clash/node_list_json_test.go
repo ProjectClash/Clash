@@ -433,3 +433,39 @@ func TestProxyDelaysComeInPagesAndSinceAPoll(t *testing.T) {
 		t.Fatalf("since the last poll: %v, want the %d measured again", got, len(again))
 	}
 }
+
+func TestProxyDelaysSayWhyANodeFailed(t *testing.T) {
+	proxy, err := adapter.ParseProxy(map[string]any{"name": "JP 1", "type": "http", "server": "127.0.0.1", "port": 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = proxy.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, _ = proxy.URLTest(ctx, "http://127.0.0.1:1/fast", nil)
+	type failure struct {
+		Kind, Errno, Message string
+		HTTPStatus           int
+	}
+	var decoded struct {
+		Proxies map[string]struct {
+			Delay   *uint16
+			Failure *failure
+			Extra   map[string]struct {
+				Alive   bool
+				Failure *failure
+			}
+		}
+	}
+	got := proxyDelaysJSON(map[string]C.Proxy{"JP 1": proxy}, nil, 1)
+	if err := json.Unmarshal([]byte(got), &decoded); err != nil {
+		t.Fatalf("%v: %s", err, got)
+	}
+	node := decoded.Proxies["JP 1"]
+	if node.Delay == nil || *node.Delay != 0 || node.Failure == nil || node.Failure.Kind != "dial" || node.Failure.Errno != "ECONNREFUSED" || node.Failure.Message == "" {
+		t.Fatalf("the member's record: %s", got)
+	}
+	if extra := node.Extra["http://127.0.0.1:1/fast"]; extra.Alive || extra.Failure == nil || extra.Failure.Errno != "ECONNREFUSED" || extra.Failure.Message == "" {
+		t.Fatalf("the member's record under the group's URL: %s", got)
+	}
+}

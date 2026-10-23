@@ -7,9 +7,12 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
+	"runtime"
 	"testing"
+	"time"
 	"unsafe"
 
+	"github.com/ProjectClash/Clash/common/clashsum"
 	C "github.com/ProjectClash/Clash/constant"
 )
 
@@ -239,5 +242,62 @@ func TestALibraryOpenedAgainIsTheMappingItHas(t *testing.T) {
 	third, err := OpenNodeLibraryFile(c, sum)
 	if err != nil || third == first || !bytes.Equal(third.data, data) {
 		t.Fatalf("an intact copy beside a changed mapping: %v, the changed mapping %v", err, third == first)
+	}
+}
+
+func TestALibraryOpenedAgainUnchangedIsNotHashedAgain(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("no change time on this platform")
+	}
+	writer := NewNodeLibraryWriter("")
+	var buffer bytes.Buffer
+	if err := writer.Write(&buffer); err != nil {
+		t.Fatal(err)
+	}
+	data := buffer.Bytes()
+	path := t.TempDir() + "/a.library"
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum := [sha256.Size]byte(data[len(data)-sha256.Size:])
+	time.Sleep(300 * time.Millisecond)
+	steps := []struct {
+		name  string
+		step  func() error
+		wants int64
+	}{
+		{"checked", func() error { return CheckNodeLibraryFile(path, sum) }, 1},
+		{"opened", func() error { _, err := OpenNodeLibraryFile(path, sum); return err }, 0},
+		{"opened again", func() error { _, err := OpenNodeLibraryFile(path, sum); return err }, 0},
+		{"checked again", func() error { return CheckNodeLibraryFile(path, sum) }, 0},
+	}
+	for _, s := range steps {
+		before := clashsum.Hashed()
+		if err := s.step(); err != nil {
+			t.Fatalf("%s: %v", s.name, err)
+		}
+		if hashes := clashsum.Hashed() - before; hashes != s.wants {
+			t.Errorf("%s: hashed %d times, want %d", s.name, hashes, s.wants)
+		}
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := bytes.Clone(data)
+	changed[nodeLibraryHeader/2] ^= 0xff
+	file, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteAt(changed, 0); err != nil {
+		t.Fatal(err)
+	}
+	file.Close()
+	if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenNodeLibraryFile(path, sum); err == nil {
+		t.Fatal("a library rewritten in place after its proof reused the mapping")
 	}
 }

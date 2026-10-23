@@ -13,8 +13,10 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 	"unsafe"
 
+	"github.com/ProjectClash/Clash/common/clashsum"
 	C "github.com/ProjectClash/Clash/constant"
 	"github.com/ProjectClash/Clash/log"
 )
@@ -168,6 +170,10 @@ func (l *NodeLibrary) Group(name string) ([]uint32, bool) {
 }
 
 func OpenNodeLibrary(data []byte) (*NodeLibrary, error) {
+	return openNodeLibrary(data, false)
+}
+
+func openNodeLibrary(data []byte, hashed bool) (*NodeLibrary, error) {
 	if len(data) < nodeLibraryHeader+sha256.Size {
 		return nil, fmt.Errorf("a node library of %d bytes is shorter than its header", len(data))
 	}
@@ -187,7 +193,7 @@ func OpenNodeLibrary(data []byte) (*NodeLibrary, error) {
 		}
 	}
 	end := offsets[5]
-	if sum := sha256.Sum256(data[:whole]); [sha256.Size]byte(data[whole:]) != sum {
+	if !hashed && clashsum.Sum(data[:whole]) != [sha256.Size]byte(data[whole:]) {
 		return nil, errors.New("a node library's checksum does not match its bytes")
 	}
 	if count > end/nodeLibraryEntrySize {
@@ -347,12 +353,13 @@ func OpenNodeLibraryFile(path string, want [sha256.Size]byte) (*NodeLibrary, err
 	if info, err := os.Stat(path); err == nil {
 		if value, ok := mappedNodeLibraries.Load(libraryMappingKeyOf(want, info)); ok {
 			library := value.(*NodeLibrary)
-			if !info.Mode().IsRegular() || info.Size() != int64(len(library.data)) || !fileHashes(path, want) {
+			if !info.Mode().IsRegular() || info.Size() != int64(len(library.data)) || !provenOrHashes(path, info, want) {
 				return nil, fmt.Errorf("node library %s is not the one the configuration names", path)
 			}
 			return library, nil
 		}
 	}
+	at := time.Now()
 	file, err := openLibraryFile(path)
 	if err != nil {
 		return nil, err
@@ -373,10 +380,14 @@ func OpenNodeLibraryFile(path string, want [sha256.Size]byte) (*NodeLibrary, err
 		unmapNodeRecords(data)
 		return nil, fmt.Errorf("node library %s is not the one the configuration names", path)
 	}
-	library, err := OpenNodeLibrary(data)
+	stamp, stamped := clashsum.StampOf(info)
+	library, err := openNodeLibrary(data, stamped && clashsum.ProvenAt(path, stamp, want))
 	if err != nil {
 		unmapNodeRecords(data)
 		return nil, fmt.Errorf("node library %s: %w", path, err)
+	}
+	if stamped {
+		clashsum.Prove(stamp, at, want)
 	}
 	if mapped, loaded := mappedNodeLibraries.LoadOrStore(libraryMappingKeyOf(want, info), library); loaded {
 		unmapNodeRecords(data)
@@ -406,25 +417,11 @@ func openLibraryFile(path string) (*os.File, error) {
 	return os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 }
 
-func fileHashes(path string, want [sha256.Size]byte) bool {
-	file, err := openLibraryFile(path)
-	if err != nil {
-		return false
+func provenOrHashes(path string, info os.FileInfo, want [sha256.Size]byte) bool {
+	if stamp, ok := clashsum.StampOf(info); ok && clashsum.ProvenAt(path, stamp, want) {
+		return true
 	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Size() < sha256.Size {
-		return false
-	}
-	hash := sha256.New()
-	if _, err := io.CopyN(hash, file, info.Size()-sha256.Size); err != nil {
-		return false
-	}
-	var trailer [sha256.Size]byte
-	if _, err := io.ReadFull(file, trailer[:]); err != nil || trailer != want {
-		return false
-	}
-	return [sha256.Size]byte(hash.Sum(nil)) == want
+	return clashsum.Hashes(path, want)
 }
 
 
@@ -466,6 +463,7 @@ func CatalogNodeHoldsNothing(a C.ProxyAdapter) bool {
 }
 
 func CheckNodeLibraryFile(path string, want [sha256.Size]byte) error {
+	at := time.Now()
 	file, err := openLibraryFile(path)
 	if err != nil {
 		return err
@@ -486,6 +484,9 @@ func CheckNodeLibraryFile(path string, want [sha256.Size]byte) error {
 	if [sha256.Size]byte(data[len(data)-sha256.Size:]) != want {
 		return fmt.Errorf("node library %s is not the one named", path)
 	}
-	_, err = OpenNodeLibrary(data)
+	stamp, stamped := clashsum.StampOf(info)
+	if _, err = openNodeLibrary(data, stamped && clashsum.ProvenAt(path, stamp, want)); err == nil && stamped {
+		clashsum.Prove(stamp, at, want)
+	}
 	return err
 }

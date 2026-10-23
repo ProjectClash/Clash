@@ -16,6 +16,7 @@ import (
 
 	"github.com/ProjectClash/Clash/adapter"
 	"github.com/ProjectClash/Clash/adapter/outbound"
+	"github.com/ProjectClash/Clash/common/clashsum"
 	"github.com/ProjectClash/Clash/config"
 	"github.com/ProjectClash/Clash/constant"
 	"github.com/ProjectClash/Clash/rules/clashindex"
@@ -150,19 +151,19 @@ func (l ruleLines) each(skip []int, f func(line string) error) error {
 	return nil
 }
 
-func writeRuleIndex(root map[string]any, rm resourceMap, names ruleNames, lines ruleLines, before, after []string) error {
+func ruleIndexReference(rm resourceMap, names ruleNames, lines ruleLines, before, after []string) (map[string]any, error) {
 	if lines.n == 0 && len(before) == 0 && len(after) == 0 {
-		return nil
+		return nil, nil
 	}
 	directory := rm.RuleIndexDirectory
 	profile, err := ruleIndexProfile(rm.RuntimeProfile)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var removed []int
 	removesUID := removesUIDRules(profile)
 	if err := checkRulesBefore(before, names, removesUID); err != nil {
-		return err
+		return nil, err
 	}
 	if removesUID {
 		for i := 0; i < lines.n; i++ {
@@ -172,7 +173,7 @@ func writeRuleIndex(root map[string]any, rm resourceMap, names ruleNames, lines 
 		}
 	}
 	if err := checkRulesAfter(after, len(before)+lines.n-len(removed), names, removesUID); err != nil {
-		return err
+		return nil, err
 	}
 	key := sha256.New()
 	io.WriteString(key, nodeLibraryBuilder()+"\x00rules\x00")
@@ -190,10 +191,9 @@ func writeRuleIndex(root map[string]any, rm resourceMap, names ruleNames, lines 
 	}
 	if err != nil {
 		if sum, err = compileRuleIndex(path, source, lines, removed, names, len(before)); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	delete(root, "rules")
 	reference := map[string]any{"path": path, "sha256": hex.EncodeToString(sum)}
 	if len(removed) > 0 {
 		places := make([]int, len(removed))
@@ -208,8 +208,7 @@ func writeRuleIndex(root map[string]any, rm resourceMap, names ruleNames, lines 
 	if len(after) > 0 {
 		reference["append"] = anyStrings(after)
 	}
-	root["x-clash-rule-index"] = reference
-	return nil
+	return reference, nil
 }
 
 func removesUIDRules(profile runtimeProfile) bool {
@@ -309,6 +308,7 @@ func compileRuleIndex(path string, source [sha256.Size]byte, lines ruleLines, re
 	if err := os.Rename(file.Name(), path); err != nil {
 		return nil, fmt.Errorf("rule index: %w", err)
 	}
+	clashsum.ProveWritten(path, sum)
 	return sum[:], nil
 }
 
@@ -454,7 +454,7 @@ func rawRuleIndex(raw *config.RawConfig) *clashindex.Index {
 }
 
 func rawRuleIndexChecked(raw *config.RawConfig) (*clashindex.Index, error) {
-	if raw == nil || len(raw.Rule) > 0 {
+	if raw == nil || len(raw.Rule) > 0 || rawRulesElsewhere(raw) {
 		return nil, nil
 	}
 	return config.ClashOpenRuleIndex(raw.ClashRuleIndex)
@@ -472,11 +472,26 @@ func documentRuleIndexError(root map[string]any) error {
 	return err
 }
 
+func rawRulesElsewhere(raw *config.RawConfig) bool {
+	return raw != nil && len(raw.Rule) == 0 && raw.ClashRules != nil && raw.ClashRules.Len() > 0
+}
+
+type catalogRules struct{ catalog *RuleCatalog }
+
+func (r catalogRules) Len() int        { return len(r.catalog.items) }
+func (r catalogRules) At(i int) string { return r.catalog.value(i) }
+
 func eachRuleLine(raw *config.RawConfig, f func(index int, line string)) {
 	eachRuleLineOf(raw, rawRuleIndex(raw), f)
 }
 
 func eachRuleLineOf(raw *config.RawConfig, index *clashindex.Index, f func(index int, line string)) {
+	if rawRulesElsewhere(raw) {
+		for i, n := 0, raw.ClashRules.Len(); i < n; i++ {
+			f(i, raw.ClashRules.At(i))
+		}
+		return
+	}
 	if index != nil && len(raw.Rule) == 0 {
 		before := raw.ClashRuleIndex.Prepend
 		for i, line := range before {
@@ -499,6 +514,9 @@ func ruleCountOf(raw *config.RawConfig) int {
 }
 
 func ruleCountOfIndex(raw *config.RawConfig, index *clashindex.Index) int {
+	if rawRulesElsewhere(raw) {
+		return raw.ClashRules.Len()
+	}
 	if index != nil && len(raw.Rule) == 0 {
 		return len(raw.ClashRuleIndex.Prepend) + index.Len() + len(raw.ClashRuleIndex.UIDRemoved) + len(raw.ClashRuleIndex.Append)
 	}

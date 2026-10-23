@@ -25,6 +25,11 @@ type ClashRuleIndexRef struct {
 	Append []string `yaml:"append,omitempty" json:"append,omitempty"`
 }
 
+type ClashRuleSource interface {
+	Len() int
+	At(i int) string
+}
+
 func ClashOpenRuleIndex(ref ClashRuleIndexRef) (*clashindex.Index, error) {
 	if ref.Path == "" && ref.SHA256 == "" {
 		return nil, nil

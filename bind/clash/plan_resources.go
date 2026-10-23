@@ -120,7 +120,9 @@ func planResourcesForProfileUnguarded(mergedYAML string, targetProfile string) (
 
 func PlanResourcesForProfileAtPath(path string, targetProfile string) (*StringBox, error) {
 	out, err := recoverAppCall("PlanResourcesForProfileAtPath", func() (*StringBox, error) {
-		return withDocumentAt(path, func(text string) (*StringBox, error) { return planResourcesForProfileUnguarded(text, targetProfile) })
+		return withDocumentAtKeyed(path, func(text string, key publishParseKey, keyed bool) (*StringBox, error) {
+			return planForPublish(text, targetProfile, key, keyed)
+		})
 	})
 	if err != nil {
 		return nil, bridgeSafeError(err)

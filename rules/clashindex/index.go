@@ -6,14 +6,16 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"net/netip"
 	"os"
 	"runtime"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 	"unsafe"
+
+	"github.com/ProjectClash/Clash/common/clashsum"
 )
 
 type Index struct {
@@ -49,10 +51,7 @@ func OpenVerified(path string, want [sha256.Size]byte) (*Index, error) {
 
 var lastOpened struct {
 	sync.Mutex
-	path     string
 	want     [sha256.Size]byte
-	size     int64
-	modified int64
 	identity any
 	verified bool
 	index    *Index
@@ -68,9 +67,8 @@ func open(path string, want [sha256.Size]byte, verify bool) (*Index, error) {
 	}
 	lastOpened.Lock()
 	defer lastOpened.Unlock()
-	if l := &lastOpened; l.index != nil && l.path == path && l.want == want && l.size == info.Size() &&
-		l.modified == info.ModTime().UnixNano() && os.SameFile(l.identity.(os.FileInfo), info) && (l.verified || !verify) {
-		if fileHashes(path, want) {
+	if l := &lastOpened; l.index != nil && l.want == want && os.SameFile(l.identity.(os.FileInfo), info) && (l.verified || !verify) {
+		if stamp, ok := clashsum.StampOf(info); ok && clashsum.ProvenAt(path, stamp, want) || clashsum.Hashes(path, want) {
 			return l.index, nil
 		}
 		return nil, errors.New("not the index the configuration names")
@@ -79,33 +77,12 @@ func open(path string, want [sha256.Size]byte, verify bool) (*Index, error) {
 	if err != nil {
 		return nil, err
 	}
-	lastOpened.path, lastOpened.want, lastOpened.size, lastOpened.modified = path, want, opened.Size(), opened.ModTime().UnixNano()
-	lastOpened.identity, lastOpened.verified, lastOpened.index = opened, verify, index
+	lastOpened.want, lastOpened.identity, lastOpened.verified, lastOpened.index = want, opened, verify, index
 	return index, nil
 }
 
-func fileHashes(path string, want [sha256.Size]byte) bool {
-	file, err := openIndexFile(path)
-	if err != nil {
-		return false
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Size() < sha256.Size {
-		return false
-	}
-	hash := sha256.New()
-	if _, err := io.CopyN(hash, file, info.Size()-sha256.Size); err != nil {
-		return false
-	}
-	var trailer [sha256.Size]byte
-	if _, err := io.ReadFull(file, trailer[:]); err != nil {
-		return false
-	}
-	return trailer == want && [sha256.Size]byte(hash.Sum(nil)) == want
-}
-
 func openFile(path string, want [sha256.Size]byte, verify bool) (*Index, os.FileInfo, error) {
+	at := time.Now()
 	file, err := openIndexFile(path)
 	if err != nil {
 		return nil, nil, err
@@ -125,20 +102,24 @@ func openFile(path string, want [sha256.Size]byte, verify bool) (*Index, os.File
 	if err != nil {
 		return nil, nil, err
 	}
-	index, err := decode(data, &want, verify)
+	stamp, stamped := clashsum.StampOf(info)
+	index, err := decode(data, &want, verify, stamped && clashsum.ProvenAt(path, stamp, want))
 	if err != nil {
 		unmapIndex(data)
 		return nil, nil, err
+	}
+	if stamped {
+		clashsum.Prove(stamp, at, want)
 	}
 	runtime.AddCleanup(index, unmapIndex, data)
 	return index, info, nil
 }
 
 func Decode(data []byte) (*Index, error) {
-	return decode(data, nil, true)
+	return decode(data, nil, true, false)
 }
 
-func decode(data []byte, want *[sha256.Size]byte, verify bool) (*Index, error) {
+func decode(data []byte, want *[sha256.Size]byte, verify, hashed bool) (*Index, error) {
 	if len(data) < headerSize+sha256.Size || string(data[:8]) != magic {
 		return nil, errors.New("not a rule index")
 	}
@@ -147,7 +128,7 @@ func decode(data []byte, want *[sha256.Size]byte, verify bool) (*Index, error) {
 	if want != nil && trailer != *want {
 		return nil, errors.New("not the index the configuration names")
 	}
-	if sha256.Sum256(body) != trailer {
+	if !hashed && clashsum.Sum(body) != trailer {
 		return nil, errors.New("index checksum")
 	}
 	if v := le.Uint32(data[8:]); v != version {

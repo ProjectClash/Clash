@@ -1,15 +1,18 @@
 package clash
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ProjectClash/Clash/adapter"
+	"github.com/ProjectClash/Clash/common/clashsum"
 	"github.com/ProjectClash/Clash/config"
 	"go.yaml.in/yaml/v3"
 
@@ -89,8 +92,8 @@ func TestFinalizeWritesTheNodesToALibrary(t *testing.T) {
 	if err != nil || again.Value != finalized.Value {
 		t.Fatalf("publishing the same nodes again named another library: %v", err)
 	}
-	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
-		t.Fatalf("%d files in the library directory", len(entries))
+	if entries, _ := os.ReadDir(dir); len(entries) != 2 || !strings.HasSuffix(entries[1].Name(), clashsum.ProofSuffix) {
+		t.Fatalf("files in the library directory: %v", entries)
 	}
 }
 
@@ -485,8 +488,10 @@ func TestPruningLeavesALibraryWrittenOrUsedLately(t *testing.T) {
 	library := libraries[0]
 	age := func(d time.Duration) {
 		at := time.Now().Add(-d)
-		if err := os.Chtimes(library, at, at); err != nil {
-			t.Fatal(err)
+		for _, file := range []string{library, library + clashsum.ProofSuffix} {
+			if err := os.Chtimes(file, at, at); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 	if err := PruneNodeLibraries(dir, ""); err != nil || !regularFileExists(library) {
@@ -504,6 +509,9 @@ func TestPruningLeavesALibraryWrittenOrUsedLately(t *testing.T) {
 	age(nodeLibraryGrace + time.Minute)
 	if err := PruneNodeLibraries(dir, ""); err != nil || regularFileExists(library) {
 		t.Fatalf("a library unused for longer than the grace was kept (%v)", err)
+	}
+	if regularFileExists(library + clashsum.ProofSuffix) {
+		t.Fatal("a library pruned left its proof")
 	}
 }
 
@@ -561,5 +569,78 @@ func TestANodeNamedWithAnotherCaseIsTheSameNodeFromTheLibrary(t *testing.T) {
 	}
 	if got, want := membersOf(finalized.Value), membersOf(document); got != want || !strings.Contains(want, "up") {
 		t.Fatalf("members:\n got  %s\n want %s", got, want)
+	}
+}
+
+func summedFile(t *testing.T, path, body string, age time.Duration) [32]byte {
+	t.Helper()
+	sum := sha256.Sum256([]byte(body))
+	if err := os.WriteFile(path, append([]byte(body), sum[:]...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().Add(-age)
+	if err := os.Chtimes(path, at, at); err != nil {
+		t.Fatal(err)
+	}
+	return sum
+}
+
+func TestAUseThroughALinkMarksTheLinkedLibrary(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, nodeLibraryPrefix+"target"+nodeLibrarySuffix)
+	summedFile(t, target, "a library", time.Hour)
+	link := filepath.Join(dir, nodeLibraryPrefix+"linked"+nodeLibrarySuffix)
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := usedNodeLibrary(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := PruneNodeLibrariesKeeping(dir, `["`+link+`"]`); err != nil {
+		t.Fatal(err)
+	}
+	if err := PruneNodeLibraries(dir, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf("the library a used link names was pruned (%v)", err)
+	}
+}
+
+func TestAUseHashesALibraryOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), nodeLibraryPrefix+"x"+nodeLibrarySuffix)
+	summedFile(t, path, "a library", 0)
+	before := clashsum.Hashed()
+	if _, err := usedNodeLibrary(path); err != nil {
+		t.Fatal(err)
+	}
+	if hashes := clashsum.Hashed() - before; hashes != 1 {
+		t.Fatalf("a use hashed the library %d times", hashes)
+	}
+}
+
+func TestAWrittenLibraryIsProvedWithoutBeingReadAgain(t *testing.T) {
+	dir := t.TempDir()
+	body := []byte("a library")
+	sum := sha256.Sum256(body)
+	library := filepath.Join(dir, nodeLibraryPrefix+"w"+nodeLibrarySuffix)
+	before := clashsum.Hashed()
+	if err := writeLibraryFile(library, append(body, sum[:]...), true); err != nil {
+		t.Fatal(err)
+	}
+	if hashes := clashsum.Hashed() - before; hashes != 0 {
+		t.Fatalf("writing a library hashed it %d times", hashes)
+	}
+	if runtime.GOOS == "darwin" {
+		if _, err := os.Stat(library + clashsum.ProofSuffix); err != nil {
+			t.Fatalf("a library written left no proof: %v", err)
+		}
+	}
+	stub := filepath.Join(dir, nodeLibraryPrefix+"w"+providerRuntimeIndexStubSuffix)
+	if err := writeLibraryFile(stub, []byte("CLASH-CLASSICAL-INDEX,a stub that is long enough to have thirty-two bytes"), false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stub + clashsum.ProofSuffix); err == nil {
+		t.Fatal("a stub was proved")
 	}
 }

@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"container/list"
 	"context"
 	"slices"
 	"sync"
@@ -28,6 +29,7 @@ type LibraryNodes struct {
 	urlsMu sync.Mutex
 	urls   atomic.Pointer[libraryURLRecords]
 	asked  atomic.Pointer[[]string]
+	notes  failureNotes
 }
 
 type libraryURLRecords map[string]*urlRecordSet
@@ -99,10 +101,12 @@ const (
 
 const recordAskedOther = recordAskedMask
 
-func packRecord(record C.DelayHistory, alive bool, asked uint64) uint64 {
-	packed := uint64(record.Delay) | recordMade | asked<<recordAskedShift | uint64(record.Time.UnixMilli())<<recordTimeShift
+func packRecord(record C.DelayHistory, alive bool, failure *URLTestFailure, asked uint64) uint64 {
+	packed := recordMade | asked<<recordAskedShift | uint64(record.Time.UnixMilli())<<recordTimeShift
 	if alive {
-		packed |= recordAlive
+		packed |= recordAlive | uint64(record.Delay)
+	} else {
+		packed |= uint64(failure.code())
 	}
 	return packed
 }
@@ -138,8 +142,77 @@ func unpackRecord(packed uint64) (record C.DelayHistory, alive bool, made bool) 
 	if packed&recordMade == 0 {
 		return C.DelayHistory{}, false, false
 	}
-	return C.DelayHistory{Time: time.UnixMilli(int64(packed >> recordTimeShift)), Delay: uint16(packed)},
-		packed&recordAlive != 0, true
+	record.Time = time.UnixMilli(int64(packed >> recordTimeShift))
+	if alive = packed&recordAlive != 0; alive {
+		record.Delay = uint16(packed)
+	}
+	return record, alive, true
+}
+
+func (l *LibraryNodes) failureOf(i int, url string, packed uint64) *URLTestFailure {
+	if packed&recordMade == 0 || packed&recordAlive != 0 {
+		return nil
+	}
+	failure := failureOfCode(uint16(packed))
+	if failure != nil {
+		failure.Message = l.notes.sentence(int32(i), url, int64(packed>>recordTimeShift), uint16(packed))
+	}
+	return failure
+}
+
+type failureNotes struct {
+	mu    sync.Mutex
+	notes map[failureNoteKey]*list.Element
+	order list.List
+}
+
+type failureNoteKey struct {
+	node int32
+	url  string
+}
+
+type failureNote struct {
+	key      failureNoteKey
+	at       int64
+	code     uint16
+	sentence string
+}
+
+const maxFailureNotes = 256
+
+func (f *failureNotes) note(i int, url string, record C.DelayHistory, failure *URLTestFailure) {
+	if failure == nil || failure.Message == "" {
+		return
+	}
+	key := failureNoteKey{node: int32(i), url: url}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.notes == nil {
+		f.notes = make(map[failureNoteKey]*list.Element, maxFailureNotes)
+	}
+	note := &failureNote{key: key, at: record.Time.UnixMilli(), code: failure.code(), sentence: failure.Message}
+	if element, noted := f.notes[key]; noted {
+		element.Value = note
+		f.order.MoveToBack(element)
+		return
+	}
+	if len(f.notes) >= maxFailureNotes {
+		eldest := f.order.Front()
+		delete(f.notes, eldest.Value.(*failureNote).key)
+		f.order.Remove(eldest)
+	}
+	f.notes[key] = f.order.PushBack(note)
+}
+
+func (f *failureNotes) sentence(i int32, url string, at int64, code uint16) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if element, ok := f.notes[failureNoteKey{node: i, url: url}]; ok {
+		if note := element.Value.(*failureNote); note.at == at && note.code == code {
+			return note.sentence
+		}
+	}
+	return ""
 }
 
 func NewLibraryNodes(library *outbound.NodeLibrary, options ...ProxyOption) *LibraryNodes {
@@ -318,10 +391,12 @@ func (n *libraryNode) index() int {
 	return int((uintptr(unsafe.Pointer(n)) - uintptr(unsafe.Pointer(&n.nodes.slots[0]))) / unsafe.Sizeof(libraryNode{}))
 }
 
-func (n *libraryNode) recorded(url string, record C.DelayHistory, alive bool, urlRecord C.DelayHistory, urlAlive bool, asked string) {
-	index := n.nodes.askedIndex(asked)
-	n.record.Store(packRecord(record, alive, index))
-	n.nodes.urlRecords(url, true).store(n.index(), packRecord(urlRecord, urlAlive, index))
+func (n *libraryNode) recorded(url string, record C.DelayHistory, alive bool, failure *URLTestFailure, urlRecord C.DelayHistory, urlAlive bool, urlFailure *URLTestFailure, asked string) {
+	index, i := n.nodes.askedIndex(asked), n.index()
+	n.record.Store(packRecord(record, alive, failure, index))
+	n.nodes.urlRecords(url, true).store(i, packRecord(urlRecord, urlAlive, urlFailure, index))
+	n.nodes.notes.note(i, "", record, failure)
+	n.nodes.notes.note(i, url, urlRecord, urlFailure)
 }
 
 func (n *libraryNode) LastURLTestRecord(url string) (record C.DelayHistory, alive bool, expected string, ok bool) {
@@ -470,11 +545,28 @@ func (n *libraryNode) LastDelay() (C.DelayHistory, bool) {
 	return record, made
 }
 
+func (n *libraryNode) LastRecord() (C.DelayHistory, *URLTestFailure, bool) {
+	packed := n.record.Load()
+	record, _, made := unpackRecord(packed)
+	return record, n.nodes.failureOf(n.index(), "", packed), made
+}
+
+func (n *libraryNode) DelaySnapshot(dst []URLDelay) (DelaySnapshot, []URLDelay) {
+	packed := n.record.Load()
+	record, alive, made := unpackRecord(packed)
+	snapshot := DelaySnapshot{Alive: alive || !made, Measured: made, Record: record, Failure: n.nodes.failureOf(n.index(), "", packed)}
+	if _, urlAlive, urlMade := n.urlRecord(""); urlMade {
+		snapshot.Alive = urlAlive
+	}
+	return snapshot, n.AppendURLDelays(dst)
+}
+
 func (n *libraryNode) AppendURLDelays(dst []URLDelay) []URLDelay {
 	i := n.index()
 	n.nodes.rangeURLRecords(func(url string, records *urlRecordSet) {
-		if record, alive, made := unpackRecord(records.load(i)); made {
-			dst = append(dst, URLDelay{URL: url, Alive: alive, Recorded: true, Record: record})
+		packed := records.load(i)
+		if record, alive, made := unpackRecord(packed); made {
+			dst = append(dst, URLDelay{URL: url, Alive: alive, Recorded: true, Record: record, Failure: n.nodes.failureOf(i, url, packed)})
 		}
 	})
 	return dst
@@ -507,7 +599,9 @@ func (n *libraryNode) view() *Proxy {
 
 type DelayRecords interface {
 	LastDelay() (C.DelayHistory, bool)
+	LastRecord() (record C.DelayHistory, failure *URLTestFailure, ok bool)
 	AppendURLDelays(dst []URLDelay) []URLDelay
+	DelaySnapshot(dst []URLDelay) (DelaySnapshot, []URLDelay)
 }
 
 var (
