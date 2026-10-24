@@ -36,7 +36,7 @@ The upstream GPL-3.0 license remains in [LICENSE](LICENSE). See [NOTICE](NOTICE)
 | Component | Current reference |
 | --- | --- |
 | Upstream engine | mihomo **v1.19.33**, recorded in [`UPSTREAM_VERSION`](UPSTREAM_VERSION) |
-| Released Apple SDK | [`v1.19.33-clash.2`](https://github.com/ProjectClash/Clash/releases/tag/v1.19.33-clash.2) |
+| Released Apple SDK | [`v1.19.33-clash.3`](https://github.com/ProjectClash/Clash/releases/tag/v1.19.33-clash.3) |
 | Client integration | Kernel and Adapter commits pinned in the Client's [`Dependencies.lock.json`](https://github.com/ProjectClash/Clash-Client/blob/main/Dependencies.lock.json) |
 
 The upstream engine version, SDK release tag and App Store app versions are separate. Use a release tag to reproduce an SDK release; `main` can contain later changes. Client and Adapter source are currently published by commit, without their own release tags.
@@ -63,7 +63,7 @@ To build the current released SDK, clone the repository with its history and tag
 ```sh
 git clone https://github.com/ProjectClash/Clash.git
 cd Clash
-git checkout --detach v1.19.33-clash.2
+git checkout --detach v1.19.33-clash.3
 go install github.com/sagernet/gomobile/cmd/gomobile@v0.1.13
 go install github.com/sagernet/gomobile/cmd/gobind@v0.1.13
 make lib_apple
