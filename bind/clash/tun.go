@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 
 	LC "github.com/ProjectClash/Clash/listener/config"
+	singtun "github.com/metacubex/sing-tun"
 )
 
 const (
@@ -66,6 +67,8 @@ type TunOptions interface {
 	GetInet6RouteAddress() RoutePrefixIterator
 	GetInet4RouteExcludeAddress() RoutePrefixIterator
 	GetInet6RouteExcludeAddress() RoutePrefixIterator
+	GetInet4LoopbackAddress() RoutePrefixIterator
+	GetInet6LoopbackAddress() RoutePrefixIterator
 }
 
 type tunOptions struct {
@@ -123,6 +126,24 @@ func (o *tunOptions) GetInet4RouteExcludeAddress() RoutePrefixIterator {
 
 func (o *tunOptions) GetInet6RouteExcludeAddress() RoutePrefixIterator {
 	return mapRoutePrefix(routePrefixesByFamily(o.tun.Inet6RouteExcludeAddress, o.tun.RouteExcludeAddress, false))
+}
+
+func (o *tunOptions) GetInet4LoopbackAddress() RoutePrefixIterator {
+	return mapRoutePrefix(loopbackRoutes(o.tun.LoopbackAddress, true))
+}
+
+func (o *tunOptions) GetInet6LoopbackAddress() RoutePrefixIterator {
+	return mapRoutePrefix(loopbackRoutes(o.tun.LoopbackAddress, false))
+}
+
+func loopbackRoutes(addresses []netip.Addr, ipv4 bool) []netip.Prefix {
+	var routes []netip.Prefix
+	for _, address := range singtun.LoopbackAddresses(addresses, nil) {
+		if address.Is4() == ipv4 {
+			routes = append(routes, netip.PrefixFrom(address, address.BitLen()))
+		}
+	}
+	return routes
 }
 
 func routePrefixesByFamily(specific, generic []netip.Prefix, ipv4 bool) []netip.Prefix {

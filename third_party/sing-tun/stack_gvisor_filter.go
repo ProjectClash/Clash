@@ -16,6 +16,7 @@ type LinkEndpointFilter struct {
 	stack.LinkEndpoint
 	BroadcastAddress netip.Addr
 	Writer           GVisorTun
+	LoopbackAddress []netip.Addr
 }
 
 func (w *LinkEndpointFilter) Attach(dispatcher stack.NetworkDispatcher) {
@@ -24,7 +25,7 @@ func (w *LinkEndpointFilter) Attach(dispatcher stack.NetworkDispatcher) {
 		return
 	}
 
-	w.LinkEndpoint.Attach(&networkDispatcherFilter{dispatcher, w.BroadcastAddress, w.Writer})
+	w.LinkEndpoint.Attach(&networkDispatcherFilter{dispatcher, w.BroadcastAddress, w.Writer, w.LoopbackAddress})
 }
 
 var _ stack.NetworkDispatcher = (*networkDispatcherFilter)(nil)
@@ -33,10 +34,11 @@ type networkDispatcherFilter struct {
 	stack.NetworkDispatcher
 	broadcastAddress netip.Addr
 	writer           GVisorTun
+	loopbackAddress  []netip.Addr
 }
 
 func (w *networkDispatcherFilter) DeliverNetworkPacket(protocol tcpip.NetworkProtocolNumber, pkt *stack.PacketBuffer) {
-	if gvisorIPRewrite(w.writer, protocol, pkt) {
+	if w.ipRewrite(protocol, pkt) {
 		return
 	}
 	var network header.Network

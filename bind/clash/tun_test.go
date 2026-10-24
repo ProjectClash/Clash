@@ -2,6 +2,7 @@ package clash
 
 import (
 	"net/netip"
+	"slices"
 	"testing"
 
 	LC "github.com/ProjectClash/Clash/listener/config"
@@ -76,5 +77,42 @@ func TestDNSServerAddressRequiresRoom(t *testing.T) {
 	}
 	if _, err := newTunOptions(&LC.Tun{}).GetDNSServerAddress(); err == nil {
 		t.Fatal("expected error for missing inet4 address")
+	}
+}
+
+func TestTunOptionsLoopbackGetters(t *testing.T) {
+	o := newTunOptions(&LC.Tun{
+		Inet4Address: []netip.Prefix{netip.MustParsePrefix("198.18.0.1/30")},
+		LoopbackAddress: []netip.Addr{
+			netip.MustParseAddr("10.7.0.1"),
+			netip.MustParseAddr("fdfe:7::1"),
+			netip.MustParseAddr("::ffff:10.7.0.2"),
+			netip.MustParseAddr("10.7.0.1"),
+			{},
+			netip.MustParseAddr("fe80::1%utun4"),
+		},
+	})
+	var v4, v6 []string
+	for it := o.GetInet4LoopbackAddress(); it.HasNext(); {
+		v4 = append(v4, it.Next().String())
+	}
+	for it := o.GetInet6LoopbackAddress(); it.HasNext(); {
+		v6 = append(v6, it.Next().String())
+	}
+	if want := []string{"10.7.0.1/32", "10.7.0.2/32"}; !slices.Equal(v4, want) {
+		t.Errorf("GetInet4LoopbackAddress = %v, want %v", v4, want)
+	}
+	if want := []string{"fdfe:7::1/128", "fe80::1/128"}; !slices.Equal(v6, want) {
+		t.Errorf("GetInet6LoopbackAddress = %v, want %v", v6, want)
+	}
+	if routes := o.GetInet4RouteAddress(); routes.Len() != 0 {
+		t.Errorf("GetInet4RouteAddress has %d routes, want none: a loopback address is not a route address", routes.Len())
+	}
+	if routes := o.GetInet6RouteAddress(); routes.Len() != 0 {
+		t.Errorf("GetInet6RouteAddress has %d routes, want none", routes.Len())
+	}
+	none := newTunOptions(&LC.Tun{})
+	if none.GetInet4LoopbackAddress().Len() != 0 || none.GetInet6LoopbackAddress().Len() != 0 {
+		t.Error("loopback routes with no loopback-address")
 	}
 }

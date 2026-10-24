@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync/atomic"
 )
@@ -33,12 +34,28 @@ func SetIPRewrite(rules []IPRewriteRule) {
 	ipRewriteTable.Store(&table)
 }
 
-func ipRewriteActionFor(destination netip.Addr) IPRewriteAction {
+func LoopbackAddresses(inet4, inet6 []netip.Addr) []netip.Addr {
+	var addresses []netip.Addr
+	for _, family := range [][]netip.Addr{inet4, inet6} {
+		for _, address := range family {
+			address = address.Unmap().WithZone("")
+			if address.IsValid() && !slices.Contains(addresses, address) {
+				addresses = append(addresses, address)
+			}
+		}
+	}
+	return addresses
+}
+
+func ipRewriteActionFor(destination netip.Addr, loopback []netip.Addr) IPRewriteAction {
+	destination = destination.Unmap()
+	if slices.Contains(loopback, destination) {
+		return IPRewriteReflect
+	}
 	table := ipRewriteTable.Load()
 	if table == nil {
 		return 0
 	}
-	destination = destination.Unmap()
 	for _, rule := range *table {
 		if rule.Prefix.Contains(destination) {
 			return rule.Action
@@ -47,15 +64,23 @@ func ipRewriteActionFor(destination netip.Addr) IPRewriteAction {
 	return 0
 }
 
-func applyIPRewrite(packet []byte) (handled, writeBack bool, reply []byte) {
-	if ipRewriteTable.Load() == nil {
+func ipRewriteIdle(loopback []netip.Addr) bool {
+	return len(loopback) == 0 && ipRewriteTable.Load() == nil
+}
+
+func applyIPRewrite(packet []byte, loopback []netip.Addr) (handled, writeBack bool, reply []byte) {
+	if ipRewriteIdle(loopback) {
 		return false, false, nil
 	}
 	destination, ok := packetDestination(packet)
 	if !ok {
 		return false, false, nil
 	}
-	switch ipRewriteActionFor(destination) {
+	return applyIPRewriteAction(packet, ipRewriteActionFor(destination, loopback))
+}
+
+func applyIPRewriteAction(packet []byte, action IPRewriteAction) (handled, writeBack bool, reply []byte) {
+	switch action {
 	case IPRewriteReflect:
 		swapPacketAddresses(packet)
 		return true, true, nil

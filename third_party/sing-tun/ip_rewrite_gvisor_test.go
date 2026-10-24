@@ -75,11 +75,11 @@ func TestTheGVisorFilterCopiesNoUncoveredPacket(t *testing.T) {
 	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(packet)})
 	defer pkt.DecRef()
 	if allocations := testing.AllocsPerRun(100, func() {
-		gvisorIPRewrite(filter.writer, header.IPv4ProtocolNumber, pkt)
+		filter.ipRewrite(header.IPv4ProtocolNumber, pkt)
 	}); allocations != 0 {
 		t.Fatalf("an uncovered packet made %v allocations, want 0", allocations)
 	}
-	if handled := gvisorIPRewrite(filter.writer, header.IPv4ProtocolNumber, pkt); handled || len(tun.written) != 0 {
+	if handled := filter.ipRewrite(header.IPv4ProtocolNumber, pkt); handled || len(tun.written) != 0 {
 		t.Fatal("an uncovered packet was taken")
 	}
 }

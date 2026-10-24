@@ -40,6 +40,7 @@ type System struct {
 	broadcastAddr        netip.Addr
 	inet4LoopbackAddress []netip.Addr
 	inet6LoopbackAddress []netip.Addr
+	ipRewriteLoopback    []netip.Addr
 	udpTimeout           time.Duration
 	icmpTimeout          time.Duration
 	tcpListener          net.Listener
@@ -76,6 +77,7 @@ func NewSystem(options StackOptions) (Stack, error) {
 		mtu:                  int(options.TunOptions.MTU),
 		inet4LoopbackAddress: options.TunOptions.Inet4LoopbackAddress,
 		inet6LoopbackAddress: options.TunOptions.Inet6LoopbackAddress,
+		ipRewriteLoopback:    LoopbackAddresses(options.TunOptions.Inet4LoopbackAddress, options.TunOptions.Inet6LoopbackAddress),
 		udpTimeout:           options.UDPTimeout,
 		icmpTimeout:          options.ICMPTimeout,
 		handler:              options.Handler,
@@ -397,7 +399,7 @@ func (s *System) batchLoopDarwin(darwinTUN DarwinTUN) {
 }
 
 func (s *System) processPacket(packet []byte) bool {
-	if handled, writeBack, reply := applyIPRewrite(packet); handled {
+	if handled, writeBack, reply := applyIPRewrite(packet, s.ipRewriteLoopback); handled {
 		if reply != nil {
 			_, _ = s.tun.Write(ipRewriteFrame(reply))
 		}

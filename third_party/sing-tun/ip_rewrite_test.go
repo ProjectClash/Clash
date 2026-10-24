@@ -42,7 +42,7 @@ func checksumHolds(t *testing.T, what string, b []byte, initial uint16) {
 
 func TestIPRewriteTakesOnlyThePacketsItCovers(t *testing.T) {
 	packet := testIPv4("172.19.0.1", "192.0.2.1", protocolTCP, tcpSegment(50000, 443, 1, 0, 0x02, nil))
-	if handled, _, _ := applyIPRewrite(packet); handled {
+	if handled, _, _ := applyIPRewrite(packet, nil); handled {
 		t.Fatal("handled with no table")
 	}
 	withIPRewrite(t,
@@ -50,11 +50,11 @@ func TestIPRewriteTakesOnlyThePacketsItCovers(t *testing.T) {
 		IPRewriteRule{netip.MustParsePrefix("192.0.2.0/24"), IPRewriteDrop},
 		IPRewriteRule{netip.MustParsePrefix("192.0.2.0/24"), IPRewriteReject},
 	)
-	if handled, writeBack, reply := applyIPRewrite(packet); !handled || writeBack || reply != nil {
+	if handled, writeBack, reply := applyIPRewrite(packet, nil); !handled || writeBack || reply != nil {
 		t.Fatalf("drop: handled %v, writeBack %v, reply %v", handled, writeBack, reply)
 	}
 	other := testIPv4("172.19.0.1", "198.51.100.1", protocolTCP, tcpSegment(50000, 443, 1, 0, 0x02, nil))
-	if handled, _, _ := applyIPRewrite(other); handled {
+	if handled, _, _ := applyIPRewrite(other, nil); handled {
 		t.Fatal("a packet no line covers was handled")
 	}
 }
@@ -63,7 +63,7 @@ func TestIPRewriteReflectSwapsTheAddressesAndKeepsTheChecksums(t *testing.T) {
 	withIPRewrite(t, IPRewriteRule{netip.MustParsePrefix("10.7.0.1/32"), IPRewriteReflect})
 	packet := testIPv4("172.19.0.1", "10.7.0.1", protocolTCP, tcpSegment(50000, 62078, 7, 0, 0x02, []byte("hello")))
 	original := append([]byte(nil), packet...)
-	handled, writeBack, reply := applyIPRewrite(packet)
+	handled, writeBack, reply := applyIPRewrite(packet, nil)
 	if !handled || !writeBack || reply != nil {
 		t.Fatalf("reflect: handled %v, writeBack %v, reply %v", handled, writeBack, reply)
 	}
@@ -89,7 +89,7 @@ func TestIPRewriteRejectAnswersTCPWithAReset(t *testing.T) {
 		"ACK + data": {testIPv4("172.19.0.1", "203.0.113.5", protocolTCP, tcpSegment(50000, 443, 1000, 77, 0x18, []byte("abc"))), 77, 0, 0x04, false},
 		"IPv6 SYN":   {testIPv6("fdfe:dcba:9876::1", "2001:db8::5", protocolTCP, tcpSegment(50000, 443, 5, 0, 0x02, nil)), 0, 6, 0x14, true},
 	} {
-		handled, writeBack, reply := applyIPRewrite(tc.packet)
+		handled, writeBack, reply := applyIPRewrite(tc.packet, nil)
 		if !handled || writeBack || reply == nil {
 			t.Fatalf("%s: handled %v, writeBack %v, reply %v", name, handled, writeBack, reply)
 		}
@@ -109,7 +109,7 @@ func TestIPRewriteRejectAnswersTCPWithAReset(t *testing.T) {
 		}
 	}
 	reset := testIPv4("172.19.0.1", "203.0.113.5", protocolTCP, tcpSegment(50000, 443, 1, 0, 0x04, nil))
-	if _, _, reply := applyIPRewrite(reset); reply != nil {
+	if _, _, reply := applyIPRewrite(reset, nil); reply != nil {
 		t.Error("a RST was answered")
 	}
 }
@@ -120,7 +120,7 @@ func TestIPRewriteRejectAnswersEverythingElseWithAdministrativelyProhibited(t *t
 		IPRewriteRule{netip.MustParsePrefix("2001:db8::/32"), IPRewriteReject},
 	)
 	udp := testIPv4("172.19.0.1", "203.0.113.5", 17, []byte{0xc3, 0x50, 0x00, 0x35, 0, 12, 0, 0, 1, 2, 3, 4})
-	_, _, reply := applyIPRewrite(udp)
+	_, _, reply := applyIPRewrite(udp, nil)
 	if reply == nil || reply[9] != protocolICMPv4 || reply[20] != 3 || reply[21] != 13 {
 		t.Fatalf("UDP answered %v, want ICMP 3/13", reply)
 	}
@@ -129,15 +129,15 @@ func TestIPRewriteRejectAnswersEverythingElseWithAdministrativelyProhibited(t *t
 		t.Errorf("quoted %v, want the header and eight bytes %v", quoted, udp[:28])
 	}
 	echo := testIPv4("172.19.0.1", "203.0.113.5", protocolICMPv4, []byte{8, 0, 0, 0, 0, 1, 0, 1})
-	if _, _, reply := applyIPRewrite(echo); reply == nil || reply[20] != 3 {
+	if _, _, reply := applyIPRewrite(echo, nil); reply == nil || reply[20] != 3 {
 		t.Errorf("an echo request was answered %v", reply)
 	}
 	unreachable := testIPv4("172.19.0.1", "203.0.113.5", protocolICMPv4, []byte{3, 1, 0, 0, 0, 0, 0, 0})
-	if _, _, reply := applyIPRewrite(unreachable); reply != nil {
+	if _, _, reply := applyIPRewrite(unreachable, nil); reply != nil {
 		t.Error("an ICMP error was answered with another")
 	}
 	udp6 := testIPv6("fdfe:dcba:9876::1", "2001:db8::5", 17, []byte{0xc3, 0x50, 0x00, 0x35, 0, 8, 0, 0})
-	_, _, reply6 := applyIPRewrite(udp6)
+	_, _, reply6 := applyIPRewrite(udp6, nil)
 	if reply6 == nil || reply6[6] != protocolICMPv6 || reply6[40] != 1 || reply6[41] != 1 {
 		t.Fatalf("IPv6 UDP answered %v, want ICMPv6 1/1", reply6)
 	}
@@ -157,12 +157,12 @@ func TestIPRewriteRejectAnswersNoGroupAndNoErrorBehindExtensionHeaders(t *testin
 		"ICMPv6 error behind hop-by-hop": rawIPv6("2001:db8::5", 0, []byte{58, 0, 0, 0, 0, 0, 0, 0, 1, 4, 0, 0, 0, 0, 0, 0}),
 		"later IPv6 fragment": rawIPv6("2001:db8::5", 44, []byte{17, 0, 0, 8 << 3, 0, 0, 0, 1, 0, 0, 0, 0}),
 	} {
-		if handled, _, reply := applyIPRewrite(packet); !handled || reply != nil {
+		if handled, _, reply := applyIPRewrite(packet, nil); !handled || reply != nil {
 			t.Errorf("%s: handled %v, answered %v", name, handled, reply)
 		}
 	}
 	behind := rawIPv6("2001:db8::5", 0, append([]byte{17, 0, 0, 0, 0, 0, 0, 0}, udp...))
-	if _, _, reply := applyIPRewrite(behind); reply == nil || reply[40] != 1 {
+	if _, _, reply := applyIPRewrite(behind, nil); reply == nil || reply[40] != 1 {
 		t.Errorf("a datagram behind a hop-by-hop header was answered %v, want ICMPv6 1/1", reply)
 	}
 }

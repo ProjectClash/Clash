@@ -132,23 +132,22 @@ func TestMipsLoopbackValidation(t *testing.T) {
 					o.TunOptions.Inet4LoopbackAddress = []netip.Addr{target}
 				}
 			})
-			s.processPackets([][]byte{ipPacket(source, target, 6, []byte{1, 2})}, 0)
-			bad := tcpPacket(source, target, 100, 0, 2, nil)
-			bad[offset+12] = 0xf0
-			s.processPackets([][]byte{bad}, 0)
-			bad = tcpPacket(source, target, 100, 0, 2, []byte("bad checksum"))
-			bad[len(bad)-1] ^= 1
-			s.processPackets([][]byte{bad}, 0)
+			truncated := ipPacket(source, target, 6, []byte{1, 2})
+			badOffset := tcpPacket(source, target, 100, 0, 2, nil)
+			badOffset[offset+12] = 0xf0
+			badChecksum := tcpPacket(source, target, 100, 0, 2, []byte("bad checksum"))
+			badChecksum[len(badChecksum)-1] ^= 1
 			good := tcpPacket(source, target, 100, 0, 2, nil)
 			if ipv6 {
 				good = append(append(append([]byte(nil), good[:40]...), 6, 0, 0, 0, 0, 0, 0, 0), good[40:]...)
 				good[6] = 0
 				binary.BigEndian.PutUint16(good[4:], uint16(len(good)-40))
 			}
-			s.processPackets([][]byte{good}, 0)
-			response := readPacket(t, d)
-			require.Len(t, response, len(good))
-			parsed, err := mips.ParseIPPacket(response)
+			for _, packet := range [][]byte{truncated, badOffset, badChecksum, good} {
+				s.processPackets([][]byte{append([]byte(nil), packet...)}, 0)
+				require.Equal(t, reflectedProbe(packet), readPacket(t, d))
+			}
+			parsed, err := mips.ParseIPPacket(reflectedProbe(good))
 			require.NoError(t, err)
 			protocol, payload, err := parsed.UpperLayer()
 			require.NoError(t, err)
@@ -157,7 +156,7 @@ func TestMipsLoopbackValidation(t *testing.T) {
 			require.Zero(t, value)
 			select {
 			case p := <-d.out:
-				t.Fatalf("invalid packet reflected: %x", p)
+				t.Fatalf("a packet was written twice: %x", p)
 			case <-time.After(30 * time.Millisecond):
 			}
 		})

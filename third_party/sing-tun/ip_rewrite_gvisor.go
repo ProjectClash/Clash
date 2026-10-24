@@ -9,8 +9,8 @@ import (
 	"github.com/metacubex/gvisor/pkg/tcpip/stack"
 )
 
-func gvisorIPRewrite(writer GVisorTun, protocol tcpip.NetworkProtocolNumber, pkt *stack.PacketBuffer) bool {
-	if ipRewriteTable.Load() == nil {
+func (w *networkDispatcherFilter) ipRewrite(protocol tcpip.NetworkProtocolNumber, pkt *stack.PacketBuffer) bool {
+	if ipRewriteIdle(w.loopbackAddress) {
 		return false
 	}
 	headerSize := header.IPv4MinimumSize
@@ -22,23 +22,27 @@ func gvisorIPRewrite(writer GVisorTun, protocol tcpip.NetworkProtocolNumber, pkt
 		return false
 	}
 	destination, ok := packetDestination(head)
-	if !ok || ipRewriteActionFor(destination) == 0 {
+	if !ok {
+		return false
+	}
+	action := ipRewriteActionFor(destination, w.loopbackAddress)
+	if action == 0 {
 		return false
 	}
 	packet := pkt.Data().AsRange().ToSlice()
-	handled, writeBack, reply := applyIPRewrite(packet)
+	handled, writeBack, reply := applyIPRewriteAction(packet, action)
 	if !handled {
 		return false
 	}
 	if writeBack {
-		gvisorWriteRaw(writer, protocol, packet)
+		gvisorWriteRaw(w.writer, protocol, packet)
 	}
 	if reply != nil {
 		replyProtocol := header.IPv4ProtocolNumber
 		if reply[0]>>4 == 6 {
 			replyProtocol = header.IPv6ProtocolNumber
 		}
-		gvisorWriteRaw(writer, replyProtocol, reply)
+		gvisorWriteRaw(w.writer, replyProtocol, reply)
 	}
 	return true
 }

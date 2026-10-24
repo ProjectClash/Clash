@@ -25,6 +25,7 @@ type Mipstack struct {
 	inet6Address         netip.Addr
 	inet4LoopbackAddress []netip.Addr
 	inet6LoopbackAddress []netip.Addr
+	ipRewriteLoopback    []netip.Addr
 	broadcastAddr        netip.Addr
 	tcpCongestionControl string
 	icmpMapping          *DirectRouteMapping
@@ -62,6 +63,7 @@ func NewMipstack(options StackOptions) (Stack, error) {
 		inet6Address:         inet6Address,
 		inet4LoopbackAddress: options.TunOptions.Inet4LoopbackAddress,
 		inet6LoopbackAddress: options.TunOptions.Inet6LoopbackAddress,
+		ipRewriteLoopback:    LoopbackAddresses(options.TunOptions.Inet4LoopbackAddress, options.TunOptions.Inet6LoopbackAddress),
 		broadcastAddr:        BroadcastAddr(options.TunOptions.Inet4Address),
 		tcpCongestionControl: tcpCongestionControl,
 		icmpMapping:          NewDirectRouteMapping(options.ICMPTimeout),
@@ -264,7 +266,7 @@ func (s *Mipstack) processPackets(packets [][]byte, offset int) {
 	stackCount, packetCount := 0, 0
 	for _, packet := range packets {
 		ipPacket := packet[offset:]
-		if handled, writeBack, reply := applyIPRewrite(ipPacket); handled {
+		if handled, writeBack, reply := applyIPRewrite(ipPacket, s.ipRewriteLoopback); handled {
 			if reply != nil {
 				_, _ = s.tun.Write(ipRewriteFrame(reply))
 			}

@@ -33,6 +33,7 @@ type GVisor struct {
 	inet6Address         netip.Addr
 	inet4LoopbackAddress []netip.Addr
 	inet6LoopbackAddress []netip.Addr
+	ipRewriteLoopback    []netip.Addr
 	udpTimeout           time.Duration
 	icmpTimeout          time.Duration
 	broadcastAddr        netip.Addr
@@ -75,6 +76,7 @@ func NewGVisor(
 		inet6Address:         inet6Address,
 		inet4LoopbackAddress: options.TunOptions.Inet4LoopbackAddress,
 		inet6LoopbackAddress: options.TunOptions.Inet6LoopbackAddress,
+		ipRewriteLoopback:    LoopbackAddresses(options.TunOptions.Inet4LoopbackAddress, options.TunOptions.Inet6LoopbackAddress),
 		udpTimeout:           options.UDPTimeout,
 		icmpTimeout:          options.ICMPTimeout,
 		broadcastAddr:        BroadcastAddr(options.TunOptions.Inet4Address),
@@ -89,7 +91,12 @@ func (t *GVisor) Start() error {
 	if err != nil {
 		return err
 	}
-	linkEndpoint = &LinkEndpointFilter{linkEndpoint, t.broadcastAddr, t.tun}
+	linkEndpoint = &LinkEndpointFilter{
+		LinkEndpoint:     linkEndpoint,
+		BroadcastAddress: t.broadcastAddr,
+		Writer:           t.tun,
+		LoopbackAddress: t.ipRewriteLoopback,
+	}
 	ipStack, err := NewGVisorStackWithOptions(linkEndpoint, nicOptions)
 	if err != nil {
 		return err
