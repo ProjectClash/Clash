@@ -15,7 +15,11 @@ import (
 	"strings"
 )
 
-const productionTags = "with_gvisor,with_low_memory,cmfa,with_quic"
+var sliceBuilds = []struct{ goos, tags string }{
+	{"ios", "with_gvisor,cmfa,with_quic,with_low_memory,no_easytier"},
+	{"darwin", "with_gvisor,cmfa,with_quic,with_low_memory,no_easytier,ios,tvos"},
+	{"darwin", "with_gvisor,cmfa,with_quic"},
+}
 
 type goModule struct {
 	Path    string    `json:"Path"`
@@ -173,33 +177,11 @@ func packageLicenses(root, output string) error {
 }
 
 func linkedModules(moduleDir string) ([]goModule, error) {
-	cmd := exec.Command("go", "list", "-deps", "-json", "-tags="+productionTags, ".")
-	cmd.Dir = moduleDir
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("open go list output: %w", err)
-	}
-	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start go list: %w", err)
-	}
-	decoder := json.NewDecoder(stdout)
 	unique := make(map[string]goModule)
-	for {
-		var pkg goPackage
-		if err := decoder.Decode(&pkg); err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			_ = cmd.Wait()
-			return nil, fmt.Errorf("decode go list: %w", err)
+	for _, build := range sliceBuilds {
+		if err := addLinkedModules(moduleDir, build.goos, build.tags, unique); err != nil {
+			return nil, err
 		}
-		if pkg.Module != nil {
-			unique[pkg.Module.Path] = *pkg.Module
-		}
-	}
-	if err := cmd.Wait(); err != nil {
-		return nil, fmt.Errorf("go list linked modules: %w", err)
 	}
 	modules := make([]goModule, 0, len(unique))
 	for _, module := range unique {
@@ -207,6 +189,38 @@ func linkedModules(moduleDir string) ([]goModule, error) {
 	}
 	sort.Slice(modules, func(i, j int) bool { return modules[i].Path < modules[j].Path })
 	return modules, nil
+}
+
+func addLinkedModules(moduleDir, goos, tags string, unique map[string]goModule) error {
+	cmd := exec.Command("go", "list", "-deps", "-json", "-tags="+tags, ".")
+	cmd.Dir = moduleDir
+	cmd.Env = append(os.Environ(), "GOOS="+goos, "GOARCH=arm64", "CGO_ENABLED=1")
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("open go list output: %w", err)
+	}
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start go list: %w", err)
+	}
+	decoder := json.NewDecoder(stdout)
+	for {
+		var pkg goPackage
+		if err := decoder.Decode(&pkg); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			_ = cmd.Wait()
+			return fmt.Errorf("decode go list: %w", err)
+		}
+		if pkg.Module != nil {
+			unique[pkg.Module.Path] = *pkg.Module
+		}
+	}
+	if err := cmd.Wait(); err != nil {
+		return fmt.Errorf("go list linked modules (%s, %s): %w", goos, tags, err)
+	}
+	return nil
 }
 
 func discoverLicenseFiles(directory string) ([]string, error) {
