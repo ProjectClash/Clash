@@ -3,6 +3,7 @@ package outboundgroup
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/dlclark/regexp2"
@@ -50,6 +51,20 @@ type GroupNodes struct {
 	All    C.ProxyList
 	Library C.ProxyList
 	Group func(name string) ([]uint32, bool)
+	Internal []int
+}
+
+const clashInternalField = "x-clash-internal"
+
+func IsClashInternalProxy(mapping map[string]any) bool {
+	switch v := mapping[clashInternalField].(type) {
+	case bool:
+		return v
+	case string:
+		internal, err := strconv.ParseBool(v)
+		return err == nil && internal
+	}
+	return false
 }
 
 const clashMemberGroupField = "x-clash-member-group"
@@ -116,8 +131,9 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 	}
 	var allNodes, libraryNodes C.ProxyList
 	var computedGroup func(string) ([]uint32, bool)
+	var internalNodes []int
 	for _, n := range nodes {
-		allNodes, libraryNodes, computedGroup = n.All, n.Library, n.Group
+		allNodes, libraryNodes, computedGroup, internalNodes = n.All, n.Library, n.Group, n.Internal
 	}
 	var libraryMembers C.ProxyList = C.ProxySlice(nil)
 	decoder := structure.NewDecoder(structure.Option{TagName: "group", WeaklyTypedInput: true})
@@ -193,10 +209,15 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 		if groupOption.Filter != "" {
 			var filterRegs []*regexp2.Regexp
 			for _, filter := range strings.Split(groupOption.Filter, "`") {
-				filterRegs = append(filterRegs, regexp2.MustCompile(filter, regexp2.None))
+				filterRegs = append(filterRegs, utils.MustSharedRegexp2(filter))
 			}
 			var kept []uint32
+			skip := internalNodes
 			for i := 0; i < allNodes.Len(); i++ {
+				if len(skip) != 0 && skip[0] == i {
+					skip = skip[1:]
+					continue
+				}
 				name := allNodes.At(i).Name()
 				for _, filterReg := range filterRegs {
 					if mat, _ := filterReg.MatchString(name); mat {
@@ -206,7 +227,7 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 			}
 			libraryMembers = C.IndexedProxyList(allNodes, kept)
 		} else {
-			libraryMembers = allNodes
+			libraryMembers = C.ProxyListWithout(allNodes, internalNodes)
 		}
 		if len(groupOption.Proxies) == 0 && members.Len() == 0 && libraryMembers.Len() == 0 && len(groupOption.Use) == 0 {
 			groupOption.Proxies = []string{groupOption.EmptyFallback}
@@ -215,7 +236,7 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 		if groupOption.Filter != "" {
 			var filterRegs []*regexp2.Regexp
 			for _, filter := range strings.Split(groupOption.Filter, "`") {
-				filterReg := regexp2.MustCompile(filter, regexp2.None)
+				filterReg := utils.MustSharedRegexp2(filter)
 				filterRegs = append(filterRegs, filterReg)
 			}
 			for _, p := range AllProxies {

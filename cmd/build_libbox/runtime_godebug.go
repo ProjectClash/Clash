@@ -11,19 +11,22 @@ import (
 
 const appleStackStartGODEBUG = "adaptivestackstart=0"
 
+const appleHeapSamplingGODEBUG = "memprofilerate=0"
+
 func appleRuntimeGODEBUG(root string) (string, error) {
 	defaults, err := gomobileMainDefaultGODEBUG(root)
 	if err != nil {
 		return "", err
 	}
-	return withStackStartGODEBUG(defaults), nil
+	return withAppleGODEBUG(defaults), nil
 }
 
-func withStackStartGODEBUG(defaults string) string {
+func withAppleGODEBUG(defaults string) string {
+	own := appleStackStartGODEBUG + "," + appleHeapSamplingGODEBUG
 	if defaults == "" {
-		return appleStackStartGODEBUG
+		return own
 	}
-	return defaults + "," + appleStackStartGODEBUG
+	return defaults + "," + own
 }
 
 func gomobileMainDefaultGODEBUG(root string) (string, error) {
@@ -97,7 +100,8 @@ func verifyRuntimeGODEBUGInXCFramework(xcframework, godebug string) error {
 func runtimeGODEBUGVerdict(slice string, contents []byte, godebug string) error {
 	if !bytes.Contains(contents, []byte(godebug)) {
 		return fmt.Errorf("slice %s does not carry the runtime GODEBUG %q: the -X runtime.godebugDefault "+
-			"linked nothing, and goroutines in it start on the adaptive stack size", slice, godebug)
+			"linked nothing, so goroutines in it start on the adaptive stack size and package "+
+			"initialisation samples the heap", slice, godebug)
 	}
 	return nil
 }

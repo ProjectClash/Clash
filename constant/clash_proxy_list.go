@@ -92,3 +92,27 @@ type subProxyList struct {
 
 func (l *subProxyList) Len() int       { return l.n }
 func (l *subProxyList) At(i int) Proxy { return l.base.At(l.from + i) }
+
+func ProxyListWithout(base ProxyList, positions []int) ProxyList {
+	if len(positions) == 0 {
+		return base
+	}
+	return &proxyListWithout{base: base, skip: positions}
+}
+
+type proxyListWithout struct {
+	base ProxyList
+	skip []int
+}
+
+func (l *proxyListWithout) Len() int { return l.base.Len() - len(l.skip) }
+
+func (l *proxyListWithout) At(i int) Proxy {
+	for _, at := range l.skip {
+		if at > i {
+			break
+		}
+		i++
+	}
+	return l.base.At(i)
+}

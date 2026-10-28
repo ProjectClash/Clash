@@ -311,6 +311,8 @@ type recordingPlatform struct {
 	startMonitorErr       error
 	monitorStarts         int
 	monitorCloses         int
+	tunFailedMu           sync.Mutex
+	tunFailures           []string
 }
 
 func (p *recordingPlatform) WriteLog(message string)                     { p.lines <- message }
@@ -329,6 +331,16 @@ func (p *recordingPlatform) GetInterfaces() (NetworkInterfaceIterator, error) {
 	return newNetworkInterfaceIterator(nil), nil
 }
 func (p *recordingPlatform) UnderNetworkExtension() bool { return p.underNetworkExtension }
+func (p *recordingPlatform) TunFailed(reason string) {
+	p.tunFailedMu.Lock()
+	defer p.tunFailedMu.Unlock()
+	p.tunFailures = append(p.tunFailures, reason)
+}
+func (p *recordingPlatform) reportedTunFailures() []string {
+	p.tunFailedMu.Lock()
+	defer p.tunFailedMu.Unlock()
+	return append([]string(nil), p.tunFailures...)
+}
 
 func newRecordingPlatform() *recordingPlatform {
 	return &recordingPlatform{lines: make(chan string, 256)}

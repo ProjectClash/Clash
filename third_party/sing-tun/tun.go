@@ -125,6 +125,8 @@ type Options struct {
 	EXP_SendMsgX bool
 
 	EXP_ProcessorsPerChannel int
+
+	DeviceFailure func(error)
 }
 
 func (o *Options) DNSModeOrDefault() string {

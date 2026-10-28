@@ -90,6 +90,7 @@ func TestAppleCPUOverlayReplacesTheSilentFile(t *testing.T) {
 	if err := os.WriteFile(silent, []byte("//go:build arm64 && !linux && !freebsd && !android && (!darwin || ios) && !openbsd\n\npackage cpu\n\nfunc osInit() {}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	writeRuntimeFilesForOverlay(t, goroot)
 	dir := t.TempDir()
 	jsonPath, err := writeAppleCPUOverlay(root, goroot, dir)
 	if err != nil {

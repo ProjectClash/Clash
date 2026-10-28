@@ -177,7 +177,7 @@ func NewRuleSetProvider(name string, behavior P.RuleBehavior, format P.RuleForma
 		case *ipcidrStrategy:
 			s.stubDirectory = clashClassicalIndexDirectory(vehicle)
 		}
-		return rulesParse(bytes, strategy, format)
+		return clashProviderParse(name, bytes, strategy, format)
 	}, onUpdate)
 
 	wrapper := &RuleSetProvider{

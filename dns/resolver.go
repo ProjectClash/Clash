@@ -536,7 +536,7 @@ type Config struct {
 
 func (config Config) newCache() dnsCache {
 	if config.CacheMaxSize == 0 {
-		config.CacheMaxSize = 4096
+		config.CacheMaxSize = ClashDefaultCacheMaxSize()
 	}
 	switch config.CacheAlgorithm {
 	case "arc":

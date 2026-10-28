@@ -303,6 +303,26 @@ func TestArmingTheGateSetsTheRoundConcurrency(t *testing.T) {
 	}
 }
 
+func TestArmingTheGateCapsTheProbeGoroutines(t *testing.T) {
+	t.Cleanup(disarmProbeAdmission)
+	armProbeAdmission()
+	if got, want := provider.ProbeGoroutineLimitForTest(), probeGoroutinesPerBackgroundPlace*probeBackgroundTier; got != want {
+		t.Fatalf("an armed gate caps probe goroutines at %d, want %d", got, want)
+	}
+	disarmProbeAdmission()
+	if got := provider.ProbeGoroutineLimitForTest(); got != 0 {
+		t.Fatalf("a disarmed gate leaves a cap of %d", got)
+	}
+}
+
+func TestTheProbeGoroutineCapFollowsTheTierAtEverySize(t *testing.T) {
+	for _, nodes := range []int{0, 1, 100, 1000, 2000, 10000, 100000} {
+		if got := probeBackgroundCap(nodes); got != probeBackgroundTier {
+			t.Fatalf("the tier at %d nodes is %d, not the %d the probe goroutine cap is set from", nodes, got, probeBackgroundTier)
+		}
+	}
+}
+
 func TestAProbeRoundIsSettledOnceItHasEnded(t *testing.T) {
 	previous := probeSettleQuiet
 	probeSettleQuiet = 80 * time.Millisecond

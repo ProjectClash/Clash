@@ -183,16 +183,16 @@ func (hc *HealthCheck) round(single *singledo.Single[struct{}], scheduledSince t
 		id := utils.NewUUIDV4().String()
 		log.Debugln("Start New Health Checking {%s}", id)
 		b := new(errgroup.Group)
-		b.SetLimit(roundConcurrency())
+		slots := newRoundSlots(roundConcurrency())
 
 		// execute default health check
 		option := &extraOption{filters: nil, expectedStatus: hc.expectedStatus}
-		hc.execute(b, listFor(hc.url), hc.url, id, option, scheduledSince)
+		hc.execute(b, slots, listFor(hc.url), hc.url, id, option, scheduledSince)
 
 		// execute extra health check
 		if len(hc.extra) != 0 {
 			for url, option := range hc.extra {
-				hc.execute(b, listFor(url), url, id, option, scheduledSince)
+				hc.execute(b, slots, listFor(url), url, id, option, scheduledSince)
 			}
 		}
 		_ = b.Wait()
@@ -201,7 +201,7 @@ func (hc *HealthCheck) round(single *singledo.Single[struct{}], scheduledSince t
 	})
 }
 
-func (hc *HealthCheck) execute(b *errgroup.Group, proxies C.ProxyList, url, uid string, option *extraOption, scheduledSince time.Time) {
+func (hc *HealthCheck) execute(b *errgroup.Group, slots roundSlots, proxies C.ProxyList, url, uid string, option *extraOption, scheduledSince time.Time) {
 	url = strings.TrimSpace(url)
 	if len(url) == 0 {
 		log.Debugln("Health Check has been skipped due to testUrl is empty, {%s}", uid)
@@ -232,7 +232,12 @@ func (hc *HealthCheck) execute(b *errgroup.Group, proxies C.ProxyList, url, uid 
 		}
 
 		p := proxy
+		release, ok := slots.acquire(hc.ctx)
+		if !ok {
+			return
+		}
 		b.Go(func() error {
+			defer release()
 			if !scheduledSince.IsZero() && measuredAliveSince(p, url, expectedStatus.String(), hc.timeout, scheduledSince) {
 				return nil
 			}

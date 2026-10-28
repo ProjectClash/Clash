@@ -69,7 +69,7 @@ func NewGroupBase(opt GroupBaseOption) *GroupBase {
 	var excludeFilterRegs []*regexp2.Regexp
 	if opt.ExcludeFilter != "" {
 		for _, excludeFilter := range strings.Split(opt.ExcludeFilter, "`") {
-			excludeFilterReg := regexp2.MustCompile(excludeFilter, regexp2.None)
+			excludeFilterReg := utils.MustSharedRegexp2(excludeFilter)
 			excludeFilterRegs = append(excludeFilterRegs, excludeFilterReg)
 		}
 	}
@@ -77,7 +77,7 @@ func NewGroupBase(opt GroupBaseOption) *GroupBase {
 	var filterRegs []*regexp2.Regexp
 	if opt.Filter != "" {
 		for _, filter := range strings.Split(opt.Filter, "`") {
-			filterReg := regexp2.MustCompile(filter, regexp2.None)
+			filterReg := utils.MustSharedRegexp2(filter)
 			filterRegs = append(filterRegs, filterReg)
 		}
 	}

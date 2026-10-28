@@ -51,8 +51,8 @@ func TestStartSurfacesPacketFlowBridgeDupFailure(t *testing.T) {
 		t.Fatalf("NewService: %v", err)
 	}
 	err = svc.Start(helloYAML)
-	if err == nil || !strings.Contains(err.Error(), "dup PacketFlow bridge fd") {
-		t.Fatalf("Start should surface closed PacketFlow bridge fd, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "dup tunnel fd") {
+		t.Fatalf("Start should surface a closed tunnel fd, got %v", err)
 	}
 	if svc.running || svc.tunFd != -1 || svc.liveTunFd != -1 || svc.hasLiveTun {
 		t.Fatalf("failed Start retained live state: running=%v tunFd=%d live=%d hasTun=%v",

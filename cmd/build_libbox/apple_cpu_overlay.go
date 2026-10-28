@@ -214,12 +214,15 @@ func verifyAppleCPUOverlayInXCFramework(xcframework string) error {
 		if err := verifyAppleCPUOverlayMarker(slice, string(out)); err != nil {
 			return err
 		}
+		if err := verifyAppleRuntimeOverlayMarker(slice, string(out)); err != nil {
+			return err
+		}
 		checked++
 	}
 	if checked == 0 {
 		return fmt.Errorf("no slices found under %s", xcframework)
 	}
-	fmt.Fprintf(os.Stderr, "build_libbox: apple cpu overlay marker verified in %d slice(s)\n", checked)
+	fmt.Fprintf(os.Stderr, "build_libbox: apple cpu and runtime overlay markers verified in %d slice(s)\n", checked)
 	return nil
 }
 
@@ -251,7 +254,15 @@ func writeAppleCPUOverlay(root, goroot, dir string) (string, error) {
 	if err := requireSilentFeatureFile(replaced); err != nil {
 		return "", err
 	}
-	payload, err := json.Marshal(map[string]map[string]string{"Replace": {replaced: source}})
+	replace := map[string]string{replaced: source}
+	runtimeReplace, err := writeAppleRuntimeOverlay(root, goroot, dir)
+	if err != nil {
+		return "", err
+	}
+	for original, edited := range runtimeReplace {
+		replace[original] = edited
+	}
+	payload, err := json.Marshal(map[string]map[string]string{"Replace": replace})
 	if err != nil {
 		return "", err
 	}

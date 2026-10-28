@@ -116,8 +116,11 @@ func (d *readVDispatcher) release() {
 
 func (d *readVDispatcher) dispatch() (bool, tcpip.Error) {
 	n, errno := rawfile.BlockingReadvUntilStoppedPolled(d.poller, d.fd, d.buf.nextIovecs())
-	if n <= 0 || errno != 0 {
+	if errno != 0 {
 		return false, TranslateErrno(errno)
+	}
+	if n <= 0 {
+		return false, nil
 	}
 	recordIngressRead(framedPacketPayloadBytes(n), 1)
 

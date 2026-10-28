@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ProjectClash/Clash/component/profile/cachefile"
+	ruleprovider "github.com/ProjectClash/Clash/rules/provider"
 )
 
 func runPersistentCachePhase(t *testing.T, phase, base, private string) {
@@ -56,6 +57,9 @@ func TestPersistentCacheHelper(t *testing.T) {
 		if got, want := cache.DB.Path(), filepath.Join(private, "cache.db"); got != want {
 			t.Fatalf("cache opened at %s, want %s", got, want)
 		}
+		if got, want := ruleprovider.ClashMrsMappedCacheDirectory(), filepath.Join(private, mrsMappedCacheDirectoryName); got != want {
+			t.Fatalf("MRS sets mapped in %q, want %q", got, want)
+		}
 		if got := cache.SelectedMap()["GLOBAL"]; got != "singapore" {
 			t.Fatalf("selection after the move = %q, want singapore", got)
 		}
@@ -95,6 +99,35 @@ func TestPersistentCacheHelper(t *testing.T) {
 		}
 		if cachefile.Cache().DB != nil {
 			t.Fatal("the App opened a persistent cache")
+		}
+		if got := ruleprovider.ClashMrsMappedCacheDirectory(); got != "" {
+			t.Fatalf("the App keeps MRS sets mapped in %q", got)
+		}
+	case "failed-setup":
+		opts.PersistentCacheDirectory = private
+		if err := Setup(opts); err != nil {
+			t.Fatal(err)
+		}
+		blocked := filepath.Join(base, "not-a-directory")
+		if err := os.WriteFile(blocked, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		opts.PersistentCacheDirectory = blocked
+		if err := Setup(opts); err == nil {
+			t.Fatal("Setup took a file for its private directory")
+		}
+		if got := ruleprovider.ClashMrsMappedCacheDirectory(); got != "" {
+			t.Fatalf("a failed Setup left MRS sets mapped in %q", got)
+		}
+		opts.PersistentCacheDirectory = private
+		if err := Setup(opts); err != nil {
+			t.Fatal(err)
+		}
+		if err := Setup(&SetupOptions{}); err == nil {
+			t.Fatal("Setup took options with no paths")
+		}
+		if got := ruleprovider.ClashMrsMappedCacheDirectory(); got != "" {
+			t.Fatalf("a Setup refused at its first check left MRS sets mapped in %q", got)
 		}
 	default:
 		t.Fatalf("unknown phase %q", phase)
@@ -161,4 +194,9 @@ func TestPersistentCacheCopyKeepsTheBytes(t *testing.T) {
 	if err := copyLegacyPersistentCache(filepath.Join(t.TempDir(), "missing"), filepath.Join(t.TempDir(), "cache.db")); err == nil {
 		t.Fatal("copying a missing cache succeeded")
 	}
+}
+
+func TestAFailedSetupTurnsTheMrsCacheOff(t *testing.T) {
+	base := t.TempDir()
+	runPersistentCachePhase(t, "failed-setup", base, filepath.Join(t.TempDir(), "private"))
 }

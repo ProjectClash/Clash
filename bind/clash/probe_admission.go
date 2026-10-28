@@ -22,8 +22,10 @@ const (
 )
 
 func probeBackgroundCap(int) int {
-	return 10
+	return probeBackgroundTier
 }
+
+const probeBackgroundTier = 10
 
 type probeAdmissionVerdict uint8
 
@@ -215,11 +217,15 @@ func armProbeAdmission() {
 	cfg := defaultProbeAdmissionConfig()
 	adapter.SetURLTestGate(newProbeAdmissionHook(cfg))
 	provider.SetRoundConcurrency(cfg.backgroundCap)
+	provider.SetProbeGoroutineLimit(probeGoroutinesPerBackgroundPlace * probeBackgroundTier)
 }
+
+const probeGoroutinesPerBackgroundPlace = 3
 
 func disarmProbeAdmission() {
 	adapter.SetURLTestAdmission(nil)
 	provider.SetRoundConcurrency(nil)
+	provider.SetProbeGoroutineLimit(0)
 }
 
 var probeAdmissionCounts atomic.Pointer[func() (int, int, int, int)]

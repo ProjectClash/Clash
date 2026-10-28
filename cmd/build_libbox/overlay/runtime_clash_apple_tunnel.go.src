@@ -1,0 +1,54 @@
+//go:build ios
+
+package runtime
+
+import "internal/goarch"
+
+// Added to Go's runtime for the iOS family at build time (cmd/build_libbox applies it through
+// `go build -overlay`, beside edits to mspanset.go, proc.go, malloc.go and asm_arm64.s). The iOS
+// family is the ios build tag, not GOOS: gomobile builds tvOS with GOOS=darwin and the tags
+// ios,tvos. A packet tunnel there lives under a 50 MiB jetsam limit with a Go heap of a few MiB,
+// and three of the runtime's choices for large servers cost it more than the heap they serve.
+
+// The GC keeps its spans in spanSets: four per size class, each holding its spans in blocks of
+// 512 pointers (4 KiB) indexed by a spine of 256 more (2 KiB), allocated off-heap and never
+// returned. A heap of a few MiB uses about a hundred size classes and a handful of spans in each,
+// so those blocks came to 1.8 MiB of the tunnel's resident memory against 0.1 MiB of spans. Blocks
+// of 32 hold the same spans in 256 bytes; a large heap only grows the spine more often.
+const (
+	clashSpanSetBlockEntries = 32
+	clashSpanSetInitSpineCap = 16
+)
+
+// Small goroutine stacks come from spans of _StackCacheSize, 32 KiB upstream: eight 4 KiB stacks to
+// a span, and a span goes back to the heap only when all of them are free. A tunnel starts with
+// a few hundred goroutines at once (every group's first health check), keeps sixty, and the
+// survivors are spread over the spans the burst took: on the 13 mini 0.7 MiB of free stack slots
+// stayed pinned. Spans of 16 KiB -- one page of the platform's -- pin half as much (its stacks
+// 1.97 -> 1.55-1.61 MiB idle); stacks of 16 KiB, which no longer fit the pool, take the large-stack
+// path, a page of their own.
+const clashStackCacheSize = 16 * 1024
+
+// clashAppleSmallProcess makes an exited goroutine give back its stack. Upstream keeps the stack
+// of every goroutine that exits at the starting size on its P's free list, up to 63 a P, for the
+// next goroutine to reuse; on iOS the starting size is 4 KiB, and after a burst of short-lived
+// goroutines those stacks and the stack spans they pin stay resident until the P's list happens
+// to overflow. Freed, the stack goes back through the P's stack cache like any other.
+const clashAppleSmallProcess = true
+
+// clashAppleDropExtraM gives a non-Go thread's m back after every call into Go, as the runtime
+// did before Go 1.21, instead of keeping it bound to the thread until the thread exits. Swift
+// calls into the core from whichever dispatch thread it is on, so bound ms -- each with a 64 KiB
+// signal stack and a goroutine stack -- accumulated with the dispatch threads that ever called,
+// where dropped ones number only the calls that were in Go at the same time. The cost is a needm
+// and a dropm per call, which the platform's control-plane call rate does not notice.
+//
+// Only on arm64: asm_arm64.s reads this flag, and the amd64 simulator slices keep upstream's
+// binding in both halves (needAndBindM and the cgocallback epilogue) rather than one of them.
+var clashAppleDropExtraM = goarch.IsArm64 == 1
+
+// clashAppleRuntimeOverlayMarker exists so the finished slice can prove the overlay was compiled
+// in; build_libbox asks nm for it in every iOS-family slice. schedinit calls it.
+//
+//go:noinline
+func clashAppleRuntimeOverlayMarker() {}

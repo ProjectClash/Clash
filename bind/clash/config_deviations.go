@@ -54,6 +54,7 @@ type deviationRule struct {
 	upstreamDefault        string
 	honouredBy             string
 	defaultOnly            bool
+	writtenDefaults        []string
 	forcedValue            string
 	forcedFrom             []string
 	unwrittenUnconditional bool
@@ -317,6 +318,23 @@ var deviationRules = []deviationRule{
 		upstreamDefault: "false",
 		defaultOnly:     true,
 		forcedValue:     "true",
+	},
+	{
+		field:     "dns.cache-max-size",
+		category:  deviationForced,
+		effective: "1024: a resolver's cache holds up to 1024 answers instead of 4096",
+		reason: "the extension runs under the system's 50 MiB limit and every resolver keeps a cache of " +
+			"its own; the default cache keeps stale answers and serves them while it asks again, so " +
+			"it fills to its size whatever the TTLs, and three fill in a day's use -- about 2.6 MiB " +
+			"each at 4096 against 0.66 MiB at 1024. A size you write is always honoured",
+		source:          "dns/clash_cache_default.go ClashSetDefaultCacheMaxSize, set by bind/clash/service.go finalizeConfigForApple; upstream dns/resolver.go newCache defaults CacheMaxSize to 4096; sing-box dns/client.go max(cache_capacity, 1024)",
+		recoverable:     true,
+		alternative:     "write dns.cache-max-size explicitly -- any size other than 0 is kept",
+		applies:         func(policy appleRuntimePolicy) bool { return policy.boundedDNSCache },
+		upstreamDefault: "4096",
+		defaultOnly:     true,
+		writtenDefaults: []string{"0"},
+		forcedValue:     "1024",
 	},
 	{
 		field:     "unified-delay",
@@ -773,7 +791,7 @@ func configDeviationRows(root map[string]any, policy appleRuntimePolicy) []confi
 		if !rule.activeFor(policy, written) {
 			continue
 		}
-		if rule.defaultOnly && written {
+		if rule.defaultOnly && written && !slices.Contains(rule.writtenDefaults, given) {
 			continue
 		}
 		if written && rule.forcedValue != "" && given == rule.forcedValue {
@@ -788,12 +806,17 @@ func configDeviationRows(root map[string]any, policy appleRuntimePolicy) []confi
 			given = deviationValueWithheld
 		}
 		upstreamDefault := ""
+		rowWritten := written
 		if !written {
 			if rule.upstreamDefault == "" {
 				continue
 			}
 			given = "not set (core default: " + rule.upstreamDefault + ")"
 			upstreamDefault = rule.upstreamDefault
+		} else if rule.defaultOnly && slices.Contains(rule.writtenDefaults, given) {
+			given += " (core default: " + rule.upstreamDefault + ")"
+			upstreamDefault = rule.upstreamDefault
+			rowWritten = false
 		}
 		deviations = append(deviations, configDeviation{
 			Field:           rule.field,
@@ -805,7 +828,7 @@ func configDeviationRows(root map[string]any, policy appleRuntimePolicy) []confi
 			Recoverable:     rule.recoverable,
 			Alternative:     rule.alternative,
 			Mechanism:       rule.mechanism,
-			Written:         written,
+			Written:         rowWritten,
 			UpstreamDefault: upstreamDefault,
 			Honoured:        rule.honouredBy != "",
 		})

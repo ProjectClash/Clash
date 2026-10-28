@@ -3,6 +3,9 @@
 package tun
 
 import (
+	"errors"
+
+	"github.com/metacubex/gvisor/pkg/tcpip"
 	"github.com/metacubex/gvisor/pkg/tcpip/header"
 	"github.com/metacubex/gvisor/pkg/tcpip/link/qdisc/fifo"
 	"github.com/metacubex/gvisor/pkg/tcpip/stack"
@@ -59,6 +62,7 @@ func (t *NativeTun) NewEndpoint() (stack.LinkEndpoint, stack.NICOptions, error) 
 		RecvMsgX:             t.options.EXP_RecvMsgX,
 		SendMsgX:             t.options.EXP_SendMsgX,
 		WriteAccess: &t.writeAccess,
+		ClosedFunc: t.endpointClosed,
 	})
 	if err != nil {
 		return nil, stack.NICOptions{}, err
@@ -86,4 +90,10 @@ func (t *NativeTun) NewEndpoint() (stack.LinkEndpoint, stack.NICOptions, error) 
 	return ep, stack.NICOptions{
 		QDisc: fifo.New(ep, 1, 1000),
 	}, nil
+}
+
+func (t *NativeTun) endpointClosed(err tcpip.Error) {
+	if err != nil {
+		t.reportFailure(errors.New(err.String()))
+	}
 }

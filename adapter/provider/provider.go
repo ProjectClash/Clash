@@ -393,7 +393,7 @@ func newProxiesSelector(filter string, excludeFilter string, excludeType string,
 	var excludeFilterRegs []*regexp2.Regexp
 	if excludeFilter != "" {
 		for _, excludeFilter := range strings.Split(excludeFilter, "`") {
-			excludeFilterReg, err := regexp2.Compile(excludeFilter, regexp2.None)
+			excludeFilterReg, err := utils.SharedRegexp2(excludeFilter)
 			if err != nil {
 				return nil, fmt.Errorf("invalid excludeFilter regex: %w", err)
 			}
@@ -403,7 +403,7 @@ func newProxiesSelector(filter string, excludeFilter string, excludeType string,
 
 	var filterRegs []*regexp2.Regexp
 	for _, filter := range strings.Split(filter, "`") {
-		filterReg, err := regexp2.Compile(filter, regexp2.None)
+		filterReg, err := utils.SharedRegexp2(filter)
 		if err != nil {
 			return nil, fmt.Errorf("invalid filter regex: %w", err)
 		}

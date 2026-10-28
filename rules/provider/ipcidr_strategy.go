@@ -58,7 +58,7 @@ func (i *ipcidrStrategy) Insert(rule string) {
 	}
 	if i.count == 0 && loadMappedSetStub(rule, ClashIPCidrSetStubType, i.stubDirectory, func(path string, sum [32]byte) error {
 		i.stubbed = true
-		m, err := openMappedIPSet(path, sum)
+		m, err := openMappedIPSet(path, &sum)
 		if err == nil {
 			_, _, i.count, _ = parseMappedSetStub(rule, ClashIPCidrSetStubType, i.stubDirectory)
 			i.mapped = m

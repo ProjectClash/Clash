@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/netip"
 
+	"github.com/ProjectClash/Clash/component/geodata/compiled"
 	P "github.com/ProjectClash/Clash/constant/provider"
 	ruleprovider "github.com/ProjectClash/Clash/rules/provider"
 	"github.com/klauspost/compress/zstd"
@@ -95,7 +96,7 @@ func validateMRSForIOS(payload []byte, expectedBehavior P.RuleBehavior) error {
 }
 
 func inspectMRSForIOS(payload []byte, expectedBehavior P.RuleBehavior) (int, error) {
-	decoder, err := zstd.NewReader(
+	decoder, err := compiled.NewLowMemoryReader(
 		bytes.NewReader(payload),
 		zstd.WithDecoderMaxMemory(uint64(providerContentBytes())),
 	)

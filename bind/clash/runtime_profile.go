@@ -36,6 +36,8 @@ type appleRuntimePolicy struct {
 	useSystemDNS              bool
 	repairPacketTunnelDNS     bool
 	stripLoopbackResolvers    bool
+	boundedDNSCache           bool
+	releaseWhenQuiet          bool
 	bindsUnixControlSocket    bool
 }
 
@@ -123,6 +125,8 @@ func runtimePolicyFor(profile runtimeProfile, underNetworkExtension bool) appleR
 		policy.requirePacketTunnelDNS = underNetworkExtension
 		policy.repairPacketTunnelDNS = underNetworkExtension
 		policy.stripLoopbackResolvers = underNetworkExtension
+		policy.boundedDNSCache = underNetworkExtension
+		policy.releaseWhenQuiet = underNetworkExtension
 		policy.memoryConservativeGeodata = true
 		policy.compiledGeoSiteOnly = underNetworkExtension
 		policy.compiledGeoIPOnly = underNetworkExtension
@@ -133,6 +137,8 @@ func runtimePolicyFor(profile runtimeProfile, underNetworkExtension bool) appleR
 		policy.requirePacketTunnelDNS = underNetworkExtension
 		policy.repairPacketTunnelDNS = underNetworkExtension
 		policy.stripLoopbackResolvers = underNetworkExtension
+		policy.boundedDNSCache = underNetworkExtension
+		policy.releaseWhenQuiet = underNetworkExtension
 		policy.memoryConservativeGeodata = true
 		policy.compiledGeoSiteOnly = underNetworkExtension
 		policy.compiledGeoIPOnly = underNetworkExtension

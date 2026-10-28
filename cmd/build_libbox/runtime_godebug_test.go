@@ -8,11 +8,11 @@ import (
 	"testing"
 )
 
-func TestTheStackStartIsAddedAfterTheDefaults(t *testing.T) {
-	if got := withStackStartGODEBUG(""); got != "adaptivestackstart=0" {
+func TestTheFrameworksSettingsAreAddedAfterTheDefaults(t *testing.T) {
+	if got := withAppleGODEBUG(""); got != "adaptivestackstart=0,memprofilerate=0" {
 		t.Fatalf("no defaults: %q", got)
 	}
-	if got := withStackStartGODEBUG("asynctimerchan=1,x509sha1=1"); got != "asynctimerchan=1,x509sha1=1,adaptivestackstart=0" {
+	if got := withAppleGODEBUG("asynctimerchan=1,x509sha1=1"); got != "asynctimerchan=1,x509sha1=1,adaptivestackstart=0,memprofilerate=0" {
 		t.Fatalf("with defaults: %q", got)
 	}
 }
@@ -31,8 +31,8 @@ func TestTheFrameworkLinksTheStackStartOverTheMainPackageDefaults(t *testing.T) 
 		t.Fatal(err)
 	}
 	t.Logf("gomobile main default GODEBUG %q; linked %q", defaults, godebug)
-	if godebug != withStackStartGODEBUG(defaults) {
-		t.Fatalf("linked %q, want the defaults %q then the stack start", godebug, defaults)
+	if godebug != withAppleGODEBUG(defaults) {
+		t.Fatalf("linked %q, want the defaults %q then the framework's settings", godebug, defaults)
 	}
 	ldflags := appleLdflags("1.19.32", true, godebug)
 	if !strings.Contains(ldflags, " -X runtime.godebugDefault="+godebug) {
@@ -110,7 +110,7 @@ func main() {
 		return string(output)
 	}
 	adaptive := startingSize("-s -w")
-	fixed := startingSize("-s -w -X runtime.godebugDefault=" + withStackStartGODEBUG(""))
+	fixed := startingSize("-s -w -X runtime.godebugDefault=" + withAppleGODEBUG(""))
 	t.Logf("starting stack after deep goroutines were scanned: %s B by default, %s B linked", adaptive, fixed)
 	if adaptive == "2048" {
 		t.Fatalf("the default runtime did not adapt (%s B); the program does not exercise the setting", adaptive)
@@ -120,8 +120,60 @@ func main() {
 	}
 }
 
+func TestALinkedHeapSamplingIsOffBeforeAnyPackageInitialises(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds two programs")
+	}
+	dir := t.TempDir()
+	program := `package main
+
+import (
+	"fmt"
+	"runtime"
+)
+
+var rateAtInit = runtime.MemProfileRate
+
+func main() {
+	// The framework links runtime/pprof; a program that never reads a profile has the linker
+	// turn sampling off on its own, and would not tell the setting from that.
+	n, _ := runtime.MemProfile(nil, false)
+	fmt.Print(rateAtInit, " ", n >= 0)
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module sampling\n\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(program), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rate := func(ldflags string) string {
+		t.Helper()
+		binary := filepath.Join(dir, "probe")
+		build := exec.Command("go", "build", "-ldflags", ldflags, "-o", binary, ".")
+		build.Dir = dir
+		build.Env = append(os.Environ(), "GOFLAGS=")
+		if output, err := build.CombinedOutput(); err != nil {
+			t.Fatalf("build: %v\n%s", err, output)
+		}
+		run := exec.Command(binary)
+		run.Env = append(os.Environ(), "GODEBUG=")
+		output, err := run.Output()
+		if err != nil {
+			t.Fatalf("run: %v", err)
+		}
+		return string(output)
+	}
+	if got := rate("-s -w"); got == "0 true" {
+		t.Fatalf("the default runtime already samples nothing (%s); the program does not exercise the setting", got)
+	}
+	if got := rate("-s -w -X runtime.godebugDefault=" + withAppleGODEBUG("")); got != "0 true" {
+		t.Fatalf("with the linked GODEBUG a package initialises with MemProfileRate %s, want 0", got)
+	}
+}
+
 func TestASliceWithoutTheLinkedGODEBUGFailsTheBuild(t *testing.T) {
-	godebug := withStackStartGODEBUG("")
+	godebug := withAppleGODEBUG("")
 	if err := runtimeGODEBUGVerdict("ios-arm64", []byte("...\x00"+godebug+"\x00..."), godebug); err != nil {
 		t.Fatalf("a slice carrying it: %v", err)
 	}

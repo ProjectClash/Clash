@@ -6,15 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-
-	"github.com/klauspost/compress/zstd"
 )
 
 var MrsMagicBytes = [4]byte{'M', 'R', 'S', 1} // MRSv1
 
 func rulesMrsParse(buf []byte, strategy ruleStrategy) (ruleStrategy, error) {
 	if _strategy, ok := strategy.(mrsRuleStrategy); ok {
-		reader, err := zstd.NewReader(bytes.NewReader(buf))
+		reader, err := clashMrsReader(bytes.NewReader(buf))
 		if err != nil {
 			return nil, err
 		}

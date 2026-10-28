@@ -125,13 +125,21 @@ func TestANetworkChangeRoundWaitsForTheHold(t *testing.T) {
 type slowProxy struct {
 	*adapter.Proxy
 	inFlight, peak *atomic.Int64
+	want           int64
 }
 
 func (p slowProxy) URLTest(ctx context.Context, url string, expected utils.IntRanges[uint16]) (uint16, error) {
-	if n := p.inFlight.Add(1); n > p.peak.Load() {
-		p.peak.Store(n)
+	n := p.inFlight.Add(1)
+	for {
+		old := p.peak.Load()
+		if n <= old || p.peak.CompareAndSwap(old, n) {
+			break
+		}
 	}
-	time.Sleep(20 * time.Millisecond)
+	for deadline := time.Now().Add(2 * time.Second); p.peak.Load() < p.want && time.Now().Before(deadline); {
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(5 * time.Millisecond)
 	p.inFlight.Add(-1)
 	return 0, nil
 }
@@ -150,7 +158,7 @@ func TestARoundRunsAtTheConfiguredConcurrency(t *testing.T) {
 		var inFlight, peak atomic.Int64
 		proxies := make([]C.Proxy, 40)
 		for i := range proxies {
-			proxies[i] = slowProxy{Proxy: adapter.NewProxy(outbound.NewDirect()), inFlight: &inFlight, peak: &peak}
+			proxies[i] = slowProxy{Proxy: adapter.NewProxy(outbound.NewDirect()), inFlight: &inFlight, peak: &peak, want: c.want}
 		}
 		healthCheck := NewHealthCheck(proxies, "http://127.0.0.1:1/never", 1, 300, false, nil)
 		healthCheck.check()

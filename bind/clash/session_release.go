@@ -44,7 +44,7 @@ func sweepIdleSessions(now time.Time, idle time.Duration) int {
 	return released
 }
 
-func runSessionSweep(ctx context.Context, interval, idle time.Duration) {
+func runSessionSweep(ctx context.Context, interval, idle time.Duration, quiet *quietRelease) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -54,6 +54,9 @@ func runSessionSweep(ctx context.Context, interval, idle time.Duration) {
 		case now := <-ticker.C:
 			sweepIdleSessions(now, idle)
 			refreshNodeCatalog()
+			if quiet != nil {
+				quiet.observe(now)
+			}
 		}
 	}
 }
@@ -62,7 +65,11 @@ func (s *BoxService) startSessionSweepLocked() {
 	s.stopSessionSweepLocked()
 	ctx, cancel := context.WithCancel(context.Background())
 	s.sessionSweepCancel = cancel
-	go runSessionSweep(ctx, sessionSweepInterval, sessionIdlePeriod)
+	var quiet *quietRelease
+	if currentRuntimePolicy(s.platform.UnderNetworkExtension()).releaseWhenQuiet {
+		quiet = newQuietRelease(time.Now())
+	}
+	go runSessionSweep(ctx, sessionSweepInterval, sessionIdlePeriod, quiet)
 }
 
 func (s *BoxService) stopSessionSweepLocked() {

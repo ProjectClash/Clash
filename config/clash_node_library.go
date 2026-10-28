@@ -40,6 +40,8 @@ type clashNodeViews struct {
 	library *adapter.LibraryNodes
 	written C.ProxyList
 	sorted  C.ProxyList
+	inlineSorted   []C.Proxy
+	inlineSortedAt []int
 }
 
 func newClashNodes(ref ClashNodeLibraryRef, inline []C.Proxy, library *adapter.LibraryNodes) (*clashNodeViews, error) {
@@ -66,9 +68,11 @@ func newClashNodes(ref ClashNodeLibraryRef, inline []C.Proxy, library *adapter.L
 		sortedAt[j] = j + library.Rank(proxy.Name())
 	}
 	return &clashNodeViews{
-		library: library,
-		written: &insertedProxyList{base: library, at: writtenAt, inserted: inline},
-		sorted:  &insertedProxyList{base: library.Sorted(), at: sortedAt, inserted: byName},
+		library:        library,
+		written:        &insertedProxyList{base: library, at: writtenAt, inserted: inline},
+		sorted:         &insertedProxyList{base: library.Sorted(), at: sortedAt, inserted: byName},
+		inlineSorted:   byName,
+		inlineSortedAt: sortedAt,
 	}, nil
 }
 
@@ -97,4 +101,17 @@ func hasProxy(proxies map[string]C.Proxy, library C.ProxyLibrary, name string) b
 		return ok
 	}
 	return false
+}
+
+func clashInternalPositions(nodes *clashNodeViews, internal map[string]struct{}) []int {
+	if len(internal) == 0 {
+		return nil
+	}
+	var positions []int
+	for j, proxy := range nodes.inlineSorted {
+		if _, ok := internal[proxy.Name()]; ok {
+			positions = append(positions, nodes.inlineSortedAt[j])
+		}
+	}
+	return positions
 }

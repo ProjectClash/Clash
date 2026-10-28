@@ -42,11 +42,15 @@ func parseMappedSetStub(line, stubType, directory string) (path string, sum [sha
 	return filepath.Join(directory, name), [sha256.Size]byte(digest), n, true
 }
 
-func mapSetFile(path string, sum [sha256.Size]byte) ([]byte, error) {
+type clashSetNotWhole struct{ error }
+
+func (e clashSetNotWhole) Unwrap() error { return e.error }
+
+func mapSetFile(path string, sum *[sha256.Size]byte) ([]byte, error) {
 	if info, err := os.Lstat(path); err != nil {
 		return nil, err
 	} else if !info.Mode().IsRegular() {
-		return nil, errors.New("not a regular file")
+		return nil, clashSetNotWhole{errors.New("not a regular file")}
 	}
 	file, err := os.Open(path)
 	if err != nil {
@@ -58,22 +62,22 @@ func mapSetFile(path string, sum [sha256.Size]byte) ([]byte, error) {
 		return nil, err
 	}
 	if info.Size() < sha256.Size || info.Size() > 1<<31 {
-		return nil, fmt.Errorf("a compiled set of %d bytes", info.Size())
+		return nil, clashSetNotWhole{fmt.Errorf("a compiled set of %d bytes", info.Size())}
 	}
 	data, err := mapClassicalIndex(file, int(info.Size()))
 	if err != nil {
 		return nil, err
 	}
-	if !bytes.Equal(data[len(data)-sha256.Size:], sum[:]) {
+	if sum != nil && !bytes.Equal(data[len(data)-sha256.Size:], sum[:]) {
 		unmapClassicalIndex(data)
-		return nil, errors.New("not the set its stub names")
+		return nil, clashSetNotWhole{errors.New("not the set its stub names")}
 	}
 	return data, nil
 }
 
 type mappedDomainSet struct{ set *trie.DomainSet }
 
-func openMappedDomainSet(path string, sum [sha256.Size]byte) (*mappedDomainSet, error) {
+func openMappedDomainSet(path string, sum *[sha256.Size]byte) (*mappedDomainSet, error) {
 	data, err := mapSetFile(path, sum)
 	if err != nil {
 		return nil, err
@@ -81,7 +85,7 @@ func openMappedDomainSet(path string, sum [sha256.Size]byte) (*mappedDomainSet, 
 	set, err := trie.OpenMappedDomainSet(data)
 	if err != nil {
 		unmapClassicalIndex(data)
-		return nil, err
+		return nil, clashSetNotWhole{err}
 	}
 	m := &mappedDomainSet{set: set}
 	runtime.AddCleanup(m, unmapClassicalIndex, data)
@@ -90,7 +94,7 @@ func openMappedDomainSet(path string, sum [sha256.Size]byte) (*mappedDomainSet, 
 
 type mappedIPSet struct{ set *cidr.MappedIpCidrSet }
 
-func openMappedIPSet(path string, sum [sha256.Size]byte) (*mappedIPSet, error) {
+func openMappedIPSet(path string, sum *[sha256.Size]byte) (*mappedIPSet, error) {
 	data, err := mapSetFile(path, sum)
 	if err != nil {
 		return nil, err
@@ -98,7 +102,7 @@ func openMappedIPSet(path string, sum [sha256.Size]byte) (*mappedIPSet, error) {
 	set, err := cidr.OpenMappedIpCidrSet(data)
 	if err != nil {
 		unmapClassicalIndex(data)
-		return nil, err
+		return nil, clashSetNotWhole{err}
 	}
 	m := &mappedIPSet{set: set}
 	runtime.AddCleanup(m, unmapClassicalIndex, data)
@@ -203,7 +207,7 @@ func ClashCheckMappedSet(path string, behavior P.RuleBehavior) ([sha256.Size]byt
 	if !ok {
 		return sum, errors.New("not a compiled set")
 	}
-	data, err := mapSetFile(path, sum)
+	data, err := mapSetFile(path, &sum)
 	if err != nil {
 		return sum, err
 	}

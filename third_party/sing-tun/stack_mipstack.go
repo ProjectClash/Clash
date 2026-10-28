@@ -185,6 +185,9 @@ func (s *Mipstack) readLoop() {
 				return
 			}
 			s.logger.Error(E.Cause(err, "read packet"))
+			if failDevice(device, err) {
+				return
+			}
 		}
 	}
 }
@@ -258,6 +261,9 @@ func (s *Mipstack) batchLoopDarwin(darwinTUN DarwinTUN) {
 				return
 			}
 			s.logger.Error(E.Cause(err, "batch read packet"))
+			if failDevice(darwinTUN, err) {
+				return
+			}
 		}
 	}
 }
@@ -375,18 +381,23 @@ func (s *Mipstack) writeLoop() {
 			batchSize = deviceBatch
 		}
 	}
-	buffers := make([][]byte, batchSize)
-	for i := range buffers {
-		buffers[i] = make([]byte, outputOffset+bufferSize, outputOffset+bufferCapacity)
-	}
-	sizes := make([]int, len(buffers))
-	packets := make([][]byte, len(buffers))
+	batch := newClashWriteBatch(batchSize, func() []byte {
+		return make([]byte, outputOffset+bufferSize, outputOffset+bufferCapacity)
+	}, time.Now())
+	sizes := make([]int, batchSize)
+	packets := make([][]byte, batchSize)
 	for {
-		n, err := s.stack.Read(buffers, sizes, outputOffset)
+		buffers := batch.buffers
+		n, err := s.stack.Read(buffers, sizes[:len(buffers)], outputOffset)
 		for i := 0; i < n; i++ {
 			packets[i] = buffers[i][: outputOffset+sizes[i] : outputOffset+bufferCapacity]
 		}
-		if writeErr := s.writePackets(packets[:n], outputOffset); writeErr != nil {
+		writeErr := s.writePackets(packets[:n], outputOffset)
+		for i := 0; i < n; i++ {
+			packets[i] = nil
+		}
+		batch.observe(n, time.Now())
+		if writeErr != nil {
 			if E.IsClosed(writeErr) {
 				return
 			}

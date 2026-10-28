@@ -69,7 +69,7 @@ func TestTheServedReportIsThePublishedOneAndNamesItsDocument(t *testing.T) {
 		t.Fatalf("served report does not name the reader's file: %+v (want %dB %s)", first.Document, len(readersFile), sha256Hex(readersFile))
 	}
 
-	const alreadyForced = "dns:\n  enable: true\nprofile:\n  store-fake-ip: true\nfind-process-mode: 'off'\nunified-delay: true\ntun:\n  stack: gvisor\nproxies: []\nrules:\n  - MATCH,DIRECT\n"
+	const alreadyForced = "dns:\n  enable: true\n  cache-max-size: 1024\nprofile:\n  store-fake-ip: true\nfind-process-mode: 'off'\nunified-delay: true\ntun:\n  stack: gvisor\nproxies: []\nrules:\n  - MATCH,DIRECT\n"
 	if _, _, err := parseConfigForIOSRuntime(alreadyForced, true, deviationEntryReload); err != nil {
 		t.Fatalf("reload parse: %v", err)
 	}

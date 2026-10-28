@@ -1000,12 +1000,19 @@ func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[
 	// parse proxy
 	clashNodes := adapter.NewNodeCatalogSession()
 	inlineProxies := make([]C.Proxy, 0, len(proxiesConfig))
+	var internalProxies map[string]struct{}
 	for idx, mapping := range proxiesConfig {
 		proxy, err := adapter.ParseProxy(mapping, adapter.WithTunnelForAPI(T.Tunnel), adapter.WithNodeCatalogSession(clashNodes))
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("proxy %d: %w", idx, err)
 		}
 		inlineProxies = append(inlineProxies, proxy)
+		if outboundgroup.IsClashInternalProxy(mapping) {
+			if internalProxies == nil {
+				internalProxies = map[string]struct{}{}
+			}
+			internalProxies[proxy.Name()] = struct{}{}
+		}
 	}
 	_ = clashNodes.Seal()
 	libraryNodes, err := clashLibraryNodes(cfg)
@@ -1026,7 +1033,9 @@ func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[
 		proxies[proxy.Name()] = proxy
 		if nodes == nil {
 			proxyList = append(proxyList, proxy.Name())
-			AllProxies = append(AllProxies, proxy.Name())
+			if _, internal := internalProxies[proxy.Name()]; !internal {
+				AllProxies = append(AllProxies, proxy.Name())
+			}
 		}
 	}
 
@@ -1069,7 +1078,8 @@ func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[
 	// parse proxy group
 	var groupNodes []outboundgroup.GroupNodes
 	if nodes != nil {
-		groupNodes = append(groupNodes, outboundgroup.GroupNodes{Lookup: nodes.library.Lookup, All: nodes.sorted, Library: nodes.library, Group: nodes.library.Group})
+		groupNodes = append(groupNodes, outboundgroup.GroupNodes{Lookup: nodes.library.Lookup, All: nodes.sorted, Library: nodes.library, Group: nodes.library.Group,
+			Internal: clashInternalPositions(nodes, internalProxies)})
 	}
 	for idx, mapping := range groupsConfig {
 		group, err := outboundgroup.ParseProxyGroup(mapping, proxies, providersMap, AllProxies, AllProviders, groupNodes...)

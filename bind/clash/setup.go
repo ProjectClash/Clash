@@ -89,6 +89,7 @@ func Setup(options *SetupOptions) error {
 	setupMu.Lock()
 	defer setupMu.Unlock()
 	defer holdSetupLogs()()
+	ruleprovider.ClashSetMrsMappedCacheDirectory("", "")
 
 	if options == nil {
 		return bridgeSafeError(errors.New("clash: Setup called with nil options"))
@@ -278,6 +279,8 @@ func effectiveMaxProcs(options *SetupOptions) int {
 	return procs
 }
 
+const mrsMappedCacheDirectoryName = "rule-sets"
+
 func placePersistentCache(options *SetupOptions) error {
 	if options.PersistentCacheDirectory == "" || options.DisablePersistentCache {
 		return nil
@@ -290,6 +293,7 @@ func placePersistentCache(options *SetupOptions) error {
 		return fmt.Errorf("clash: persistent cache at %s: %w", target, err)
 	}
 	moveLegacyPersistentCache(filepath.Join(options.WorkingPath, "cache.db"), target)
+	ruleprovider.ClashSetMrsMappedCacheDirectory(filepath.Join(options.PersistentCacheDirectory, mrsMappedCacheDirectoryName), coreImageIdentity())
 	return nil
 }
 

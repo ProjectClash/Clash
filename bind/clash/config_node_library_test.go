@@ -644,3 +644,50 @@ func TestAWrittenLibraryIsProvedWithoutBeingReadAgain(t *testing.T) {
 		t.Fatal("a stub was proved")
 	}
 }
+
+func TestAPublishKeepsAnInternalOutboundOutOfIncludeAllGroups(t *testing.T) {
+	dir := t.TempDir()
+	resources, _ := json.Marshal(map[string]any{"nodeLibraryDirectory": dir})
+	var b strings.Builder
+	b.WriteString("proxies:\n")
+	for i := 0; i < 30; i++ {
+		fmt.Fprintf(&b, "  - {name: \"HK %d\", type: ss, server: n%d.example.net, port: 8388, cipher: aes-128-gcm, password: p}\n", i, i)
+	}
+	b.WriteString("  - {name: ENGINE, type: http, server: 192.0.2.254, port: 8080, x-clash-internal: true}\n")
+	b.WriteString("proxy-groups:\n" +
+		"  - {name: every, type: select, include-all-proxies: true}\n" +
+		"  - {name: matched, type: select, include-all: true, filter: \".*\"}\n" +
+		"  - {name: named, type: select, proxies: [ENGINE, \"HK 0\"]}\n" +
+		"rules:\n  - MATCH,every\n")
+	finalized, err := FinalizeForIOS(b.String(), string(resources))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(finalized.Value, "x-clash-node-library") || !strings.Contains(finalized.Value, "192.0.2.254") {
+		t.Fatalf("the nodes went to a library and the internal outbound stayed inline:\n%.600s", finalized.Value)
+	}
+	cfg, err := parseAfterLookups(finalized.Value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	members := func(group string) []string {
+		encoded, _ := json.Marshal(cfg.Proxies[group])
+		var g struct{ All []string }
+		_ = json.Unmarshal(encoded, &g)
+		return g.All
+	}
+	for _, group := range []string{"every", "matched"} {
+		all := members(group)
+		if len(all) != 30 {
+			t.Errorf("include-all group %s has %d members, want the 30 nodes: %v", group, len(all), all)
+		}
+		for _, name := range all {
+			if name == "ENGINE" {
+				t.Errorf("include-all group %s took the internal outbound", group)
+			}
+		}
+	}
+	if named := members("named"); len(named) != 2 || named[0] != "ENGINE" {
+		t.Errorf("a group that names the internal outbound has %v", named)
+	}
+}

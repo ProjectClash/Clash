@@ -32,3 +32,35 @@ func NewIPCidrStrategyInStubDirectory(directory string) *ipcidrStrategy {
 	s.stubDirectory = directory
 	return s
 }
+
+func ParseMrsDomainForTest(provider string, mrs []byte) (*domainStrategy, error) {
+	s := NewDomainStrategy()
+	_, err := clashProviderParse(provider, mrs, s, P.MrsRule)
+	return s, err
+}
+
+func ParseMrsIPCidrForTest(provider string, mrs []byte) (*ipcidrStrategy, error) {
+	s := NewIPCidrStrategy()
+	_, err := clashProviderParse(provider, mrs, s, P.MrsRule)
+	return s, err
+}
+
+func HelperParseMrsDomainForTest(mrs []byte) (*domainStrategy, error) {
+	s := NewDomainStrategy()
+	_, err := rulesParse(mrs, s, P.MrsRule)
+	return s, err
+}
+
+func MrsMappedCacheGenerationForTest() string {
+	clashMrsCache.Lock()
+	defer clashMrsCache.Unlock()
+	return clashMrsCache.generation
+}
+
+func (d *domainStrategy) MappedForTest() bool { return d.mapped != nil && d.domainSet == nil }
+
+func (i *ipcidrStrategy) MappedForTest() bool { return i.mapped != nil && i.cidrSet == nil }
+
+func MrsMappedCacheWritesForTest() int64 { return clashMrsCacheWrites.Load() }
+
+var ClashMrsReaderForTest = clashMrsReader

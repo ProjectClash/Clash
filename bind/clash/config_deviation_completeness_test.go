@@ -26,6 +26,7 @@ var deviationFieldAliases = map[string]string{
 	"Experimental.IP4PEnable":                  "experimental.dialer-ip4p-convert",
 	"Profile.StoreSelected":                    "profile.store-selected",
 	"Profile.StoreFakeIP":                      "profile.store-fake-ip",
+	"DNS.CacheMaxSize":                         "dns.cache-max-size",
 	"DNS.ListenRoutingMark":                    "dns.listen-routing-mark",
 	"NTP.WriteToSystem":                        "ntp.write-to-system",
 }

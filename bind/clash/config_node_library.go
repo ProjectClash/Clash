@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ProjectClash/Clash/common/utils"
 	"io"
 	"os"
 	"path/filepath"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/ProjectClash/Clash/adapter"
 	"github.com/ProjectClash/Clash/adapter/outbound"
+	"github.com/ProjectClash/Clash/adapter/outboundgroup"
 	adapterprovider "github.com/ProjectClash/Clash/adapter/provider"
 	"github.com/ProjectClash/Clash/common/clashsum"
 	"github.com/ProjectClash/Clash/constant"
@@ -124,8 +126,10 @@ func writeNodeLibrary(root map[string]any, directory string) error {
 		mapping, ok := item.(map[string]any)
 		var config string
 		var err error
-		if ok {
+		if ok && !outboundgroup.IsClashInternalProxy(mapping) {
 			config, err = adapter.LibraryNodeConfig(mapping)
+		} else if ok {
+			err = adapter.ErrNotLibraryNode
 		}
 		if !ok || errors.Is(err, adapter.ErrNotLibraryNode) {
 			kept, keptAt = append(kept, item), append(keptAt, idx)
@@ -466,6 +470,7 @@ type computedGroup struct {
 func computeIncludeAllGroups(root map[string]any, list []any) []computedGroup {
 	groups, _ := root["proxy-groups"].([]any)
 	var names []string
+	var internal map[string]bool
 	var out []computedGroup
 	for _, item := range groups {
 		group, ok := item.(map[string]any)
@@ -480,7 +485,7 @@ func computeIncludeAllGroups(root map[string]any, list []any) []computedGroup {
 		var regs []*regexp2.Regexp
 		compiled := true
 		for _, part := range strings.Split(filter, "`") {
-			reg, err := regexp2.Compile(part, regexp2.None)
+			reg, err := utils.SharedRegexp2(part)
 			if err != nil {
 				compiled = false
 				break
@@ -491,10 +496,14 @@ func computeIncludeAllGroups(root map[string]any, list []any) []computedGroup {
 			continue
 		}
 		if names == nil {
+			internal = map[string]bool{}
 			for _, entry := range list {
 				if mapping, ok := entry.(map[string]any); ok {
 					if n, ok := adapter.ClashMappingNodeName(mapping); ok {
 						names = append(names, n)
+						if outboundgroup.IsClashInternalProxy(mapping) {
+							internal[n] = true
+						}
 					}
 				}
 			}
@@ -502,6 +511,9 @@ func computeIncludeAllGroups(root map[string]any, list []any) []computedGroup {
 		}
 		var members []uint32
 		for at, n := range names {
+			if internal[n] {
+				continue
+			}
 			for _, reg := range regs {
 				if matched, _ := reg.MatchString(n); matched {
 					members = append(members, uint32(at))

@@ -143,7 +143,7 @@ func TestTheSessionSweepStopsWithItsContext(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runSessionSweep(ctx, 10*time.Millisecond, time.Hour)
+		runSessionSweep(ctx, 10*time.Millisecond, time.Hour, nil)
 	}()
 	time.Sleep(30 * time.Millisecond)
 	cancel()

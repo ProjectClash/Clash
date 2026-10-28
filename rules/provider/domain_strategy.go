@@ -54,7 +54,7 @@ func (d *domainStrategy) Insert(rule string) {
 	}
 	if d.count == 0 && loadMappedSetStub(rule, ClashDomainSetStubType, d.stubDirectory, func(path string, sum [32]byte) error {
 		d.stubbed = true
-		m, err := openMappedDomainSet(path, sum)
+		m, err := openMappedDomainSet(path, &sum)
 		if err == nil {
 			_, _, d.count, _ = parseMappedSetStub(rule, ClashDomainSetStubType, d.stubDirectory)
 			d.mapped = m

@@ -68,10 +68,7 @@ func WriteIPCIDR(w io.Writer, set *cidr.IpCidrSet, count int) (err error) {
 }
 
 var sharedDecoder = sync.OnceValues(func() (*zstd.Decoder, error) {
-	return zstd.NewReader(nil,
-		zstd.WithDecoderConcurrency(1),
-		zstd.WithDecoderLowmem(true),
-	)
+	return NewLowMemoryReader(nil)
 })
 
 func ReadIPCIDR(r io.Reader) (*cidr.IpCidrSet, int, error) {

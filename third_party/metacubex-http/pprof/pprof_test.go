@@ -52,6 +52,16 @@ func TestHandlers(t *testing.T) {
 		{"/debug/pprof/goroutine?seconds=1", Index, http.StatusOK, "application/octet-stream", `attachment; filename="goroutine-delta"`, nil},
 		{"/debug/pprof/", Index, http.StatusOK, "text/html; charset=utf-8", "", []byte("Types of profiles available:")},
 	}
+	if !deltaProfilesServed {
+		for i, tc := range testCases {
+			if strings.Contains(tc.path, "seconds=") && !strings.HasPrefix(tc.path, "/debug/pprof/profile") {
+				testCases[i].statusCode = http.StatusBadRequest
+				testCases[i].contentType = "text/plain; charset=utf-8"
+				testCases[i].contentDisposition = ""
+				testCases[i].resp = []byte("\"seconds\" parameter is not supported in this build\n")
+			}
+		}
+	}
 	for _, tc := range testCases {
 		t.Run(tc.path, func(t *testing.T) {
 			req := httptest.NewRequest("GET", "http://example.com"+tc.path, nil)
@@ -140,6 +150,9 @@ func mutexHog(duration time.Duration, hogger func(mu1, mu2 *sync.Mutex, start ti
 }
 
 func TestDeltaProfile(t *testing.T) {
+	if !deltaProfilesServed {
+		t.Skip("a low-memory build serves no delta profiles")
+	}
 	if strings.HasPrefix(runtime.GOARCH, "arm") {
 		t.Skipf("skipping known flaky test without the -flaky flag; see golang.org/issue/%d", 50218)
 	}

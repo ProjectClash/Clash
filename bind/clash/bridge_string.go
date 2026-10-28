@@ -18,6 +18,10 @@ func (p bridgeSafePlatformDecorator) WriteLog(message string) {
 	p.PlatformInterface.WriteLog(bridgeSafeString(message))
 }
 
+func (p bridgeSafePlatformDecorator) TunFailed(reason string) {
+	p.PlatformInterface.TunFailed(bridgeSafeString(reason))
+}
+
 func bridgeSafePlatform(platform PlatformInterface) PlatformInterface {
 	if platform == nil {
 		return nil

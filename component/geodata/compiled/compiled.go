@@ -77,7 +77,7 @@ func Write(w io.Writer, set *trie.DomainSet, count int, residual []Residual) (er
 }
 
 func Read(r io.Reader) (*trie.DomainSet, int, []Residual, error) {
-	decoder, err := zstd.NewReader(r)
+	decoder, err := NewLowMemoryReader(r)
 	if err != nil {
 		return nil, 0, nil, err
 	}

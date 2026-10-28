@@ -1,0 +1,18 @@
+//go:build !ios
+
+package runtime
+
+// Upstream's values for every slice outside the iOS family; runtime_clash_apple_tunnel.go.src says
+// what the iOS family changes and why.
+const (
+	clashSpanSetBlockEntries = 512 // 4KB on 64-bit
+	clashSpanSetInitSpineCap = 256 // Enough for 1GB heap on 64-bit
+)
+
+const clashStackCacheSize = 32 * 1024
+
+const clashAppleSmallProcess = false
+
+var clashAppleDropExtraM = false
+
+func clashAppleRuntimeOverlayMarker() {}

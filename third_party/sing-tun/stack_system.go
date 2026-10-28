@@ -288,6 +288,9 @@ func (s *System) tunLoop() {
 				return
 			}
 			s.logger.Error(E.Cause(err, "read packet"))
+			if failDevice(s.tun, err) {
+				return
+			}
 		}
 		if n < header.IPv4MinimumSize {
 			continue
@@ -371,6 +374,9 @@ func (s *System) batchLoopDarwin(darwinTUN DarwinTUN) {
 				return
 			}
 			s.logger.Error(E.Cause(err, "batch read packet"))
+			if failDevice(darwinTUN, err) {
+				return
+			}
 		}
 		if len(buffers) == 0 {
 			continue

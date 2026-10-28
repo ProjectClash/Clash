@@ -27,7 +27,9 @@ import (
 	coreListener "github.com/ProjectClash/Clash/listener"
 	LC "github.com/ProjectClash/Clash/listener/config"
 	"github.com/ProjectClash/Clash/listener/inner"
+	"github.com/ProjectClash/Clash/listener/sing_tun"
 	"github.com/ProjectClash/Clash/log"
+	ruleprovider "github.com/ProjectClash/Clash/rules/provider"
 	"github.com/ProjectClash/Clash/tunnel"
 	"github.com/ProjectClash/Clash/tunnel/statistic"
 	tun "github.com/metacubex/sing-tun"
@@ -98,6 +100,7 @@ func NewService(platform PlatformInterface) (*BoxService, error) {
 	if platform.UnderNetworkExtension() {
 		config.ClashRuleIndexesVerified.Store(true)
 	}
+	setDNSCacheDefaultFor(currentRuntimePolicy(platform.UnderNetworkExtension()))
 	platform = bridgeSafePlatform(platform)
 	logWriter := redirectLogs(platform)
 	armNEPacingForService(platform)
@@ -220,6 +223,12 @@ func (s *BoxService) start(configContent string) (startErr error) {
 
 		if cfg.General.Tun.Enable {
 			startupPhase("tun-open-dispatched")
+			platform, generation := s.platform, tunHookGeneration.Add(1)
+			sing_tun.SetDeviceFailure(func(err error) {
+				if tunHookGeneration.Load() == generation {
+					reportTunFailure(platform, err)
+				}
+			})
 			pendingTunOpen = dispatchTunOpen(s.platform, &cfg.General.Tun)
 			executor.WaitBeforeTunAttach = func(applied *config.Config) {
 				result := <-pendingTunOpen
@@ -294,6 +303,7 @@ func (s *BoxService) start(configContent string) (startErr error) {
 	s.providerRuntime = startedProviderRuntime
 	s.startProviderRefreshLocked()
 	s.startSessionSweepLocked()
+	go ruleprovider.ClashSweepMrsMappedCache(ruleprovider.ClashMrsMappedCacheKeep)
 	refreshNodeCatalog()
 	setOOMEvidenceCoreState(true, s.startTimeUnix, s.inboundCount, s.outboundCount)
 	publishCoreService(s)
@@ -337,8 +347,9 @@ func prepareTunBridgeFD(platform PlatformInterface, tun *LC.Tun) (int, error) {
 	}
 	dupFd, err := unix.Dup(int(fd))
 	if err != nil {
-		return -1, fmt.Errorf("clash: dup PacketFlow bridge fd %d: %w", fd, err)
+		return -1, fmt.Errorf("clash: dup tunnel fd %d: %w", fd, err)
 	}
+	recordTunDescriptor(dupFd)
 	return dupFd, nil
 }
 
@@ -581,6 +592,8 @@ func (s *BoxService) Close() error {
 		})
 	}()
 	<-done
+	tunHookGeneration.Add(1)
+	sing_tun.SetDeviceFailure(nil)
 	if s.providerRuntime != nil {
 		s.providerRuntime.close()
 		s.providerRuntime = nil
@@ -725,6 +738,8 @@ func (s *BoxService) RuntimeDiagnosticsJSON() string {
 	}
 	if conf := coreListener.GetTunConf(); conf.Enable {
 		diagnostics["tunStack"] = conf.Stack.String()
+		diagnostics["tunDescriptor"] = lastTunDescriptor()
+		diagnostics["tunFailure"] = lastTunFailure()
 	}
 	if s.reloadVerdict.Reason != "" {
 		diagnostics["reloadVerdict"] = s.reloadVerdict
@@ -787,7 +802,20 @@ func finalizeConfigForIOS(cfg *config.Config, underNE bool) {
 	finalizeConfigForApple(cfg, runtimePolicyFor(runtimeProfileIOSPacketTunnel, underNE))
 }
 
+const appleBoundedDNSCacheMaxSize = 1024
+
+func setDNSCacheDefaultFor(policy appleRuntimePolicy) {
+	if policy.boundedDNSCache {
+		dns.ClashSetDefaultCacheMaxSize(appleBoundedDNSCacheMaxSize)
+	} else {
+		dns.ClashSetDefaultCacheMaxSize(0)
+	}
+}
+
 func finalizeConfigForApple(cfg *config.Config, policy appleRuntimePolicy) {
+	if policy.boundedDNSCache && cfg.DNS != nil && cfg.DNS.CacheMaxSize == 0 {
+		cfg.DNS.CacheMaxSize = appleBoundedDNSCacheMaxSize
+	}
 	if policy.networkExtension && policy.packetTunnel {
 		ensureTunEnabled(&cfg.General.Tun)
 	}

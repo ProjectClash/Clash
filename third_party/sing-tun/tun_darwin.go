@@ -8,7 +8,9 @@ import (
 	"net/netip"
 	"os"
 	"sync"
+	"sync/atomic"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/metacubex/sing-tun/internal/gtcpip/header"
@@ -47,6 +49,20 @@ type NativeTun struct {
 	dnsRegistration io.Closer
 
 	writeAccess sync.Mutex
+
+	closing        atomic.Bool
+	failed         atomic.Bool
+	failureMu      sync.Mutex
+	failingSince   time.Time
+	lastFailure    time.Time
+	failureBackoff time.Duration
+}
+
+func (t *NativeTun) reportFailure(err error) {
+	if t.closing.Load() || !t.failed.CompareAndSwap(false, true) || t.options.DeviceFailure == nil {
+		return
+	}
+	go t.options.DeviceFailure(err)
 }
 
 type iovecBuffer struct {
@@ -226,6 +242,7 @@ func init() {
 }
 
 func (t *NativeTun) Close() error {
+	t.closing.Store(true)
 	if !platformTunRequiresFileDescriptor {
 		defer flushDNSCache()
 	}

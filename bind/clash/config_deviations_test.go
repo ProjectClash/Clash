@@ -59,7 +59,8 @@ rules:
 	want := map[string]bool{
 		"redir-port": true, "tproxy-port": true, "ntp.write-to-system": true,
 		"dns.enable": true, "find-process-mode": true, "unified-delay": true, "profile.store-fake-ip": true,
-		"tun.stack": true,
+		"tun.stack":          true,
+		"dns.cache-max-size": true,
 	}
 	for field := range byField {
 		if !want[field] {
@@ -84,7 +85,8 @@ rules:
 	}
 	silentlyChanged := map[string]bool{
 		"dns.enable": true, "find-process-mode": true, "unified-delay": true, "profile.store-fake-ip": true,
-		"tun.stack": true,
+		"tun.stack":          true,
+		"dns.cache-max-size": true,
 	}
 	for field := range reported {
 		if !silentlyChanged[field] {

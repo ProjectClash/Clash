@@ -5,6 +5,8 @@ type PlatformInterface interface {
 
 	OpenTun(options TunOptions) (int32, error)
 
+	TunFailed(reason string)
+
 	UsePlatformAutoDetectInterfaceControl() bool
 
 	AutoDetectInterfaceControl(fd int32) error
