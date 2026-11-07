@@ -170,7 +170,6 @@ func canonicalizeProviderDefinitionKeysInDocument(root map[string]any) {
 type unwrittenAppleDefaults struct {
 	unifiedDelay bool
 	storeFakeIP  bool
-	tunStack     bool
 }
 
 func probeUnwrittenAppleDefaults(content []byte) unwrittenAppleDefaults {
@@ -183,9 +182,6 @@ func probeUnwrittenAppleDefaultsWith(decode func(out any) error) unwrittenAppleD
 		Profile      *struct {
 			StoreFakeIP *bool `yaml:"store-fake-ip"`
 		} `yaml:"profile"`
-		Tun *struct {
-			Stack any `yaml:"stack"`
-		} `yaml:"tun"`
 	}
 	if err := decode(&probe); err != nil {
 		return unwrittenAppleDefaults{}
@@ -193,7 +189,6 @@ func probeUnwrittenAppleDefaultsWith(decode func(out any) error) unwrittenAppleD
 	return unwrittenAppleDefaults{
 		unifiedDelay: probe.UnifiedDelay == nil,
 		storeFakeIP:  probe.Profile == nil || probe.Profile.StoreFakeIP == nil,
-		tunStack:     probe.Tun == nil || probe.Tun.Stack == nil,
 	}
 }
 
@@ -204,12 +199,7 @@ func applyAppleDefaults(raw *config.RawConfig, unwritten unwrittenAppleDefaults)
 	if unwritten.storeFakeIP {
 		raw.Profile.StoreFakeIP = true
 	}
-	if unwritten.tunStack && raw.Tun.Stack != appleUnwrittenTunStack {
-		raw.Tun.Stack = appleUnwrittenTunStack
-	}
 }
-
-const appleUnwrittenTunStack = C.TunGvisor
 
 func normalizeRawConfigForIOS(raw *config.RawConfig, underNE bool) {
 	normalizeRawConfigForApple(raw, runtimePolicyFor(runtimeProfileIOSPacketTunnel, underNE))

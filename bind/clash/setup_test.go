@@ -71,6 +71,113 @@ func TestAppOnlySetupKeepsPreflightOffPersistentCache(t *testing.T) {
 	}
 }
 
+const appCallsBeforeSetupYAML = `
+mode: rule
+profile:
+  store-selected: true
+  store-fake-ip: true
+dns:
+  enable: true
+  enhanced-mode: fake-ip
+  nameserver:
+    - 8.8.8.8
+proxy-providers:
+  remote:
+    type: http
+    url: http://127.0.0.1:1/nodes.yaml
+    path: ./providers/remote.yaml
+proxies:
+  - name: probe
+    type: socks5
+    server: 127.0.0.1
+    port: 1080
+proxy-groups:
+  - { name: Proxy, type: select, proxies: [probe] }
+rule-providers:
+  remote:
+    type: http
+    behavior: domain
+    url: http://127.0.0.1:1/rules.yaml
+    path: ./rules/remote.yaml
+rules:
+  - RULE-SET,remote,Proxy
+  - MATCH,DIRECT
+`
+
+func TestAppCallsBeforeSetupLeaveTheCacheForTheAppsSetup(t *testing.T) {
+	if os.Getenv("CLASH_APP_CALLS_BEFORE_SETUP_HELPER") == "1" {
+		document := appCallsBeforeSetupYAML
+		scratch := t.TempDir()
+		documentPath := filepath.Join(scratch, "config.yaml")
+		rulesPath := filepath.Join(scratch, "rules.yaml")
+		if err := os.WriteFile(documentPath, []byte(document), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(rulesPath, []byte("payload:\n  - example.com\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		refusedUntilSetup := map[string]func() error{
+			"CheckConfig":               func() error { return CheckConfig(document) },
+			"CompileCheckForIOS":        func() error { _, err := CompileCheckForIOS(document, ""); return err },
+			"ProxyCatalogForIOS":        func() error { _, err := ProxyCatalogForIOS(document, "", ""); return err },
+			"RuleProviderCatalogForIOS": func() error { _, err := RuleProviderCatalogForIOS(document, "", true); return err },
+			"MatchRuleForIOS":           func() error { _, err := MatchRuleForIOS(document, "", `{"host":"example.com"}`); return err },
+		}
+		for name, call := range refusedUntilSetup {
+			if err := call(); err == nil || !strings.Contains(err.Error(), "Setup") {
+				t.Errorf("%s before Setup: err = %v, want a refusal until Setup", name, err)
+			}
+		}
+		_, _ = ConfigDeviationsJSON(document, "")
+		_, _ = FinalizeForIOS(document, "")
+		_, _ = FinalizeForIOSWithOptions(document, "", "")
+		_, _ = PlanResourcesForProfile(document, "")
+		_, _ = InvalidDomainPatternsJSON(document, "")
+		_, _ = PlatformConfigIntentJSON(document)
+		_, _ = PolicyNamesJSON(document)
+		_ = ValidateConfigShape(document)
+		_, _ = MergeOverrideForIOS(document, "{}")
+		if catalog, err := OpenNodeCatalogForIOS(document, "", ""); err == nil && catalog != nil {
+			catalog.Close()
+		}
+		if catalog, err := OpenRuleCatalogForIOSAtPath(documentPath); err == nil && catalog != nil {
+			catalog.Close()
+		}
+		_, _ = PrepareGeoIPCache(document, false)
+		_, _ = PrepareGeoSiteCache(document)
+		_ = GeodataModeEnabled(document)
+		_, _ = ProviderAgeSecretKeysJSON(document)
+		_, _ = InspectProviderForIOS("rule", "domain", "yaml", []byte("payload:\n  - example.com\n"))
+		_, _ = CompileRuleProvider(rulesPath, "domain", "yaml", filepath.Join(scratch, "rules.mrs"))
+		_ = StageProvidersForPublish(document, "", true)
+		_, _ = PreparePendingProviderSeeds(document, "")
+		if err := SelectProxy("Proxy", "probe"); err == nil {
+			t.Error("SelectProxy with no core answered")
+		}
+		if err := UnfixProxy("Proxy"); err == nil {
+			t.Error("UnfixProxy with no core answered")
+		}
+		_ = UpdateProviderJSON("rule", "remote", 1000)
+		_ = SeedProviderFileJSON("rule", "remote", filepath.Join(scratch, "absent"), "{}", "", 1000)
+
+		opts := testOptions(t)
+		opts.DisablePersistentCache = true
+		if err := Setup(opts); err != nil {
+			t.Fatalf("the App's Setup after the calls before it: %v", err)
+		}
+		if err := CheckConfig(document); err != nil {
+			t.Fatalf("CheckConfig after the App's Setup: %v", err)
+		}
+		return
+	}
+	command := exec.Command(os.Args[0], "-test.run=^TestAppCallsBeforeSetupLeaveTheCacheForTheAppsSetup$")
+	home := t.TempDir()
+	command.Env = append(os.Environ(), "CLASH_APP_CALLS_BEFORE_SETUP_HELPER=1", "HOME="+home, "XDG_CONFIG_HOME="+home)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("helper failed: %v\n%s", err, output)
+	}
+}
+
 func TestSetupCreatesAndProbesDirs(t *testing.T) {
 	opts := testOptions(t)
 	if err := Setup(opts); err != nil {

@@ -16,13 +16,15 @@ import (
 )
 
 var (
-	initOnce     sync.Once
-	initMu       sync.Mutex
-	initialized  bool
-	disabled     bool
-	cachePath    string
-	fileMode     os.FileMode = 0o666
-	defaultCache *CacheFile
+	initMu      sync.Mutex
+	initialized bool
+	disabled    bool
+	released    bool
+	cachePath   string
+	openedPath  string
+	fileMode    os.FileMode = 0o666
+	defaultCache syncatomic.Pointer[CacheFile]
+	beforeRelease []func(*CacheFile)
 
 	bucketSelected         = []byte("selected")
 	bucketFakeip           = []byte("fakeip")
@@ -117,7 +119,7 @@ func SetPersistentCachePath(path string) error {
 	initMu.Lock()
 	defer initMu.Unlock()
 	if initialized {
-		if path == cachePath {
+		if path == openedPath {
 			return nil
 		}
 		return errors.New("cachefile: cache already initialized")
@@ -126,18 +128,15 @@ func SetPersistentCachePath(path string) error {
 	return nil
 }
 
-func initCache() {
-	initMu.Lock()
+func openLocked() *CacheFile {
 	initialized = true
-	cacheDisabled := disabled
-	if cachePath == "" {
-		cachePath = C.Path.Cache()
-	}
 	path := cachePath
-	initMu.Unlock()
-	if cacheDisabled {
-		defaultCache = &CacheFile{}
-		return
+	if path == "" {
+		path = C.Path.Cache()
+	}
+	openedPath = path
+	if disabled {
+		return &CacheFile{}
 	}
 	options := bbolt.Options{Timeout: time.Second, NoStatistics: true}
 	db, err := bbolt.Open(path, fileMode, &options)
@@ -153,15 +152,53 @@ func initCache() {
 	if err != nil {
 		log.Warnln("[CacheFile] can't open cache file: %s", err.Error())
 	}
-
-	defaultCache = &CacheFile{
-		DB: db,
-	}
+	return &CacheFile{DB: db}
 }
 
 // Cache return singleton of CacheFile
 func Cache() *CacheFile {
-	initOnce.Do(initCache)
+	if cache := defaultCache.Load(); cache != nil {
+		return cache
+	}
+	initMu.Lock()
+	defer initMu.Unlock()
+	if cache := defaultCache.Load(); cache != nil {
+		return cache
+	}
+	cache := openLocked()
+	defaultCache.Store(cache)
+	return cache
+}
 
-	return defaultCache
+func Release() error {
+	initMu.Lock()
+	defer initMu.Unlock()
+	if disabled {
+		return nil
+	}
+	released = true
+	previous := defaultCache.Swap(&CacheFile{})
+	if previous == nil || previous.DB == nil {
+		return nil
+	}
+	for _, prepare := range beforeRelease {
+		prepare(previous)
+	}
+	return previous.DB.Close()
+}
+
+func OnRelease(prepare func(*CacheFile)) {
+	initMu.Lock()
+	defer initMu.Unlock()
+	beforeRelease = append(beforeRelease, prepare)
+}
+
+func Reopen() {
+	initMu.Lock()
+	defer initMu.Unlock()
+	if !released {
+		return
+	}
+	released = false
+	defaultCache.Store(nil)
 }

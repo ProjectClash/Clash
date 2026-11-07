@@ -1,24 +1,34 @@
 package clash
 
 import (
-	"fmt"
-	"strings"
+	"errors"
 	"sync/atomic"
 	"time"
 
+	C "github.com/ProjectClash/Clash/constant"
+	LC "github.com/ProjectClash/Clash/listener/config"
 	"github.com/ProjectClash/Clash/log"
+	tun "github.com/metacubex/sing-tun"
 	"golang.org/x/sys/unix"
 )
 
 func tunDescriptorUtun(fd int) (string, error) {
-	name, err := unix.GetsockoptString(fd, 2, 2)
-	if err != nil {
-		return "", err
+	if name, ok := tun.UtunControlName(fd); ok {
+		return name, nil
 	}
-	if !strings.HasPrefix(name, "utun") {
-		return "", fmt.Errorf("interface %q is not a utun", name)
+	if address, err := unix.Getsockname(fd); err == nil {
+		if _, unixSocket := address.(*unix.SockaddrUnix); unixSocket {
+			return "", errors.New("a unix socket, not a utun's control socket")
+		}
 	}
-	return name, nil
+	return "", errors.New("not a utun's control socket")
+}
+
+func handOverTunDescriptor(tun *LC.Tun, fd int) {
+	tun.FileDescriptor = fd
+	_, err := tunDescriptorUtun(fd)
+	tun.RecvMsgX = err == nil
+	tun.Stack = C.TunGo
 }
 
 func tunDescriptorKind(fd int) string {

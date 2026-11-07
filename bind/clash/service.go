@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/ProjectClash/Clash/component/pause"
+	"github.com/ProjectClash/Clash/component/profile/cachefile"
 	"github.com/ProjectClash/Clash/component/resolver"
 	"github.com/ProjectClash/Clash/config"
 	constant "github.com/ProjectClash/Clash/constant"
@@ -139,11 +140,13 @@ func (s *BoxService) start(configContent string) (startErr error) {
 	startupPhase("validated")
 	setupMu.Lock()
 	activeCoreCount.Add(1)
+	cachefile.Reopen()
 	setupMu.Unlock()
 	startupPhase("core-count-bumped")
 	defer func() {
 		if !s.running {
 			activeCoreCount.Add(-1)
+			releasePersistentCacheIfIdle()
 		}
 	}()
 	if s.logWriter == nil {
@@ -238,7 +241,7 @@ func (s *BoxService) start(configContent string) (startErr error) {
 				}
 				s.tunFd = result.fd
 				s.liveTunFd = result.fd
-				applied.General.Tun.FileDescriptor = result.fd
+				handOverTunDescriptor(&applied.General.Tun, result.fd)
 				startupPhase("tun-fd-ready")
 			}
 		}
@@ -462,7 +465,7 @@ func (s *BoxService) reload(configContent string) error {
 				fail(errors.New("clash: reload enables tun but no live fd from Start"))
 				return
 			}
-			cfg.General.Tun.FileDescriptor = s.liveTunFd
+			handOverTunDescriptor(&cfg.General.Tun, s.liveTunFd)
 		}
 		if cfg.General.Tun.Enable != s.hasLiveTun {
 			fail(errors.New("clash: reload cannot enable or disable the live tun; restart the appex"))
@@ -558,7 +561,12 @@ func runGuardedTeardown(teardown func()) {
 
 func (s *BoxService) Close() error {
 	var refresherDone <-chan struct{}
-	defer func() { awaitProviderRefreshExit(refresherDone) }()
+	var logWriter *platformLogWriter
+	defer func() {
+		awaitProviderRefreshExit(refresherDone)
+		releasePersistentCacheIfIdle()
+		stopLogRedirect(logWriter)
+	}()
 	s.stopSTUNSessions()
 	s.releasePauseOnClose()
 	s.mu.Lock()
@@ -570,8 +578,7 @@ func (s *BoxService) Close() error {
 		s.closeInterfaceMonitor()
 		stopClashAPI(s.clashAPIPath)
 		s.clashAPIPath = ""
-		stopLogRedirect(s.logWriter)
-		s.logWriter = nil
+		logWriter, s.logWriter = s.logWriter, nil
 		if s.providerRuntime != nil {
 			s.providerRuntime.close()
 			s.providerRuntime = nil
@@ -613,9 +620,19 @@ func (s *BoxService) Close() error {
 	s.dnsTransports = dnsTransportSnapshot{}
 	activeCoreCount.Add(-1)
 	setOOMEvidenceCoreState(false, 0, 0, 0)
-	stopLogRedirect(s.logWriter)
-	s.logWriter = nil
+	logWriter, s.logWriter = s.logWriter, nil
 	return nil
+}
+
+func releasePersistentCacheIfIdle() {
+	setupMu.Lock()
+	defer setupMu.Unlock()
+	if activeCoreCount.Load() != 0 {
+		return
+	}
+	if err := cachefile.Release(); err != nil {
+		log.Warnln("[Apple] close the cache file: %v", err)
+	}
 }
 
 func (s *BoxService) closeInterfaceMonitor() {
@@ -747,42 +764,12 @@ func (s *BoxService) RuntimeDiagnosticsJSON() string {
 	for key, value := range pressureThresholdDiagnostics() {
 		diagnostics[key] = value
 	}
-	if snapshot := tun.GVisorTCPWindowSnapshot; snapshot != nil {
-		window := snapshot()
-		diagnostics["gvisorTCPWindowMinBytes"] = window.MinBytes
-		diagnostics["gvisorTCPWindowDefaultBytes"] = window.DefaultBytes
-		diagnostics["gvisorTCPWindowMaxBytes"] = window.MaxBytes
-		diagnostics["gvisorTCPWindowConnections"] = window.TCPConnections
-		diagnostics["gvisorTCPReceiveOccupancyP50Bytes"] = window.ReceiveOccupancyP50Bytes
-		diagnostics["gvisorTCPReceiveOccupancyP95Bytes"] = window.ReceiveOccupancyP95Bytes
-		diagnostics["gvisorTCPReceiveOccupancyMaxBytes"] = window.ReceiveOccupancyMaxBytes
-		diagnostics["gvisorTCPConnectionsNearReceiveMax"] = window.ConnectionsNearReceiveMax
-		diagnostics["gvisorTCPSegmentQueueDroppedTotal"] = window.SegmentQueueDroppedTotal
-	}
 	if updater, ok := s.ifaceListener.(*interfaceUpdater); ok {
 		path := updater.snapshot()
 		diagnostics["physicalPathUpdatesReceived"] = path.received
 		diagnostics["physicalPathUpdatesApplied"] = path.applied
 		diagnostics["physicalPathIdentityChanges"] = path.identityChanges
 		diagnostics["physicalPathConnectionResets"] = path.connectionResets
-	}
-	if snapshot := tun.GVisorPacketIOSnapshot; snapshot != nil {
-		packetIO := snapshot()
-		diagnostics["corePacketIngressReadCalls"] = packetIO.IngressReadCalls
-		diagnostics["corePacketIngressReadWouldBlock"] = packetIO.IngressReadWouldBlock
-		diagnostics["corePacketIngressReadPackets"] = packetIO.IngressReadPackets
-		diagnostics["corePacketIngressReadBytes"] = packetIO.IngressReadBytes
-		diagnostics["corePacketIngressReadErrors"] = packetIO.IngressReadErrors
-		diagnostics["corePacketIngressDispatchPackets"] = packetIO.IngressDispatchPackets
-		diagnostics["corePacketIngressDispatchBytes"] = packetIO.IngressDispatchBytes
-		diagnostics["corePacketProcessorQueueDepth"] = packetIO.ProcessorQueueDepth
-		diagnostics["corePacketProcessorQueuePeak"] = packetIO.ProcessorQueuePeak
-		diagnostics["corePacketEgressWriteCalls"] = packetIO.EgressWriteCalls
-		diagnostics["corePacketEgressWritePackets"] = packetIO.EgressWritePackets
-		diagnostics["corePacketEgressWriteBytes"] = packetIO.EgressWriteBytes
-		diagnostics["corePacketEgressWriteErrors"] = packetIO.EgressWriteErrors
-		diagnostics["corePacketEgressWriteWaits"] = packetIO.EgressWriteWaits
-		diagnostics["corePacketEgressWriteWaitExhausted"] = packetIO.EgressWriteWaitExhausted
 	}
 	tunEgress := tun.TunEgressSnapshot()
 	diagnostics["coreTunEgressWriteWaits"] = tunEgress.WriteWaits

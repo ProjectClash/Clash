@@ -3,6 +3,7 @@ package tun
 import (
 	"bytes"
 	"encoding/binary"
+	"math/rand"
 	"net/netip"
 	"testing"
 )
@@ -176,4 +177,107 @@ func rawIPv6(destination string, next byte, payload []byte) []byte {
 	copy(packet[24:40], netip.MustParseAddr(destination).AsSlice())
 	copy(packet[40:], payload)
 	return packet
+}
+
+func TestTheRewriterAnswersAsApplyIPRewrite(t *testing.T) {
+	t.Cleanup(func() { SetIPRewrite(nil) })
+	random := rand.New(rand.NewSource(459))
+	address := func(v6 bool) netip.Addr {
+		if !v6 {
+			var b [4]byte
+			random.Read(b[:])
+			return netip.AddrFrom4(b)
+		}
+		var b [16]byte
+		random.Read(b[:])
+		if random.Intn(4) == 0 {
+			copy(b[:12], []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff})
+		}
+		return netip.AddrFrom16(b)
+	}
+	for round := 0; round < 300; round++ {
+		var lines []IPRewriteRule
+		var near []netip.Addr
+		for i := random.Intn(4); i > 0; i-- {
+			a := address(random.Intn(2) == 0).Unmap()
+			prefix, _ := a.Prefix(random.Intn(a.BitLen() + 1))
+			lines = append(lines, IPRewriteRule{prefix, IPRewriteAction(1 + random.Intn(3))})
+			near = append(near, a)
+		}
+		var loopback []netip.Addr
+		for i := random.Intn(3); i > 0; i-- {
+			a := address(random.Intn(2) == 0).Unmap()
+			loopback = append(loopback, a)
+			near = append(near, a)
+		}
+		loopback = LoopbackAddresses(loopback, nil)
+		SetIPRewrite(lines)
+		rewriter := NewIPRewriter(loopback)
+		for i := 0; i < 200; i++ {
+			destination := address(random.Intn(2) == 0)
+			if len(near) > 0 && random.Intn(2) == 0 {
+				destination = near[random.Intn(len(near))]
+				if random.Intn(3) == 0 && destination.Is4() {
+					destination = netip.AddrFrom16(destination.As16())
+				}
+			}
+			var packet []byte
+			if destination.Is4() {
+				packet = ipv4Packet([]byte{172, 19, 0, 1}, destination.AsSlice(), protocolTCP, tcpSegment(50000, 443, 1, 0, 0x02, nil))
+			} else {
+				packet = ipv6Packet(netip.MustParseAddr("fdfe:dcba:9876::1").AsSlice(), destination.AsSlice(), protocolTCP, tcpSegment(50000, 443, 1, 0, 0x02, nil))
+			}
+			want := append([]byte(nil), packet...)
+			wantHandled, wantWriteBack, wantReply := applyIPRewrite(want, loopback)
+			handled, writeBack, reply := rewriter.Apply(packet)
+			if handled != wantHandled || writeBack != wantWriteBack || !bytes.Equal(reply, wantReply) || !bytes.Equal(packet, want) {
+				t.Fatalf("round %d, to %s (lines %v, loopback %v): rewriter %v/%v/%x, applyIPRewrite %v/%v/%x",
+					round, destination, lines, loopback, handled, writeBack, reply, wantHandled, wantWriteBack, wantReply)
+			}
+		}
+	}
+}
+
+func TestTheRewriterFollowsTheTableItWasNotMadeWith(t *testing.T) {
+	t.Cleanup(func() { SetIPRewrite(nil) })
+	rewriter := NewIPRewriter(nil)
+	packet := func() []byte {
+		return testIPv4("172.19.0.1", "192.0.2.1", protocolTCP, tcpSegment(50000, 443, 1, 0, 0x02, nil))
+	}
+	if handled, _, _ := rewriter.Apply(packet()); handled {
+		t.Fatal("handled with no table")
+	}
+	withIPRewrite(t, IPRewriteRule{netip.MustParsePrefix("192.0.2.0/24"), IPRewriteDrop})
+	if handled, _, _ := rewriter.Apply(packet()); !handled {
+		t.Fatal("the table set after the rewriter was made did not take the packet")
+	}
+	SetIPRewrite([]IPRewriteRule{{netip.MustParsePrefix("198.51.100.0/24"), IPRewriteDrop}})
+	if handled, _, _ := rewriter.Apply(packet()); handled {
+		t.Fatal("a line the table no longer has still took the packet")
+	}
+	if handled, _, _ := rewriter.Apply(testIPv4("172.19.0.1", "198.51.100.1", protocolTCP, tcpSegment(50000, 443, 1, 0, 0x02, nil))); !handled {
+		t.Fatal("the line the table gained did not take its packet")
+	}
+}
+
+func BenchmarkTheRewriterOnAPacketNothingCovers(b *testing.B) {
+	SetIPRewrite([]IPRewriteRule{
+		{netip.MustParsePrefix("10.99.0.1/32"), IPRewriteReflect},
+		{netip.MustParsePrefix("10.99.0.2/32"), IPRewriteReject},
+		{netip.MustParsePrefix("10.99.0.3/32"), IPRewriteDrop},
+	})
+	defer SetIPRewrite(nil)
+	loopback := LoopbackAddresses([]netip.Addr{netip.MustParseAddr("10.99.0.4")}, nil)
+	packet := testIPv4("198.18.0.1", "9.9.9.10", protocolTCP, tcpSegment(50000, 5201, 1, 0, 0x10, make([]byte, 1400)))
+	b.Run("applyIPRewrite", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			applyIPRewrite(packet, loopback)
+		}
+	})
+	rewriter := NewIPRewriter(loopback)
+	b.Run("IPRewriter", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			rewriter.Apply(packet)
+		}
+	})
 }

@@ -98,7 +98,7 @@ func (p *Pool) IPNet() netip.Prefix {
 
 // CloneFrom clone cache from old pool
 func (p *Pool) CloneFrom(o *Pool) {
-	if p.first == o.first && p.last == o.last && sameStoreKind(p.store, o.store) {
+	if p.first == o.first && p.last == o.last && sameStore(p.store, o.store) {
 		p.allocator = o.allocator
 		return
 	}
@@ -118,14 +118,14 @@ func (p *Pool) CloneFrom(o *Pool) {
 	}
 }
 
-func sameStoreKind(a, b store) bool {
-	switch a.(type) {
+func sameStore(a, b store) bool {
+	switch a := a.(type) {
 	case *memoryStore:
 		_, ok := b.(*memoryStore)
 		return ok
 	case *cachefileStore:
-		_, ok := b.(*cachefileStore)
-		return ok
+		other, ok := b.(*cachefileStore)
+		return ok && a.cache.Key() == other.cache.Key()
 	}
 	return false
 }

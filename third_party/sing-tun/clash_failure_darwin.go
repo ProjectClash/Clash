@@ -19,7 +19,7 @@ var (
 
 func fatalDeviceError(err error) bool {
 	return errors.Is(err, syscall.EBADF) || errors.Is(err, syscall.ENXIO) || errors.Is(err, syscall.ENODEV) ||
-		errors.Is(err, syscall.ENETDOWN)
+		errors.Is(err, syscall.ENETDOWN) || errors.Is(err, syscall.ECONNRESET)
 }
 
 func (t *NativeTun) readFailed(err error) bool {

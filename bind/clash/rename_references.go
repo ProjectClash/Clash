@@ -246,75 +246,35 @@ func planRenameReferences(root *yaml.Node, kind, oldName, newName string) ([]ren
 			return nil, refuseEdit("invalidRequest", "a rule provider %q exists", newName)
 		}
 		edits = append(edits, renameEdit{node: key, isKey: true, value: newName})
-		rules(func(item *yaml.Node) {
-			if renamed, changed := renameRuleSetInRule(item.Value, oldName, newName, true); changed {
-				scalar(item, renamed)
-			}
-		})
-		for _, ruleProvider := range mappingValues(providers) {
-			if behavior := providerField(ruleProvider, "behavior"); behavior == nil || !strings.EqualFold(behavior.Value, "classical") {
-				continue
-			}
-			for _, item := range sequenceItems(providerField(ruleProvider, "payload")) {
-				if renamed, changed := renameRuleSetInRule(item.Value, oldName, newName, false); changed {
-					scalar(item, renamed)
+		if refused := walkRuleSetReferences(root, func(node, parent *yaml.Node, kind ruleSetReferenceKind, field string) *yamlEditError {
+			switch kind {
+			case ruleSetInRule, ruleSetInPayload:
+				if renamed, changed := renameRuleSetInRule(node.Value, oldName, newName, kind == ruleSetInRule); changed {
+					scalar(node, renamed)
 				}
-			}
-		}
-		dns := mappingValue(root, "dns")
-		for _, field := range []string{"nameserver-policy", "proxy-server-nameserver-policy"} {
-			policy := mappingValue(dns, field)
-			if policy == nil || policy.Kind != yaml.MappingNode {
-				continue
-			}
-			for i := 0; i+1 < len(policy.Content); i += 2 {
-				if renamed, changed := renameRuleSetList(policy.Content[i].Value, oldName, newName, true); changed {
-					if mappingKey(policy, renamed) != nil {
-						return nil, refuseEdit("invalidRequest", "%s already has %q", field, renamed)
+			case ruleSetInPolicyKey:
+				if renamed, changed := renameRuleSetList(node.Value, oldName, newName, true); changed {
+					if mappingKey(parent, renamed) != nil {
+						return refuseEdit("invalidRequest", "%s already has %q", field, renamed)
 					}
-					edits = append(edits, renameEdit{node: policy.Content[i], isKey: true, value: renamed})
+					edits = append(edits, renameEdit{node: node, isKey: true, value: renamed})
+				}
+			case ruleSetInList:
+				if renamed, changed := renameRuleSetList(node.Value, oldName, newName, false); changed {
+					scalar(node, renamed)
+				}
+			case ruleSetAsRouteSet:
+				if yamlRefersTo(node, oldName) {
+					scalar(node, newName)
+				}
+			case ruleSetAsListenerRouteSet:
+				if structRefersTo(node, oldName) {
+					scalar(node, newName)
 				}
 			}
-		}
-		fakeIPRules := false
-		if mode := mappingValue(dns, "fake-ip-filter-mode"); mode != nil {
-			fakeIPRules = strings.EqualFold(mode.Value, "rule")
-		}
-		for _, item := range sequenceItems(mappingValue(dns, "fake-ip-filter")) {
-			if fakeIPRules {
-				if renamed, changed := renameRuleSetInRule(item.Value, oldName, newName, true); changed {
-					scalar(item, renamed)
-				}
-			} else if renamed, changed := renameRuleSetList(item.Value, oldName, newName, false); changed {
-				scalar(item, renamed)
-			}
-		}
-		var lists []*yaml.Node
-		sniffer := mappingValue(root, "sniffer")
-		for _, field := range []string{"force-domain", "skip-domain", "skip-src-address", "skip-dst-address"} {
-			lists = append(lists, mappingValue(sniffer, field))
-		}
-		for _, list := range lists {
-			for _, item := range sequenceItems(list) {
-				if renamed, changed := renameRuleSetList(item.Value, oldName, newName, false); changed {
-					scalar(item, renamed)
-				}
-			}
-		}
-		routeSets := func(tun *yaml.Node, field func(*yaml.Node, string) *yaml.Node, refers func(*yaml.Node, string) bool) {
-			for _, name := range []string{"route-address-set", "route-exclude-address-set"} {
-				for _, item := range sequenceItems(field(tun, name)) {
-					if refers(item, oldName) {
-						scalar(item, newName)
-					}
-				}
-			}
-		}
-		routeSets(mappingValue(root, "tun"), mappingValue, yamlRefersTo)
-		for _, listener := range sequenceItems(mappingValue(root, "listeners")) {
-			if kind := mappingValue(listener, "type"); kind != nil && kind.Value == "tun" {
-				routeSets(listener, listenerField, structRefersTo)
-			}
+			return nil
+		}); refused != nil {
+			return nil, refused
 		}
 	case "proxyProvider":
 		providers := mappingValue(root, "proxy-providers")
@@ -494,6 +454,94 @@ func planRenameReferences(root *yaml.Node, kind, oldName, newName string) ([]ren
 		}
 	}
 	return edits, nil
+}
+
+type ruleSetReferenceKind uint8
+
+const (
+	ruleSetInRule ruleSetReferenceKind = iota
+	ruleSetInPayload
+	ruleSetInPolicyKey
+	ruleSetInList
+	ruleSetAsRouteSet
+	ruleSetAsListenerRouteSet
+)
+
+func walkRuleSetReferences(root *yaml.Node, visit func(node, parent *yaml.Node, kind ruleSetReferenceKind, field string) *yamlEditError) *yamlEditError {
+	each := func(list *yaml.Node, parent *yaml.Node, kind ruleSetReferenceKind, field string) *yamlEditError {
+		for _, item := range sequenceItems(list) {
+			if refused := visit(item, parent, kind, field); refused != nil {
+				return refused
+			}
+		}
+		return nil
+	}
+	rules := mappingValue(root, "rules")
+	if refused := each(rules, rules, ruleSetInRule, "rules"); refused != nil {
+		return refused
+	}
+	if subRules := mappingValue(root, "sub-rules"); subRules != nil && subRules.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(subRules.Content); i += 2 {
+			if refused := each(subRules.Content[i+1], subRules.Content[i+1], ruleSetInRule, "sub-rules:"+subRules.Content[i].Value); refused != nil {
+				return refused
+			}
+		}
+	}
+	for _, ruleProvider := range mappingValues(mappingValue(root, "rule-providers")) {
+		if behavior := providerField(ruleProvider, "behavior"); behavior == nil || !strings.EqualFold(behavior.Value, "classical") {
+			continue
+		}
+		payload := providerField(ruleProvider, "payload")
+		if refused := each(payload, payload, ruleSetInPayload, "payload"); refused != nil {
+			return refused
+		}
+	}
+	dns := mappingValue(root, "dns")
+	for _, field := range []string{"nameserver-policy", "proxy-server-nameserver-policy"} {
+		policy := mappingValue(dns, field)
+		if policy == nil || policy.Kind != yaml.MappingNode {
+			continue
+		}
+		for i := 0; i+1 < len(policy.Content); i += 2 {
+			if refused := visit(policy.Content[i], policy, ruleSetInPolicyKey, field); refused != nil {
+				return refused
+			}
+		}
+	}
+	filterKind := ruleSetInList
+	if mode := mappingValue(dns, "fake-ip-filter-mode"); mode != nil && strings.EqualFold(mode.Value, "rule") {
+		filterKind = ruleSetInRule
+	}
+	filter := mappingValue(dns, "fake-ip-filter")
+	if refused := each(filter, filter, filterKind, "fake-ip-filter"); refused != nil {
+		return refused
+	}
+	sniffer := mappingValue(root, "sniffer")
+	for _, field := range []string{"force-domain", "skip-domain", "skip-src-address", "skip-dst-address"} {
+		list := mappingValue(sniffer, field)
+		if refused := each(list, list, ruleSetInList, field); refused != nil {
+			return refused
+		}
+	}
+	tun := mappingValue(root, "tun")
+	for _, field := range []string{"route-address-set", "route-exclude-address-set"} {
+		list := mappingValue(tun, field)
+		if refused := each(list, list, ruleSetAsRouteSet, field); refused != nil {
+			return refused
+		}
+	}
+	for _, listener := range sequenceItems(mappingValue(root, "listeners")) {
+		if kind := mappingValue(listener, "type"); kind == nil || kind.Value != "tun" {
+			continue
+		}
+		for _, field := range []string{"route-address-set", "route-exclude-address-set"} {
+			list := listenerField(listener, field)
+			if refused := each(list, list, ruleSetAsListenerRouteSet, field); refused != nil {
+				return refused
+			}
+		}
+	}
+	return nil
 }
 
 func renameRuleSetInRule(rule, oldName, newName string, needTarget bool) (string, bool) {

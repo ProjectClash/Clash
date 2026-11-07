@@ -7,8 +7,6 @@ import (
 	"syscall"
 	"testing"
 	"time"
-
-	"github.com/metacubex/sing/common/logger"
 )
 
 func TestAFailedUtunIsReportedOnceAndNotWhileClosing(t *testing.T) {
@@ -51,55 +49,6 @@ func (d *failingTun) Read([]byte) (int, error)    { d.reads++; return 0, d.err }
 func (d *failingTun) Write(p []byte) (int, error) { return len(p), nil }
 func (d *failingTun) Close() error                { return nil }
 func (d *failingTun) readFailed(err error) bool   { d.reported = append(d.reported, err); return true }
-
-type upstreamTun struct {
-	err   error
-	reads int
-}
-
-func (d *upstreamTun) Read([]byte) (int, error) {
-	d.reads++
-	if d.reads < 3 {
-		return 0, d.err
-	}
-	return 0, syscall.EPIPE
-}
-func (d *upstreamTun) Write(p []byte) (int, error) { return len(p), nil }
-func (d *upstreamTun) Close() error                { return nil }
-
-func readsUntilReturn(t *testing.T, loop func()) {
-	t.Helper()
-	done := make(chan struct{})
-	go func() { loop(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("the read loop did not return")
-	}
-}
-
-func TestTheStacksStopReadingAFailedDevice(t *testing.T) {
-	for _, stack := range []string{"mips", "system"} {
-		t.Run(stack, func(t *testing.T) {
-			device := &failingTun{err: syscall.EBADF}
-			plain := &upstreamTun{err: syscall.EBADF}
-			switch stack {
-			case "mips":
-				readsUntilReturn(t, (&Mipstack{tun: device, mtu: 1500, logger: logger.NOP()}).readLoop)
-				readsUntilReturn(t, (&Mipstack{tun: plain, mtu: 1500, logger: logger.NOP()}).readLoop)
-			case "system":
-				readsUntilReturn(t, (&System{tun: device, mtu: 1500, logger: logger.NOP()}).tunLoop)
-				readsUntilReturn(t, (&System{tun: plain, mtu: 1500, logger: logger.NOP()}).tunLoop)
-			}
-			if device.reads != 1 || len(device.reported) != 1 || !errors.Is(device.reported[0], syscall.EBADF) {
-				t.Fatalf("failing device: %d reads, reported %v; want 1 read and EBADF reported", device.reads, device.reported)
-			}
-			if plain.reads != 3 {
-				t.Fatalf("a device that does not fail closed was read %d times, want reading on after errors until its close (3)", plain.reads)
-			}
-		})
-	}
-}
 
 func TestTheUtunFailsClosedOnlyOnErrorsThatDoNotPass(t *testing.T) {
 	now := time.Unix(1_000_000, 0)

@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,10 +21,8 @@ import (
 	"github.com/ProjectClash/Clash/component/profile/cachefile"
 	"github.com/ProjectClash/Clash/component/resource"
 	C "github.com/ProjectClash/Clash/constant"
-	"github.com/ProjectClash/Clash/listener/sing_tun"
 	"github.com/ProjectClash/Clash/log"
 	ruleprovider "github.com/ProjectClash/Clash/rules/provider"
-	tun "github.com/metacubex/sing-tun"
 	"github.com/sirupsen/logrus"
 )
 
@@ -68,21 +65,6 @@ var (
 	tracebackOnce sync.Once
 )
 
-const gVisorTCPBufferOverrideFile = "clash-gvisor-tcp-buffer-bytes"
-
-func applyGVisorTCPBufferOverride(basePath string) {
-	data, err := os.ReadFile(filepath.Join(basePath, gVisorTCPBufferOverrideFile))
-	if err != nil {
-		return
-	}
-	n, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || n <= 0 {
-		return
-	}
-	tun.GVisorTCPBufferBytes = n
-	logrus.Warnf("[iOS] gVisor TCP window overridden to %d bytes via %s (benchmark knob)", n, gVisorTCPBufferOverrideFile)
-}
-
 func Setup(options *SetupOptions) error {
 	appParseMu.Lock()
 	defer appParseMu.Unlock()
@@ -119,15 +101,6 @@ func Setup(options *SetupOptions) error {
 			requestedRuntimeProfile.String(),
 		))
 	}
-	if activeCoreCount.Load() > 0 && options.IncludeAllNetworks != includeAllNetworksRequested.Load() {
-		return bridgeSafeError(fmt.Errorf(
-			"clash: changing IncludeAllNetworks from %v to %v requires restart",
-			includeAllNetworksRequested.Load(),
-			options.IncludeAllNetworks,
-		))
-	}
-	includeAllNetworksRequested.Store(options.IncludeAllNetworks)
-	sing_tun.IncludeAllNetworks = options.IncludeAllNetworks
 	systemDNSSubstitutes.Store(&systemResolvers)
 	dns.SetSystemResolverDefaults(systemResolvers)
 	startupPhase("setup:entered")
@@ -138,7 +111,6 @@ func Setup(options *SetupOptions) error {
 	ca.SetStore(requestedCertificateStore)
 
 	startupPhase("setup:cert-store")
-	applyGVisorTCPBufferOverride(options.BasePath)
 	resource.DeferRemoteInitialFetch = true
 	resource.DefaultRemoteSizeLimit = int64(maximumProviderResourceBytes)
 	if err := resource.SetAtomicCacheDirectory(filepath.Join(options.WorkingPath, "tv-rule-cache")); err != nil {
@@ -293,7 +265,7 @@ func placePersistentCache(options *SetupOptions) error {
 		return fmt.Errorf("clash: persistent cache at %s: %w", target, err)
 	}
 	moveLegacyPersistentCache(filepath.Join(options.WorkingPath, "cache.db"), target)
-	ruleprovider.ClashSetMrsMappedCacheDirectory(filepath.Join(options.PersistentCacheDirectory, mrsMappedCacheDirectoryName), coreImageIdentity())
+	ruleprovider.ClashSetMrsMappedCacheDirectory(filepath.Join(options.PersistentCacheDirectory, mrsMappedCacheDirectoryName), ruleprovider.ClashMrsMappedFormat)
 	return nil
 }
 
@@ -415,6 +387,7 @@ type platformLogWriter struct {
 	queuedBytes     atomic.Int64
 	startingUp      atomic.Bool
 	platformStalled atomic.Bool
+	handOverBy      atomic.Pointer[time.Time]
 }
 
 func (w *platformLogWriter) Write(p []byte) (int, error) {
@@ -478,34 +451,22 @@ func (w *platformLogWriter) drain() {
 	for {
 		select {
 		case line := <-w.ch:
-			w.queuedBytes.Add(-int64(len(line.message)))
-			if sink := logBatchWriter.Load(); sink != nil {
-				batch = append(batch[:0], line)
-				size := len(line.message)
-			collect:
-				for len(batch) < logBatchMax && size < logBatchBytes {
-					select {
-					case next := <-w.ch:
-						w.queuedBytes.Add(-int64(len(next.message)))
-						batch = append(batch, next)
-						size += len(next.message)
-					default:
-						break collect
-					}
-				}
-				writeLogBatch(*sink, batch)
-				for _, sent := range batch {
-					if sent.delivered != nil {
-						close(sent.delivered)
-					}
-				}
-				continue
-			}
-			w.platform.WriteLog(line.message)
-			if line.delivered != nil {
-				close(line.delivered)
-			}
+			batch = w.deliver(line, batch)
 		case <-w.done:
+			if by := w.handOverBy.Load(); by != nil {
+			rest:
+				for time.Now().Before(*by) {
+					select {
+					case line := <-w.ch:
+						batch = w.deliver(line, batch)
+					default:
+						break rest
+					}
+				}
+			}
+			if left := len(w.ch); left > 0 {
+				w.dropped.Add(int64(left))
+			}
 			if dropped := w.dropped.Load(); dropped > 0 {
 				recentLogs.add(fmt.Sprintf("[clash] dropped %d log lines due to platform backpressure", dropped))
 			}
@@ -514,8 +475,51 @@ func (w *platformLogWriter) drain() {
 	}
 }
 
+func (w *platformLogWriter) deliver(line logLine, batch []logLine) []logLine {
+	w.queuedBytes.Add(-int64(len(line.message)))
+	if sink := logBatchWriter.Load(); sink != nil {
+		batch = append(batch[:0], line)
+		size := len(line.message)
+	collect:
+		for len(batch) < logBatchMax && size < logBatchBytes {
+			select {
+			case next := <-w.ch:
+				w.queuedBytes.Add(-int64(len(next.message)))
+				batch = append(batch, next)
+				size += len(next.message)
+			default:
+				break collect
+			}
+		}
+		writeLogBatch(*sink, batch)
+		for _, sent := range batch {
+			if sent.delivered != nil {
+				close(sent.delivered)
+			}
+		}
+		return batch
+	}
+	w.platform.WriteLog(line.message)
+	if line.delivered != nil {
+		close(line.delivered)
+	}
+	return batch
+}
+
 func (w *platformLogWriter) Close() {
 	w.close.Do(func() { close(w.done) })
+}
+
+func (w *platformLogWriter) closeHandingOver() {
+	deadline := time.Now().Add(startupDeliveryBudget)
+	w.handOverBy.Store(&deadline)
+	w.Close()
+	wait := time.NewTimer(time.Until(deadline))
+	defer wait.Stop()
+	select {
+	case <-w.stopped:
+	case <-wait.C:
+	}
 }
 
 var (
@@ -629,7 +633,7 @@ func stopLogRedirect(w *platformLogWriter) {
 		logrus.SetOutput(io.Discard)
 	}
 	logRedirectMu.Unlock()
-	w.Close()
+	w.closeHandingOver()
 }
 
 func (w *platformLogWriter) markTunnelEstablished() {

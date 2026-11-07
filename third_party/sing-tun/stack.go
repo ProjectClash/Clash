@@ -1,15 +1,11 @@
 package tun
 
 import (
-	"context"
 	"encoding/binary"
 	"net"
 	"net/netip"
-	"time"
 
-	"github.com/metacubex/sing/common/control"
 	E "github.com/metacubex/sing/common/exceptions"
-	"github.com/metacubex/sing/common/logger"
 )
 
 var (
@@ -20,46 +16,6 @@ var (
 type Stack interface {
 	Start() error
 	Close() error
-}
-
-type StackOptions struct {
-	Context                context.Context
-	Tun                    Tun
-	TunOptions             Options
-	EndpointIndependentNat bool
-	UDPTimeout             time.Duration
-	ICMPTimeout            time.Duration
-	Handler                Handler
-	Logger                 logger.Logger
-	ForwarderBindInterface bool
-	IncludeAllNetworks     bool
-	InterfaceFinder        control.InterfaceFinder
-	TCPCongestionControl   string
-	EnforceBindInterface   bool
-}
-
-func NewStack(
-	stack string,
-	options StackOptions,
-) (Stack, error) {
-	switch stack {
-	case "", "mips":
-		return NewMipstack(options)
-	case "gvisor":
-		return NewGVisor(options)
-	case "mixed":
-		if options.IncludeAllNetworks {
-			return nil, ErrIncludeAllNetworks
-		}
-		return NewMixed(options)
-	case "system":
-		if options.IncludeAllNetworks {
-			return nil, ErrIncludeAllNetworks
-		}
-		return NewSystem(options)
-	default:
-		return nil, E.New("unknown stack: ", stack)
-	}
 }
 
 func HasNextAddress(prefix netip.Prefix, count int) bool {

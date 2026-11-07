@@ -193,6 +193,38 @@ func TestALibrarysProxiesAreWrittenAsTheWholeTable(t *testing.T) {
 	}
 }
 
+func TestInlinePlacesThatDoNotFitPutTheInlineProxiesFirst(t *testing.T) {
+	proxies := libraryTestProxies(30)
+	path, sum := writeLibrary(t, t.TempDir(), proxies)
+	inlineNode := "proxies:\n  - {name: \"M inline\", type: ss, server: m.example.net, port: 8388, cipher: aes-128-gcm, password: p}\n"
+	for _, tc := range []struct {
+		name, places, proxies string
+		first                 string
+	}{
+		{"a place left for a proxy taken out", "[3]", "", "SS 0"},
+		{"two places for one proxy", "[3, 9]", inlineNode, "M inline"},
+		{"a place past the end", "[99999]", inlineNode, "M inline"},
+		{"places out of order", "[5, 2]", inlineNode + "  - {name: \"N inline\", type: ss, server: n.example.net, port: 8388, cipher: aes-128-gcm, password: p}\n", "M inline"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			text := fmt.Sprintf("x-clash-node-library: {path: %q, sha256: %s, inline-at: %s}\n", path, sum, tc.places) + tc.proxies + libraryTestGroups
+			cfg, err := Parse([]byte(text))
+			if err != nil {
+				t.Fatalf("a configuration whose inline places do not fit was refused: %v", err)
+			}
+			global, _ := json.Marshal(cfg.Proxies["GLOBAL"])
+			var g struct{ All []string }
+			_ = json.Unmarshal(global, &g)
+			if len(g.All) < 3 || g.All[2] != tc.first {
+				t.Fatalf("GLOBAL is %v, want %q after DIRECT and REJECT", g.All, tc.first)
+			}
+			if got := len(everyProxy(cfg)); got < len(proxies) {
+				t.Fatalf("%d proxies parsed, the library holds %d", got, len(proxies))
+			}
+		})
+	}
+}
+
 func dialerTestProxies(t *testing.T, chains map[string]string) map[string]C.Proxy {
 	t.Helper()
 	proxies := make(map[string]C.Proxy, len(chains))

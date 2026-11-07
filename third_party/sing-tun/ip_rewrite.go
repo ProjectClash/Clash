@@ -48,11 +48,14 @@ func LoopbackAddresses(inet4, inet6 []netip.Addr) []netip.Addr {
 }
 
 func ipRewriteActionFor(destination netip.Addr, loopback []netip.Addr) IPRewriteAction {
+	return ipRewriteActionIn(ipRewriteTable.Load(), destination, loopback)
+}
+
+func ipRewriteActionIn(table *[]IPRewriteRule, destination netip.Addr, loopback []netip.Addr) IPRewriteAction {
 	destination = destination.Unmap()
 	if slices.Contains(loopback, destination) {
 		return IPRewriteReflect
 	}
-	table := ipRewriteTable.Load()
 	if table == nil {
 		return 0
 	}
@@ -66,6 +69,84 @@ func ipRewriteActionFor(destination netip.Addr, loopback []netip.Addr) IPRewrite
 
 func ipRewriteIdle(loopback []netip.Addr) bool {
 	return len(loopback) == 0 && ipRewriteTable.Load() == nil
+}
+
+type IPRewriter struct {
+	loopback []netip.Addr
+	gate     atomic.Pointer[ipRewriteGate]
+}
+
+type ipRewriteGate struct {
+	table  *[]IPRewriteRule
+	v4, v6 ipRewriteByteSet
+}
+
+func NewIPRewriter(loopback []netip.Addr) *IPRewriter {
+	return &IPRewriter{loopback: loopback}
+}
+
+func (r *IPRewriter) Apply(packet []byte) (handled, writeBack bool, reply []byte) {
+	table := ipRewriteTable.Load()
+	if table == nil && len(r.loopback) == 0 {
+		return false, false, nil
+	}
+	gate := r.gate.Load()
+	if gate == nil || gate.table != table {
+		gate = newIPRewriteGate(table, r.loopback)
+		r.gate.Store(gate)
+	}
+	destination, ok := packetDestination(packet)
+	if !ok {
+		return false, false, nil
+	}
+	if destination.Is4() && !gate.v4.has(packet[16]) || destination.Is6() && !gate.v6.has(packet[24]) {
+		return false, false, nil
+	}
+	return applyIPRewriteAction(packet, ipRewriteActionIn(table, destination, r.loopback))
+}
+
+func newIPRewriteGate(table *[]IPRewriteRule, loopback []netip.Addr) *ipRewriteGate {
+	gate := &ipRewriteGate{table: table}
+	add := func(prefix netip.Prefix) {
+		address := prefix.Addr()
+		switch {
+		case address.Is4():
+			gate.v4.addPrefix(address.As4()[0], prefix.Bits())
+			gate.v6.addPrefix(0, 8)
+		case address.Is6() && !address.Is4In6():
+			gate.v6.addPrefix(address.As16()[0], prefix.Bits())
+		}
+	}
+	for _, address := range loopback {
+		add(netip.PrefixFrom(address, address.BitLen()))
+	}
+	if table != nil {
+		for _, rule := range *table {
+			add(rule.Prefix)
+		}
+	}
+	return gate
+}
+
+type ipRewriteByteSet [4]uint64
+
+func (set *ipRewriteByteSet) has(b byte) bool {
+	return set[b>>6]&(1<<(b&63)) != 0
+}
+
+func (set *ipRewriteByteSet) addPrefix(first byte, bits int) {
+	low, high := int(first), int(first)
+	if bits < 0 {
+		bits = 0
+	}
+	if bits < 8 {
+		mask := 0xff << (8 - bits) & 0xff
+		low = int(first) & mask
+		high = low | (^mask & 0xff)
+	}
+	for b := low; b <= high; b++ {
+		set[b>>6] |= 1 << (b & 63)
+	}
 }
 
 func applyIPRewrite(packet []byte, loopback []netip.Addr) (handled, writeBack bool, reply []byte) {

@@ -19,7 +19,7 @@ func TestEveryProfilesDecisionsFollowTheirRules(t *testing.T) {
 		policy := runtimePolicyFor(profile, true)
 		fields := catalogFieldsByPath(t, name)
 		for _, rule := range deviationRules {
-			if rule.ruleScan {
+			if !rule.decidesKey() {
 				continue
 			}
 			field, ok := fields[rule.field]
@@ -27,11 +27,11 @@ func TestEveryProfilesDecisionsFollowTheirRules(t *testing.T) {
 				t.Errorf("%s: %s is not in the catalog", name, rule.field)
 				continue
 			}
-			decided := (rule.applies == nil || rule.applies(policy)) && rule.honouredBy == ""
+			decided := (rule.applies == nil || rule.applies(policy)) && rule.honouredBy == "" && !rule.replacesSomeValues()
 			if (field.PlatformDecision != nil) != decided {
 				t.Errorf("%s %s: decision %+v, want one %v", name, rule.field, field.PlatformDecision, decided)
 			}
-			if flagged := !rule.defaultOnly && rule.honouredBy == ""; field.PlatformDecided != flagged {
+			if flagged := !rule.defaultOnly && rule.honouredBy == "" && !rule.replacesSomeValues(); field.PlatformDecided != flagged {
 				t.Errorf("%s %s: platformDecided %v, want %v", name, rule.field, field.PlatformDecided, flagged)
 			}
 		}

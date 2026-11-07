@@ -347,6 +347,7 @@ func TestRuntimeDiagnosticsCarryTheLiveTunStack(t *testing.T) {
 	previous := coreListener.LastTunConf
 	t.Cleanup(func() { coreListener.LastTunConf = previous })
 	for stack, literal := range map[C.TUNStack]string{
+		C.TunGo:     "Go",
 		C.TunGvisor: "gVisor",
 		C.TunSystem: "System",
 		C.TunMixed:  "Mixed",

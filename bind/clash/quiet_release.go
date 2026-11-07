@@ -5,7 +5,6 @@ import (
 	"runtime/metrics"
 	"time"
 
-	"github.com/ProjectClash/Clash/listener"
 	"github.com/ProjectClash/Clash/tunnel/statistic"
 )
 
@@ -18,16 +17,13 @@ type quietRelease struct {
 	total      int64
 	quietSince time.Time
 	released   bool
-	idleGiven  bool
 	traffic    func() int64
 	free       func() uint64
-	idle       func() int
 	release    func()
 }
 
 func newQuietRelease(now time.Time) *quietRelease {
-	q := &quietRelease{quietSince: now, traffic: coreTrafficTotal, free: heapFreeBytes, idle: listener.ReleaseTunIdleBacking,
-		release: debug.FreeOSMemory}
+	q := &quietRelease{quietSince: now, traffic: coreTrafficTotal, free: heapFreeBytes, release: debug.FreeOSMemory}
 	q.total = q.traffic()
 	return q
 }
@@ -50,18 +46,13 @@ func heapFreeBytes() uint64 {
 
 func (q *quietRelease) observe(now time.Time) bool {
 	if total := q.traffic(); total != q.total {
-		q.total, q.quietSince, q.released, q.idleGiven = total, now, false, false
+		q.total, q.quietSince, q.released = total, now, false
 		return false
 	}
 	if q.released || now.Sub(q.quietSince) < quietReleasePeriod {
 		return false
 	}
-	var given uint64
-	if !q.idleGiven {
-		q.idleGiven = true
-		given = uint64(q.idle())
-	}
-	if q.free()+given < quietReleaseFreeBytes {
+	if q.free() < quietReleaseFreeBytes {
 		return false
 	}
 	q.release()

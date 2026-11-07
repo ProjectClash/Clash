@@ -140,7 +140,7 @@ func New(options Options) (Tun, error) {
 		}
 	} else {
 		tunFd = options.FileDescriptor
-		err := configure(tunFd, options.EXP_RecvMsgX, int(options.MTU))
+		err := configureHandedOver(tunFd, options)
 		if err != nil {
 			return nil, err
 		}

@@ -75,10 +75,14 @@ func TestAnUnwrittenForcedFieldWithAMovedDefaultIsStillReported(t *testing.T) {
 
 func TestEveryForcedRuleNamesItsValueOrIsExempt(t *testing.T) {
 	exempt := map[string]string{
-		"tun.mtu": "chosen at startup, not a constant",
-		"proxies": "a list scan; the placeholder stands in for a whole node, not a scalar the reader could have written",
+		"tun.mtu":      "chosen at startup, not a constant",
+		"tun.recvmsgx": "chosen at startup by the descriptor the platform hands over",
+		"proxies":      "a list scan; the placeholder stands in for a whole node, not a scalar the reader could have written",
 		"proxies[vless].xhttp-opts.reuse-settings": "an object of five ranges, not a scalar; the scan reports only nodes that write none",
 		"tun.dns-mode": "forced to empty, which is also the unwritten value: a file that writes the key wrote something else",
+	}
+	for _, nodeType := range ipStackNodeTypes {
+		exempt["proxies["+nodeType+"].ip-stack.mode"] = "go runs, and go is not a mode the core accepts: every written mode is replaced"
 	}
 	for _, rule := range deviationRules {
 		if rule.category != deviationForced {

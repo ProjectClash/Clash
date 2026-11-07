@@ -28,6 +28,11 @@ func TestNoNewLogPrefixArrivesUnnoticed(t *testing.T) {
 			"level. A failure inside one of them gets its own Warnln -- see geosite_cache.go " +
 			"and geoip_cache.go -- because a category that will not compile is a statement " +
 			"about the user's rules, not about this process"},
+		"TUN|Warnln": {"Warnln", "developer-facing: the go stack's own conduct on a device -- a " +
+			"datagram dropped because its reader's buffer could not hold it whole (said once). The " +
+			"[TUN] tag is the listener's, as on its \"the go stack could not start\" line. NOT " +
+			"selected by the app: it leaves the reader nothing to do, and it is what a device check " +
+			"reads to explain a lost query"},
 		"mDNS|Infoln": {"Infoln", "developer-facing: one line per multicast-DNS query with its " +
 			"answer count and elapsed time. Instrumentation, not a notice -- a Bonjour " +
 			"name resolving is not something to tell a user about. It exists because the path " +

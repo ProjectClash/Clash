@@ -16,6 +16,7 @@
 | `github.com/metacubex/gvisor` | Apache-2.0 / BSD | userspace TCP/IP stack (gVisor fork) |
 | `github.com/metacubex/quic-go` | MIT | QUIC |
 | `github.com/sagernet/sing-snell`, `github.com/sagernet/sing` | GPLv3 | Snell v6 nodes and listeners; linked by the Apple binding only |
+| `github.com/sagernet/sing-tun` (vendored as `third_party/sing-tun-go`, trimmed to Apple) | GPLv3 | the go stack, sing-box 1.15's TCP/IP stack; linked by the Apple binding only |
 
 ## Protocol / crypto / util (representative)
 

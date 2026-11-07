@@ -190,3 +190,34 @@ func TestAClassicalSetPastTheHeapLimitLoadsNoRules(t *testing.T) {
 		}
 	}
 }
+
+func TestAStagedStubIsRecognizedInEitherSpelling(t *testing.T) {
+	var sum [32]byte
+	for i := range sum {
+		sum[i] = byte(i)
+	}
+	domain := RP.ClashMappedSetStub(RP.ClashDomainSetStubType, "set.domainset", sum, 110177)
+	ipcidr := RP.ClashMappedSetStub(RP.ClashIPCidrSetStubType, "set.ipset", sum, 10012)
+	indexText := RP.ClashClassicalIndexStub("set.index", 0xdeadbeef, "set.text", P.TextRule)
+	indexYaml := RP.ClashClassicalIndexStub("set.index", 0xdeadbeef, "set.yaml", P.YamlRule)
+
+	for _, c := range []struct {
+		name    string
+		payload string
+		stubbed bool
+	}{
+		{"a domain set's stub", domain + "\n", true},
+		{"an IP set's stub", ipcidr + "\n", true},
+		{"a classical index's stub, the line alone", indexText + "\n", true},
+		{"a classical index's stub in a payload list", "payload:\n  - '" + indexYaml + "'\n", true},
+		{"a payload list written with double quotes", "payload:\n  - \"" + indexYaml + "\"\n", true},
+		{"a text set of its own", "+.a.example\n+.b.example\n", false},
+		{"a yaml set of its own", "payload:\n  - DOMAIN-SUFFIX,a.example\n", false},
+		{"a payload list that opens empty", "payload:\n", false},
+		{"nothing at all", "", false},
+	} {
+		if got := RP.ClashStubbedPayload([]byte(c.payload)); got != c.stubbed {
+			t.Errorf("%s: stubbed=%v, want %v", c.name, got, c.stubbed)
+		}
+	}
+}

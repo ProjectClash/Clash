@@ -58,6 +58,7 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 		if err != nil {
 			break
 		}
+		httpOption.ClashConnectSniffedHost = outbound.ClashConnectsSniffedHost(mapping)
 		proxy, err = outbound.NewHttp(*httpOption)
 	case "vmess":
 		vmessOption := &outbound.VmessOption{BasicOption: basicOption}

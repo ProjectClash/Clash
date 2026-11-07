@@ -1,13 +1,16 @@
 package clash
 
 import (
+	"cmp"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -15,6 +18,7 @@ import (
 	"github.com/ProjectClash/Clash/config"
 	C "github.com/ProjectClash/Clash/constant"
 	"github.com/ProjectClash/Clash/log"
+	"go.yaml.in/yaml/v3"
 )
 
 const providerCacheServedField = "x-clash-cache-served"
@@ -68,7 +72,204 @@ func seedIsPayload(path, sha string) bool {
 }
 
 type providerRefreshPlan struct {
-	targets []*providerRefreshTarget
+	targets    []*providerRefreshTarget
+	stopgaps   []*startStopgap
+	stopgapsOf map[string]*startStopgap
+	raw        *config.RawConfig
+	ranks      map[string]int
+	budget     startBudget
+}
+
+type startStopgap struct {
+	targets  []*providerRefreshTarget
+	products []*providerCacheProduct
+	unloaded []string
+	bytes    int64
+	running  bool
+}
+
+type startBudget struct {
+	limited bool
+	left    int64
+}
+
+const (
+	startStopgapReserve    = 16 << 20
+	startStopgapCostFactor = 3
+)
+
+func readStartBudget() startBudget {
+	available, zeroIsExhausted := readBuildMemory()
+	switch {
+	case available == 0 && zeroIsExhausted:
+		return startBudget{limited: true}
+	case available <= 0:
+		return startBudget{}
+	}
+	return startBudget{limited: true, left: max(available-startStopgapReserve, 0)}
+}
+
+func (plan *providerRefreshPlan) offerStopgap(target *providerRefreshTarget, product *providerCacheProduct, unloadedDirectory func() string) bool {
+	if target.kind != "rule" || !product.Stopgap || !plan.budget.limited {
+		return false
+	}
+	directory := providerCache.productDirectory(target.requestKey, target.productKey, product.Generation)
+	info, err := os.Stat(filepath.Join(directory, product.Entry))
+	if err != nil {
+		return false
+	}
+	if plan.stopgapsOf == nil {
+		plan.stopgapsOf = map[string]*startStopgap{}
+	}
+	group := plan.stopgapsOf[target.requestKey]
+	if group == nil {
+		group = &startStopgap{}
+		plan.stopgaps = append(plan.stopgaps, group)
+		plan.stopgapsOf[target.requestKey] = group
+	}
+	group.targets = append(group.targets, target)
+	group.products = append(group.products, product)
+	group.unloaded = append(group.unloaded, unloadedDirectory())
+	group.bytes += info.Size()
+	if live, ok := liveFileProvider(target.kind, target.name); ok && live.Count() > 0 {
+		group.running = true
+	}
+	return true
+}
+
+func (plan *providerRefreshPlan) decideStartStopgaps() {
+	if len(plan.stopgaps) == 0 {
+		return
+	}
+	if plan.ranks == nil {
+		plan.ranks = startRanks(plan.raw)
+	}
+	ranks := plan.ranks
+	rankOf := func(group *startStopgap) int {
+		rank := math.MaxInt
+		for _, target := range group.targets {
+			if r, named := ranks[target.name]; named && r < rank {
+				rank = r
+			}
+		}
+		return rank
+	}
+	order := slices.Clone(plan.stopgaps)
+	slices.SortStableFunc(order, func(a, b *startStopgap) int {
+		if a.running != b.running {
+			if a.running {
+				return -1
+			}
+			return 1
+		}
+		return cmp.Compare(rankOf(a), rankOf(b))
+	})
+	for _, group := range order {
+		cost := group.bytes * startStopgapCostFactor
+		if group.running || cost <= plan.budget.left {
+			plan.budget.left = max(plan.budget.left-cost, 0)
+			for i, target := range group.targets {
+				serveCachedProduct(target, group.products[i])
+			}
+			continue
+		}
+		for i, target := range group.targets {
+			log.Infoln("[Provider] %s: started empty, past what a start reads of small sets beside the rest; it loads as memory allows", target.name)
+			startUnloaded(target, group.unloaded[i])
+			target.definition[providerCacheServedField] = true
+		}
+	}
+	plan.stopgaps, plan.stopgapsOf = nil, nil
+}
+
+func startRanks(raw *config.RawConfig) map[string]int {
+	ranks := map[string]int{}
+	if raw == nil {
+		return ranks
+	}
+	sections := map[string]any{
+		"rules": raw.Rule, "sub-rules": raw.SubRules, "rule-providers": raw.RuleProvider, "listeners": raw.Listeners,
+		"dns": map[string]any{
+			"nameserver-policy": raw.DNS.NameServerPolicy, "proxy-server-nameserver-policy": raw.DNS.ProxyServerNameserverPolicy,
+			"fake-ip-filter": raw.DNS.FakeIPFilter, "fake-ip-filter-mode": raw.DNS.FakeIPFilterMode.String(),
+		},
+		"sniffer": map[string]any{
+			"force-domain": raw.Sniffer.ForceDomain, "skip-domain": raw.Sniffer.SkipDomain,
+			"skip-src-address": raw.Sniffer.SkipSrcAddress, "skip-dst-address": raw.Sniffer.SkipDstAddress,
+		},
+		"tun": map[string]any{"route-address-set": raw.Tun.RouteAddressSet, "route-exclude-address-set": raw.Tun.RouteExcludeAddressSet},
+	}
+	encoded, err := yaml.Marshal(sections)
+	if err != nil {
+		return ranks
+	}
+	var document yaml.Node
+	if yaml.Unmarshal(encoded, &document) != nil || len(document.Content) == 0 {
+		return ranks
+	}
+	root := document.Content[0]
+	rules := sequenceItems(mappingValue(root, "rules"))
+	ruleIndex := map[*yaml.Node]int{}
+	subRuleRank := map[string]int{}
+	for index, item := range rules {
+		ruleIndex[item] = index
+		fields := strings.Split(item.Value, ",")
+		if len(fields) >= 3 && strings.EqualFold(strings.TrimSpace(fields[0]), "SUB-RULE") {
+			if name := strings.TrimSpace(fields[len(fields)-1]); name != "" {
+				if _, seen := subRuleRank[name]; !seen {
+					subRuleRank[name] = index
+				}
+			}
+		}
+	}
+	after := len(rules)
+	use := func(name string, rank int) {
+		if name = strings.TrimSpace(name); name == "" {
+			return
+		}
+		if current, seen := ranks[name]; !seen || rank < current {
+			ranks[name] = rank
+		}
+	}
+	_ = walkRuleSetReferences(root, func(node, _ *yaml.Node, kind ruleSetReferenceKind, field string) *yamlEditError {
+		var rank int
+		switch {
+		case field == "rules":
+			rank = ruleIndex[node]
+		case strings.HasPrefix(field, "sub-rules:"):
+			named := false
+			if rank, named = subRuleRank[strings.TrimPrefix(field, "sub-rules:")]; !named {
+				rank = after
+			}
+		case kind == ruleSetInPayload:
+			rank = after + 1
+		case kind == ruleSetAsRouteSet || kind == ruleSetAsListenerRouteSet:
+			rank = -1
+		case field == "nameserver-policy" || field == "proxy-server-nameserver-policy" || field == "fake-ip-filter":
+			rank = -3
+		default:
+			rank = -2
+		}
+		switch kind {
+		case ruleSetInRule, ruleSetInPayload:
+			fields := strings.FieldsFunc(node.Value, func(r rune) bool { return r == ',' || r == '(' || r == ')' })
+			for i := 0; i+1 < len(fields); i++ {
+				if strings.EqualFold(strings.TrimSpace(fields[i]), "RULE-SET") {
+					use(fields[i+1], rank)
+				}
+			}
+		case ruleSetInPolicyKey, ruleSetInList:
+			if value := strings.TrimSpace(node.Value); strings.HasPrefix(strings.ToLower(value), "rule-set:") {
+				for _, name := range strings.Split(value[len("rule-set:"):], ",") {
+					use(name, rank)
+				}
+			}
+		default:
+			use(node.Value, rank)
+		}
+		return nil
+	})
+	return ranks
 }
 
 func providerProductKey(kind, behavior, format, selection string, policy appleRuntimePolicy) string {
@@ -127,7 +328,7 @@ func productFilesExist(directory string, product *providerCacheProduct) bool {
 }
 
 func prepareProviderRefreshForTunnel(raw *config.RawConfig, policy appleRuntimePolicy) *providerRefreshPlan {
-	plan := &providerRefreshPlan{}
+	plan := &providerRefreshPlan{budget: readStartBudget(), raw: raw}
 	seeds := map[*providerRefreshTarget]*providerSeedCandidate{}
 	for _, namespace := range []struct {
 		kind      string
@@ -247,7 +448,15 @@ func prepareProviderRefreshForTunnel(raw *config.RawConfig, policy appleRuntimeP
 				target.pending = &providerCacheImport{groupMember: true}
 				definition[providerCacheServedField] = true
 			case !seedNewer && product != nil:
-				serveCachedProduct(target, product)
+				groupKey := target.requestKey + "\x00" + target.productKey
+				if !plan.offerStopgap(target, product, func() string {
+					if unloaded[groupKey] == "" {
+						unloaded[groupKey] = providerCache.productDirectory(target.requestKey, target.productKey, newProductGeneration())
+					}
+					return unloaded[groupKey]
+				}) {
+					serveCachedProduct(target, product)
+				}
 			case own != nil:
 				target.pending = &providerCacheImport{fromSeed: true, older: true, seedPath: own.path, seedIdentity: own.identity,
 					fetchedAt: own.fetchedAt}
@@ -262,6 +471,7 @@ func prepareProviderRefreshForTunnel(raw *config.RawConfig, policy appleRuntimeP
 			}
 		}
 	}
+	plan.decideStartStopgaps()
 	return plan
 }
 
@@ -283,20 +493,7 @@ func startUnloaded(target *providerRefreshTarget, directory string) {
 }
 
 func formTheAppCompiles(target *providerRefreshTarget) string {
-	if !stagingMapsRuleSets || !target.sideUpdateSafe {
-		return ""
-	}
-	switch {
-	case target.kind == "proxy":
-		return "library"
-	case target.kind != "rule":
-		return ""
-	case mappable(target.sourceBehavior):
-		return "mapped"
-	case strings.EqualFold(strings.TrimSpace(target.sourceBehavior), "classical") && !strings.EqualFold(strings.TrimSpace(target.sourceFormat), "mrs"):
-		return "indexed"
-	}
-	return ""
+	return appCompiledForm(target.kind, target.sourceBehavior, target.sourceFormat, target.sideUpdateSafe)
 }
 
 const unloadedTextName = "source"
@@ -438,7 +635,14 @@ func completeProviderRefreshAfterStaging(plan *providerRefreshPlan, runtime *pro
 				target.pending = &providerCacheImport{waitsForApp: true, seedPath: seed.seedPath, seedIdentity: seed.seedIdentity, fetchedAt: seed.fetchedAt, etag: seed.etag}
 			}
 			if product := runnableCachedProduct(target); product != nil {
-				serveCachedProduct(target, product)
+				if !plan.offerStopgap(target, product, func() string {
+					if group.directory == "" {
+						group.directory = providerCache.productDirectory(target.requestKey, target.productKey, newProductGeneration())
+					}
+					return group.directory
+				}) {
+					serveCachedProduct(target, product)
+				}
 				continue
 			}
 			if group.directory == "" {
@@ -462,6 +666,7 @@ func completeProviderRefreshAfterStaging(plan *providerRefreshPlan, runtime *pro
 		target.productDirectory = group.directory
 		pointAtProduct(target, group.imported.product)
 	}
+	plan.decideStartStopgaps()
 }
 
 const startTextSeedLimit = 1 << 20

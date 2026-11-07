@@ -7,16 +7,10 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
-
-	"github.com/ProjectClash/Clash/constant/features"
 )
 
 func clashTestIPStackModes() []string {
-	modes := []string{ipStackAuto, ipStackMips}
-	if features.WithGVisor {
-		modes = append(modes, ipStackGVisor)
-	}
-	return modes
+	return []string{ipStackAuto, ipStackMips, ipStackGVisor}
 }
 
 func clashStackError(t *testing.T, mode string, prefixes []netip.Prefix, mtu uint32) string {

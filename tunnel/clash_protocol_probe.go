@@ -34,7 +34,7 @@ func tcpProtocolProbe(conn *N.BufferedConn, peek *sync.Mutex, metadata *C.Metada
 		peek.Lock()
 		defer peek.Unlock()
 		if conn.Buffered() == 0 {
-			if sniffingStandsAside(conn, metadata) || serverSpeaksFirst(metadata.DstPort) {
+			if probeStandsAside(conn, metadata) || serverSpeaksFirst(metadata.DstPort) {
 				return ""
 			}
 			_ = conn.SetReadDeadline(time.Now().Add(protocolProbeTimeout))
@@ -108,4 +108,11 @@ func (f *flowMatch) flowProtocol() string {
 		}
 	}
 	return f.protocol
+}
+
+func probeStandsAside(conn any, metadata *C.Metadata) bool {
+	if dispatcher := snifferDispatcher.Load(); sniffingEnable.Load() && dispatcher.Enable() {
+		return snifferStandsAside(conn, metadata, dispatcher)
+	}
+	return sniffingStandsAside(conn, metadata)
 }

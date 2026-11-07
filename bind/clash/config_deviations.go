@@ -49,6 +49,7 @@ type deviationRule struct {
 	withheld               bool
 	ruleScan               bool
 	ruleKind               string
+	nodeKey                bool
 	applies                func(policy appleRuntimePolicy) bool
 	condition              string
 	upstreamDefault        string
@@ -56,6 +57,7 @@ type deviationRule struct {
 	defaultOnly            bool
 	writtenDefaults        []string
 	forcedValue            string
+	caseInsensitive        bool
 	forcedFrom             []string
 	unwrittenUnconditional bool
 	// mechanism is the developer's half of the reason: the file, function, API type, kernel
@@ -72,38 +74,24 @@ const (
 	tunPacketTunnelShape = "on Apple the tunnel is the only shape this extension can take, so there is no setting that turns it off"
 	tunRoutingIsApples   = "on Apple the routes are installed by the app, not by the core, so the core-side routing switches have nothing to act on"
 	tunOffloadBridge     = "on Apple the tunnel has no network driver to negotiate offload with, so offload cannot be turned on"
-	tunBatchIOBridge     = "on Apple the tunnel does not expose the batched read/write path these fields select, so the ordinary path is used instead; nothing is lost but the batching"
 	tunAutoRouteFilter   = "this filters traffic with Linux routing rules; the core accepts it on Apple and does nothing with it, exactly as it does on any non-Linux platform"
 
 	tunPacketTunnelShapeMechanism = "a packet tunnel provider is a tun by construction: there is no no-tun shape for the extension to take"
 	tunRoutingIsApplesMechanism   = "routes belong to NEPacketTunnelNetworkSettings and are installed by the extension's Swift side; the core does not own a host routing table here"
 	tunOffloadBridgeMechanism     = "the data plane is NEPacketTunnelFlow bridged through a SOCK_DGRAM descriptor rather than a utun fd; segmentation offload is negotiated with a tun driver, and the bridge descriptor has no such driver to negotiate with"
-	tunBatchIOBridgeMechanism     = "the data plane is NEPacketTunnelFlow bridged through a SOCK_DGRAM descriptor rather than a utun fd, so the batched utun-fd read/write path these fields select uses ordinary readv/writev instead (this is about the fd, not about socket options -- IP_BOUND_IF is a socket option and works fine over the bridge)"
 	tunAutoRouteFilterMechanism   = "read only by sing-tun's Linux ip-rule and nftables/iptables code (tun_linux.go, redirect_*.go); upstream's listener hands it to sing-tun on every platform and the Darwin tun never reads it, so it reaches the core as written"
-
-	tunIncludeAllNetworks = "a file that names no stack keeps gvisor, the stack this tunnel has been measured on -- " +
-		"upstream now defaults to mips, which has not yet been measured here; and with Include All " +
-		"Networks on, the system and mixed stacks send nothing, so only gvisor carries the tunnel's traffic"
-	tunIncludeAllNetworksMechanism = "an unwritten tun.stack is set to gvisor before the parse (bind/clash/config_pipeline.go " +
-		"applyAppleDefaults; upstream config/config.go DefaultRawConfig has TunMips since v1.19.32). " +
-		"Include All Networks makes the kernel drop, at ip_output, every packet that does not leave " +
-		"through the tunnel; the system and mixed stacks re-inject the tunnel's TCP through the kernel " +
-		"and lose it there, which is why sing-tun refuses both under includeAllNetworks (third_party/sing-tun/stack.go)"
 )
 
 func underNetworkExtension(policy appleRuntimePolicy) bool { return policy.networkExtension }
 
 const (
-	deviationConditionIncludeAllNetworks = "includeAllNetworks"
-	deviationConditionLANSharingOff      = "lanSharingOff"
+	deviationConditionLANSharingOff = "lanSharingOff"
 )
 
 func deviationConditionHolds(condition string) bool {
 	switch condition {
 	case "":
 		return true
-	case deviationConditionIncludeAllNetworks:
-		return includeAllNetworksActive()
 	case deviationConditionLANSharingOff:
 		return allowLanForcedOff.Load()
 	}
@@ -113,6 +101,22 @@ func deviationConditionHolds(condition string) bool {
 func (r *deviationRule) active(policy appleRuntimePolicy) bool {
 	return (r.applies == nil || r.applies(policy)) && deviationConditionHolds(r.condition)
 }
+
+func (r *deviationRule) replacesSomeValues() bool {
+	return r.category == deviationForced && len(r.forcedFrom) > 0 && r.condition == "" && !r.defaultOnly &&
+		!r.unwrittenUnconditional && r.honouredBy == ""
+}
+
+func (r *deviationRule) runsAsWritten(given string) bool {
+	if r.forcedValue != "" && (given == r.forcedValue || r.caseInsensitive && strings.EqualFold(given, r.forcedValue)) {
+		return true
+	}
+	return len(r.forcedFrom) > 0 && !slices.ContainsFunc(r.forcedFrom, func(value string) bool {
+		return strings.EqualFold(value, strings.TrimSpace(given))
+	})
+}
+
+func (r *deviationRule) decidesKey() bool { return !r.ruleScan || r.nodeKey }
 
 func (r *deviationRule) activeFor(policy appleRuntimePolicy, written bool) bool {
 	if r.unwrittenUnconditional && !written {
@@ -221,6 +225,8 @@ var deviationRules = []deviationRule{
 	},
 	easyTierPlaceholderRule,
 	xhttpTunnelReuseRule,
+	ipStackModeRule("masque"), ipStackModeRule("openvpn"), ipStackModeRule("wireguard"), ipStackModeRule("zerotier"),
+	ipStackCongestionRule("masque"), ipStackCongestionRule("openvpn"), ipStackCongestionRule("wireguard"), ipStackCongestionRule("zerotier"),
 	{
 		field:     "tun.route-address-set",
 		category:  deviationUnavailable,
@@ -354,20 +360,36 @@ var deviationRules = []deviationRule{
 	{
 		field:     "tun.stack",
 		category:  deviationForced,
-		effective: "gvisor: a file that names no stack runs gvisor; system and mixed also run as gvisor while Include All Networks is on; a written gvisor or mips runs as written",
-		reason:    tunIncludeAllNetworks,
-		source: "bind/clash/config_pipeline.go applyAppleDefaults; bind/clash/override.go overrideTunForIOS; " +
-			"third_party/sing-tun/stack.go ErrIncludeAllNetworks; NETunnelProviderProtocol.includeAllNetworks; " +
+		effective: "go: every file runs the go stack, whatever stack it names",
+		reason: "the go stack is the only stack this core carries the tunnel on: it moves the most traffic " +
+			"on the tunnel's own network interface",
+		source: "listener/sing_tun startGoStack; bind/clash/go_stack_darwin.go; " +
+			"third_party/sing-tun-go (SagerNet/sing-tun, the stack of sing-box 1.15); " +
 			"upstream config/config.go DefaultRawConfig has TunMips",
-		recoverable:            true,
-		alternative:            "write tun.stack (mips is kept as written); for system or mixed, turn Include All Networks off in the tunnel settings",
-		applies:                underPacketTunnel,
-		condition:              deviationConditionIncludeAllNetworks,
-		upstreamDefault:        "mips",
-		forcedValue:            "gvisor",
-		forcedFrom:             []string{"system", "mixed"},
-		unwrittenUnconditional: true,
-		mechanism:              tunIncludeAllNetworksMechanism,
+		recoverable:     false,
+		applies:         underPacketTunnel,
+		upstreamDefault: "mips",
+		forcedValue:     "go",
+		caseInsensitive: true,
+		mechanism: "listener/sing_tun startGoStack reads tun.stack and runs the go stack, which " +
+			"sing_tun.SetGoStackFactory, registered by bind/clash/go_stack_darwin.go, builds: on a duplicate of the " +
+			"extension's own utun, which ExtensionProvider.systemTunnelDescriptor finds on iOS, macOS and tvOS " +
+			", or, where an extension finds no utun and falls back to the NEPacketTunnelFlow bridge, on an " +
+			"in-memory device the bridge's socketpair feeds (goStackBridge). A go stack that cannot start fails the tun",
+	},
+	{
+		field:           "tun.congestion-controller",
+		category:        deviationForced,
+		effective:       "bbr: the go stack has no bbr3, and runs its bbr",
+		reason:          "every file runs the go stack, which has bbr, cubic and reno; bbr3 is closest to its bbr",
+		source:          "bind/clash/go_stack_darwin.go goStackCongestion; third_party/sing-tun-go stack_go_tcp_cong.go",
+		recoverable:     false,
+		applies:         underPacketTunnel,
+		forcedValue:     "bbr",
+		forcedFrom:      []string{"bbr3"},
+		caseInsensitive: true,
+		mechanism: "goStackCongestion lowercases and trims the name as upstream's mips stack reads it and turns bbr3 " +
+			"into bbr before gotun.NewGo, which knows reno, cubic and bbr",
 	},
 	{
 		field:       "tun.enable",
@@ -447,26 +469,41 @@ var deviationRules = []deviationRule{
 		mechanism:   tunOffloadBridgeMechanism,
 	},
 	{
-		field:       "tun.recvmsgx",
-		category:    deviationForced,
-		effective:   "false: the tunnel uses its normal data path",
-		reason:      tunBatchIOBridge,
-		source:      "bind/clash/override.go overrideTunForIOS; upstream sing-tun recvmsg_x is the batched utun-fd read path, not a socket option",
+		field:    "tun.recvmsgx",
+		category: deviationForced,
+		effective: "chosen at startup: on, since the tunnel reads its own network interface; off only if it " +
+			"cannot find the interface and its packets come through the system instead",
+		reason: "batched receive needs the tunnel's own network interface, which this app reads directly: " +
+			"there it is always on, with the interface's buffers sized for it, since without them an upload " +
+			"stalls after every packet; packets that come through the system have no batched path, so the " +
+			"ordinary one is used there and nothing is lost but the batching",
+		source: "bind/clash/tun_descriptor.go handOverTunDescriptor; bind/clash/override.go overrideTunForIOS; " +
+			"upstream sing-tun recvmsg_x is the batched utun-fd read path, not a socket option",
 		recoverable: false,
 		applies:     underPacketTunnel,
-		forcedValue: "false",
-		mechanism:   tunBatchIOBridgeMechanism,
+		mechanism: "handOverTunDescriptor sets it from the descriptor the platform hands over: true for a utun " +
+			"control socket -- the extension's own utun, which ExtensionProvider.systemTunnelDescriptor finds " +
+			" -- whose receive buffer and pending-packet limit sing-tun's configure sizes for recvmsg_x, " +
+			"since left at the system's defaults the interface paused after every packet; false for the NEPacketTunnelFlow " +
+			"bridge's SOCK_DGRAM socketpair (an extension that finds no utun), which has no recvmsg_x " +
+			"path and is read with ordinary readv",
 	},
 	{
-		field:       "tun.sendmsgx",
-		category:    deviationForced,
-		effective:   "false: the tunnel uses its normal data path",
-		reason:      tunBatchIOBridge,
-		source:      "bind/clash/override.go overrideTunForIOS; upstream sing-tun sendmsg_x is the batched utun-fd write path, not a socket option",
+		field:     "tun.sendmsgx",
+		category:  deviationForced,
+		effective: "false: the tunnel uses its normal data path",
+		reason: "this setting is the other stacks': the tunnel runs the go stack, which batches its own sends " +
+			"and paces them so the system's queue never overflows; nothing is lost",
+		source: "bind/clash/override.go overrideTunForIOS; upstream config/config.go (SendMsgX off by default); " +
+			"upstream sing-tun sendmsg_x is the batched utun-fd write path, not a socket option",
 		recoverable: false,
 		applies:     underPacketTunnel,
 		forcedValue: "false",
-		mechanism:   tunBatchIOBridgeMechanism,
+		mechanism: "overrideTunForIOS writes false and handOverTunDescriptor leaves it: the NEPacketTunnelFlow " +
+			"bridge's SOCK_DGRAM descriptor has no sendmsg_x path, and on an extension's own utun the go stack " +
+			" writes with its own sendmsg_x behind the utun input gate (third_party/sing-tun-go " +
+			"stack_go_io_darwin.go), so the listener's EXP_SendMsgX, off by default because the kernel may freeze " +
+			"during multi-thread downloads (config/config.go), is never read",
 	},
 	{
 		field:     "tun.disable-icmp-forwarding",
@@ -769,21 +806,38 @@ func deviationDocumentOf(root map[string]any) map[string]any {
 				entries[index] = map[string]any{"type": proxy["type"], "name": proxy["name"]}
 			} else if isMap && isXHTTPReuseDefaulted(proxy) {
 				entries[index] = xhttpReuseKept(proxy)
+			} else if kept := ipStackKept(proxy); isMap && kept != nil {
+				entries[index] = kept
 			}
 		}
 		kept["proxies"] = entries
 	}
 	if library, isMap := root["x-clash-node-library"].(map[string]any); isMap {
-		if defaulted, recorded := library["xhttp-reuse-defaulted"]; recorded {
-			kept["x-clash-node-library"] = map[string]any{"xhttp-reuse-defaulted": defaulted}
+		record := map[string]any{}
+		for _, key := range []string{"xhttp-reuse-defaulted", "ip-stack-written", "inline-at"} {
+			if value, recorded := library[key]; recorded {
+				record[key] = value
+			}
+		}
+		if len(record) > 0 {
+			kept["x-clash-node-library"] = record
 		}
 	}
 	return kept
 }
 
 func configDeviationRows(root map[string]any, policy appleRuntimePolicy) []configDeviation {
+	deviations := deviationRowsFrom(deviationRules, root, policy)
+	deviations = append(deviations, ownerMetadataRuleDeviations(root, policy)...)
+	deviations = append(deviations, easyTierPlaceholderDeviations(root, policy)...)
+	deviations = append(deviations, xhttpTunnelReuseDeviations(root, policy)...)
+	deviations = append(deviations, ipStackNodeDeviations(root, policy)...)
+	return deviations
+}
+
+func deviationRowsFrom(rules []deviationRule, root map[string]any, policy appleRuntimePolicy) []configDeviation {
 	deviations := make([]configDeviation, 0)
-	for _, rule := range deviationRules {
+	for _, rule := range rules {
 		if rule.ruleScan {
 			continue
 		}
@@ -794,12 +848,7 @@ func configDeviationRows(root map[string]any, policy appleRuntimePolicy) []confi
 		if rule.defaultOnly && written && !slices.Contains(rule.writtenDefaults, given) {
 			continue
 		}
-		if written && rule.forcedValue != "" && given == rule.forcedValue {
-			continue
-		}
-		if written && len(rule.forcedFrom) > 0 && !slices.ContainsFunc(rule.forcedFrom, func(value string) bool {
-			return strings.EqualFold(value, given)
-		}) {
+		if written && rule.runsAsWritten(given) {
 			continue
 		}
 		if written && rule.withheld {
@@ -833,9 +882,6 @@ func configDeviationRows(root map[string]any, policy appleRuntimePolicy) []confi
 			Honoured:        rule.honouredBy != "",
 		})
 	}
-	deviations = append(deviations, ownerMetadataRuleDeviations(root, policy)...)
-	deviations = append(deviations, easyTierPlaceholderDeviations(root, policy)...)
-	deviations = append(deviations, xhttpTunnelReuseDeviations(root, policy)...)
 	return deviations
 }
 

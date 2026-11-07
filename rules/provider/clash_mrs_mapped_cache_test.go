@@ -2,6 +2,8 @@ package provider_test
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"math/rand"
 	"net/netip"
@@ -11,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ProjectClash/Clash/component/cidr"
+	"github.com/ProjectClash/Clash/component/trie"
 	C "github.com/ProjectClash/Clash/constant"
 	P "github.com/ProjectClash/Clash/constant/provider"
 	RP "github.com/ProjectClash/Clash/rules/provider"
@@ -47,6 +51,9 @@ func cacheFiles(t *testing.T, dir string) []string {
 	}
 	var names []string
 	for _, e := range entries {
+		if e.Name() == "format" {
+			continue
+		}
 		names = append(names, e.Name())
 	}
 	return names
@@ -377,5 +384,94 @@ func TestTheSweepRemovesSetsBesideTheGenerations(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, keep)); err != nil {
 		t.Fatalf("a file that is not the cache's was removed: %v", err)
+	}
+}
+
+func TestTheMappedFormatIsTheOneTheCacheIsNamedFor(t *testing.T) {
+	const (
+		format       = "CDS1+CIP1/1"
+		domainDigest = "02bf14ccbb7ee0f6c264e88466f4c93a24585e777c18602c85b311a1ea8f0ac8"
+		ipDigest     = "28bbd9a0e74f0a47960457c82ab69e725658f2bcb6151dc0db5fb2219c573553"
+	)
+	if RP.ClashMrsMappedFormat != format {
+		t.Fatalf("ClashMrsMappedFormat is %q; this test pins %q -- record the digests below for the new format", RP.ClashMrsMappedFormat, format)
+	}
+	var domains trie.DomainSetBuilder
+	for _, domain := range []string{"a.example", "+.b.example", ".c.example", "d.example.org"} {
+		if err := domains.Insert(domain); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var mapped bytes.Buffer
+	if err := domains.Build().WriteMapped(&mapped); err != nil {
+		t.Fatal(err)
+	}
+	ips := cidr.NewIpCidrSet()
+	for _, prefix := range []string{"10.0.0.0/8", "192.0.2.0/24", "2001:db8::/32"} {
+		if err := ips.AddIpCidrForString(prefix); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := ips.Merge(); err != nil {
+		t.Fatal(err)
+	}
+	var mappedIPs bytes.Buffer
+	if err := ips.WriteMapped(&mappedIPs); err != nil {
+		t.Fatal(err)
+	}
+	for kind, c := range map[string]struct {
+		got  []byte
+		want string
+	}{
+		"domain": {mapped.Bytes(), domainDigest}, "ipcidr": {mappedIPs.Bytes(), ipDigest},
+	} {
+		sum := sha256.Sum256(c.got)
+		if got := hex.EncodeToString(sum[:]); got != c.want {
+			t.Errorf("the mapped %s set's bytes changed (%s): if what they hold changed, bump ClashMrsMappedFormat; either way record the new digest", kind, got)
+		}
+	}
+}
+
+func TestANewGenerationTakesTheMappingsOfTheLastOne(t *testing.T) {
+	root := t.TempDir()
+	t.Cleanup(func() { RP.ClashSetMrsMappedCacheDirectory("", "") })
+	mrs := mrsOf(t, P.Domain, randomDomains(13, 800))
+	RP.ClashSetMrsMappedCacheDirectory(root, "a build that named the cache for itself")
+	if _, err := RP.ParseMrsDomainForTest("p", mrs); err != nil {
+		t.Fatal(err)
+	}
+	entries, _ := os.ReadDir(root)
+	for _, entry := range entries {
+		_ = os.Remove(filepath.Join(root, entry.Name(), "format"))
+	}
+	writes := RP.MrsMappedCacheWritesForTest()
+	RP.ClashSetMrsMappedCacheDirectory(root, RP.ClashMrsMappedFormat)
+	set, err := RP.ParseMrsDomainForTest("p", mrs)
+	if err != nil || !set.MappedForTest() {
+		t.Fatalf("after the generation changed: mapped=%v err=%v", set != nil && set.MappedForTest(), err)
+	}
+	if RP.MrsMappedCacheWritesForTest() != writes {
+		t.Fatal("the new generation wrote again a mapping the last one held")
+	}
+	if entries, _ := os.ReadDir(root); len(entries) != 1 {
+		t.Fatalf("the generations in the cache: %v", entries)
+	}
+}
+
+func TestANewGenerationLeavesAnotherFormatsMappings(t *testing.T) {
+	root := t.TempDir()
+	t.Cleanup(func() { RP.ClashSetMrsMappedCacheDirectory("", "") })
+	mrs := mrsOf(t, P.Domain, randomDomains(14, 800))
+	RP.ClashSetMrsMappedCacheDirectory(root, "CDS1+CIP1/0")
+	if _, err := RP.ParseMrsDomainForTest("p", mrs); err != nil {
+		t.Fatal(err)
+	}
+	writes := RP.MrsMappedCacheWritesForTest()
+	RP.ClashSetMrsMappedCacheDirectory(root, RP.ClashMrsMappedFormat)
+	if _, err := RP.ParseMrsDomainForTest("p", mrs); err != nil {
+		t.Fatal(err)
+	}
+	if RP.MrsMappedCacheWritesForTest() != writes+1 {
+		t.Fatal("a mapping of another format was read as this one's")
 	}
 }

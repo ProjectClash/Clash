@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/ProjectClash/Clash/tunnel/statistic"
-	tun "github.com/metacubex/sing-tun"
 )
 
 const (
@@ -25,32 +24,28 @@ const (
 )
 
 type oomEvidence struct {
-	SchemaVersion                  int    `json:"schemaVersion"`
-	RecordedAtUnix                 int64  `json:"recordedAtUnix"`
-	PressureLevel                  string `json:"pressureLevel"`
-	ProcessIdentifier              int    `json:"processIdentifier"`
-	PossibleSystemKill             bool   `json:"possibleSystemKill"`
-	PhysicalMemoryBytes            int64  `json:"physicalMemoryBytes"`
-	SoftMemoryLimit                int64  `json:"softMemoryLimit,omitempty"`
-	GCPercent                      int    `json:"gcPercent"`
-	CoreState                      string `json:"coreState"`
-	CoreStartTimeUnix              int64  `json:"coreStartTimeUnix"`
-	InboundCount                   int32  `json:"inboundCount"`
-	OutboundCount                  int32  `json:"outboundCount"`
-	ConnectionCount                int32  `json:"connectionCount"`
-	GoroutineCount                 int    `json:"goroutineCount"`
-	HeapAllocBytes                 uint64 `json:"heapAllocBytes"`
-	HeapInuseBytes                 uint64 `json:"heapInuseBytes"`
-	StackInuseBytes                uint64 `json:"stackInuseBytes"`
-	NumGC                          uint32 `json:"numGC"`
-	GVisorReceiveOccupancyP50Bytes int    `json:"gvisorReceiveOccupancyP50Bytes"`
-	GVisorReceiveOccupancyP95Bytes int    `json:"gvisorReceiveOccupancyP95Bytes"`
-	GVisorReceiveOccupancyMaxBytes int    `json:"gvisorReceiveOccupancyMaxBytes"`
-	GVisorSegmentQueueDropped      uint64 `json:"gvisorSegmentQueueDropped"`
-	ReloadPhase                    string `json:"reloadPhase,omitempty"`
-	ReloadStartedUnix              int64  `json:"reloadStartedUnix,omitempty"`
-	ReloadNeededBytes              int64  `json:"reloadNeededBytes,omitempty"`
-	ReloadAvailableBytes           int64  `json:"reloadAvailableBytes,omitempty"`
+	SchemaVersion        int    `json:"schemaVersion"`
+	RecordedAtUnix       int64  `json:"recordedAtUnix"`
+	PressureLevel        string `json:"pressureLevel"`
+	ProcessIdentifier    int    `json:"processIdentifier"`
+	PossibleSystemKill   bool   `json:"possibleSystemKill"`
+	PhysicalMemoryBytes  int64  `json:"physicalMemoryBytes"`
+	SoftMemoryLimit      int64  `json:"softMemoryLimit,omitempty"`
+	GCPercent            int    `json:"gcPercent"`
+	CoreState            string `json:"coreState"`
+	CoreStartTimeUnix    int64  `json:"coreStartTimeUnix"`
+	InboundCount         int32  `json:"inboundCount"`
+	OutboundCount        int32  `json:"outboundCount"`
+	ConnectionCount      int32  `json:"connectionCount"`
+	GoroutineCount       int    `json:"goroutineCount"`
+	HeapAllocBytes       uint64 `json:"heapAllocBytes"`
+	HeapInuseBytes       uint64 `json:"heapInuseBytes"`
+	StackInuseBytes      uint64 `json:"stackInuseBytes"`
+	NumGC                uint32 `json:"numGC"`
+	ReloadPhase          string `json:"reloadPhase,omitempty"`
+	ReloadStartedUnix    int64  `json:"reloadStartedUnix,omitempty"`
+	ReloadNeededBytes    int64  `json:"reloadNeededBytes,omitempty"`
+	ReloadAvailableBytes int64  `json:"reloadAvailableBytes,omitempty"`
 }
 
 var (
@@ -145,13 +140,6 @@ func currentOOMEvidenceLocked(now time.Time, level string, footprint int64, runt
 		ReloadStartedUnix:    reloadEvidence.startedUnix,
 		ReloadNeededBytes:    reloadEvidence.needed,
 		ReloadAvailableBytes: reloadEvidence.available,
-	}
-	if snapshot := tun.GVisorTCPWindowSnapshot; snapshot != nil {
-		window := snapshot()
-		report.GVisorReceiveOccupancyP50Bytes = window.ReceiveOccupancyP50Bytes
-		report.GVisorReceiveOccupancyP95Bytes = window.ReceiveOccupancyP95Bytes
-		report.GVisorReceiveOccupancyMaxBytes = window.ReceiveOccupancyMaxBytes
-		report.GVisorSegmentQueueDropped = window.SegmentQueueDroppedTotal
 	}
 	return report
 }

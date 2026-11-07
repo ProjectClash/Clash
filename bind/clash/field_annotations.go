@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/ProjectClash/Clash/adapter/outbound"
 	C "github.com/ProjectClash/Clash/constant"
 	"github.com/ProjectClash/Clash/constant/sniffer"
 	"github.com/ProjectClash/Clash/log"
@@ -17,7 +18,6 @@ import (
 	"github.com/ProjectClash/Clash/transport/tlsmirror"
 	T "github.com/ProjectClash/Clash/tunnel"
 	"github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
-	"github.com/metacubex/mipstack"
 	ssaead "github.com/metacubex/sing-shadowsocks/shadowaead"
 	ssaead2022 "github.com/metacubex/sing-shadowsocks/shadowaead_2022"
 	ssaead2 "github.com/metacubex/sing-shadowsocks2/shadowaead"
@@ -70,12 +70,12 @@ func fieldValueSources() map[string]func(snapshot []string) []string {
 
 func fieldValueSourceTable() map[string]func(snapshot []string) []string {
 	return map[string]func(snapshot []string) []string{
-		"constant.StackTypeMapping":            whole(fieldKeysOf(C.StackTypeMapping)),
-		"mipstack.AvailableCongestionControls": whole(mipstack.AvailableCongestionControls),
-		"tunnel.ModeMapping":                   whole(fieldKeysOf(T.ModeMapping)),
-		"log.LogLevelMapping":                  whole(fieldKeysOf(log.LogLevelMapping)),
-		"constant.DNSModeMapping":              whole(fieldKeysOf(C.DNSModeMapping)),
-		"constant.FilterModeMapping":           whole(fieldKeysOf(C.FilterModeMapping)),
+		"constant.StackTypeMapping":                     whole(fieldKeysOf(C.StackTypeMapping)),
+		"adapter/outbound.IPStackCongestionControllers": whole(func() []string { return outbound.IPStackCongestionControllers }),
+		"tunnel.ModeMapping":                            whole(fieldKeysOf(T.ModeMapping)),
+		"log.LogLevelMapping":                           whole(fieldKeysOf(log.LogLevelMapping)),
+		"constant.DNSModeMapping":                       whole(fieldKeysOf(C.DNSModeMapping)),
+		"constant.FilterModeMapping":                    whole(fieldKeysOf(C.FilterModeMapping)),
 		"constant/sniffer.List": whole(func() []string {
 			names := make([]string, 0, len(sniffer.List))
 			for _, protocol := range sniffer.List {

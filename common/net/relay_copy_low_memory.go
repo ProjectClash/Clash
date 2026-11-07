@@ -77,15 +77,8 @@ func relayCopy(destination io.Writer, source io.Reader) (n int64, err error) {
 		break
 	}
 
-	destinationWriter := newBoundedRelayWriter(destination)
 	var copied int64
-	copied, err = bufio.CopyWithCounters(
-		destinationWriter,
-		newBoundedRelayReader(source),
-		originSource,
-		readCounters,
-		writeCounters,
-	)
+	copied, err = streamRelayCopy(newBoundedRelayWriter(destination), newBoundedRelayReader(source), originSource, readCounters, writeCounters)
 	n += copied
 	return
 }

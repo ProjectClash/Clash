@@ -222,3 +222,35 @@ func ClashCheckMappedSet(path string, behavior P.RuleBehavior) ([sha256.Size]byt
 	}
 	return sum, err
 }
+
+func ClashStubbedPayload(payload []byte) bool {
+	line := clashPayloadStubLine(payload, 0)
+	if strings.TrimRight(line, " \t\r") == "payload:" {
+		line = strings.TrimSpace(clashPayloadStubLine(payload, 1))
+		line = strings.TrimSpace(strings.TrimPrefix(line, "- "))
+		if len(line) > 1 && (line[0] == '\'' || line[0] == '"') && line[len(line)-1] == line[0] {
+			line = line[1 : len(line)-1]
+		}
+	}
+	for _, stubType := range []string{ClashDomainSetStubType, ClashIPCidrSetStubType} {
+		if _, _, _, ok := parseMappedSetStub(line, stubType, "."); ok {
+			return true
+		}
+	}
+	_, _, _, _, ok := parseClassicalIndexStub(line, ".")
+	return ok
+}
+
+func clashPayloadStubLine(payload []byte, n int) string {
+	for ; n > 0; n-- {
+		cut := bytes.IndexByte(payload, '\n')
+		if cut < 0 {
+			return ""
+		}
+		payload = payload[cut+1:]
+	}
+	if cut := bytes.IndexByte(payload, '\n'); cut >= 0 {
+		payload = payload[:cut]
+	}
+	return string(payload)
+}

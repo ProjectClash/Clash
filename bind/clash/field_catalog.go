@@ -454,7 +454,7 @@ func (a fieldAnnotation) matches(path string) bool {
 func markPlatformDecided(fields []syntaxField) {
 	decided := map[string]bool{}
 	for _, rule := range deviationRules {
-		if !rule.defaultOnly && rule.honouredBy == "" && !rule.ruleScan {
+		if !rule.defaultOnly && rule.honouredBy == "" && rule.decidesKey() && !rule.replacesSomeValues() {
 			decided[rule.field] = true
 		}
 	}

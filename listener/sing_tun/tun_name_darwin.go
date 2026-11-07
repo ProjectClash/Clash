@@ -1,11 +1,14 @@
 package sing_tun
 
-import "golang.org/x/sys/unix"
+import (
+	"errors"
+
+	tun "github.com/metacubex/sing-tun"
+)
 
 func getTunnelName(fd int32) (string, error) {
-	return unix.GetsockoptString(
-		int(fd),
-		2, /* #define SYSPROTO_CONTROL 2 */
-		2, /* #define UTUN_OPT_IFNAME 2 */
-	)
+	if name, ok := tun.UtunControlName(int(fd)); ok {
+		return name, nil
+	}
+	return "", errors.New("not a utun control socket")
 }

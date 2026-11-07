@@ -9,6 +9,7 @@ import (
 	"github.com/ProjectClash/Clash/adapter"
 	"github.com/ProjectClash/Clash/adapter/outbound"
 	C "github.com/ProjectClash/Clash/constant"
+	"github.com/ProjectClash/Clash/log"
 	T "github.com/ProjectClash/Clash/tunnel"
 )
 
@@ -47,18 +48,13 @@ type clashNodeViews struct {
 func newClashNodes(ref ClashNodeLibraryRef, inline []C.Proxy, library *adapter.LibraryNodes) (*clashNodeViews, error) {
 	total := len(inline) + library.Len()
 	writtenAt := ref.InlineAt
-	if len(writtenAt) == 0 && len(inline) > 0 {
+	if problem := inlinePlacesProblem(writtenAt, len(inline), total); problem != "" {
+		if len(writtenAt) > 0 {
+			log.Warnln("[Config] x-clash-node-library: %s; the inline proxies are listed first", problem)
+		}
 		writtenAt = make([]int, len(inline))
 		for i := range writtenAt {
 			writtenAt[i] = i
-		}
-	}
-	if len(writtenAt) != len(inline) {
-		return nil, fmt.Errorf("x-clash-node-library: %d inline places for %d inline proxies", len(writtenAt), len(inline))
-	}
-	for i, at := range writtenAt {
-		if at < 0 || at >= total || (i > 0 && at <= writtenAt[i-1]) {
-			return nil, fmt.Errorf("x-clash-node-library: inline place %d is out of range", at)
 		}
 	}
 	byName := append([]C.Proxy(nil), inline...)
@@ -114,4 +110,16 @@ func clashInternalPositions(nodes *clashNodeViews, internal map[string]struct{})
 		}
 	}
 	return positions
+}
+
+func inlinePlacesProblem(at []int, count, total int) string {
+	if len(at) != count {
+		return fmt.Sprintf("%d inline places for %d inline proxies", len(at), count)
+	}
+	for i, place := range at {
+		if place < 0 || place >= total || (i > 0 && place <= at[i-1]) {
+			return fmt.Sprintf("inline place %d is out of range or out of order", place)
+		}
+	}
+	return ""
 }

@@ -353,7 +353,7 @@ func rewriteRefreshedForCatalog(root map[string]any, key, kind string, remote ma
 			sourceFormat, _ := definition["format"].(string)
 			if kind == "rule" && member.seedPath == "" && legacy == "" {
 				switch {
-				case stagingMapsRuleSets && !feedsPlatformRoutes(root, member.name, sourceBehavior) && mappable(sourceBehavior):
+				case appCompiledForm(kind, sourceBehavior, sourceFormat, !feedsPlatformRoutes(root, member.name, sourceBehavior)) == compileVerdictMapped:
 					definition[providerCatalogNativeField] = "text"
 				case compilesNatively(sourceBehavior, sourceFormat):
 					definition[providerCatalogNativeField] = "mrs"

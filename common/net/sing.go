@@ -98,6 +98,9 @@ func Relay(leftConn, rightConn net.Conn) {
 		_ = leftConn.Close()
 		_ = rightConn.Close()
 	}()
+	if trySplice(leftConn, rightConn) {
+		return
+	}
 
 	ch := make(chan struct{})
 	go func() {

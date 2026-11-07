@@ -956,11 +956,28 @@ func TestASetOfWhichNothingRunsRunsItsFirstSmallContentAsText(t *testing.T) {
 			t.Fatalf("the set runs %d rules, want 3", n)
 		}
 	})
-	t.Run("yaml rule set waits", func(t *testing.T) {
-		fixture := newRefreshFixture(t, refreshFixtureOptions{kind: "rule", behavior: "ipcidr", format: "yaml", served: "payload:\n  - 10.0.0.0/8\n", mapped: true})
-		fixture.start()
-		fixture.waitForResult(providerRefreshPendingApp)
-	})
+	for _, c := range []struct {
+		name, behavior, format, served string
+		rules                          int
+	}{
+		{"yaml address set", "ipcidr", "yaml", "payload:\n  - 10.0.0.0/8\n", 1},
+		{"yaml domain set", "domain", "yaml", "payload:\n  - a.example\n  - '+.b.example'\n", 2},
+		{"yaml classical set", "classical", "yaml", "payload:\n  - DOMAIN,a.example\n  - DOMAIN-SUFFIX,b.example\n  - IP-CIDR,10.0.0.0/8\n", 3},
+		{"empty yaml set", "domain", "yaml", "payload: []\n", 0},
+		{"empty text set", "domain", "text", "# nothing today\n", 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			fixture := newRefreshFixture(t, refreshFixtureOptions{kind: "rule", behavior: c.behavior, format: c.format, served: c.served, mapped: true})
+			fixture.start()
+			entry := fixture.waitForResult(providerRefreshUpdated)
+			if entry.PendingSHA256 != "" {
+				t.Fatalf("the content runs and waits too: %+v", entry)
+			}
+			if n := liveRuleCount(); n != c.rules {
+				t.Fatalf("the set runs %d rules, want %d", n, c.rules)
+			}
+		})
+	}
 }
 
 func TestAStopgapRunsUntilTheAppsCompileReplacesIt(t *testing.T) {
@@ -1194,5 +1211,50 @@ func TestALargeSeedBesideASubscriptionNoLibraryHoldsIsBuiltHere(t *testing.T) {
 	}
 	if live, ok := tunnel.Providers()["refreshed"]; !ok || live.Count() != 6 {
 		t.Fatalf("the newer subscription does not run: %v", ok)
+	}
+}
+
+func TestASetThePublishBroughtNothingOfPastTheDefaultLimitWaitsForTheApp(t *testing.T) {
+	var served strings.Builder
+	for i := 0; served.Len() <= 16<<20; i++ {
+		fmt.Fprintf(&served, "host-%07d.example.com\n", i)
+	}
+	fixture := newRefreshFixture(t, refreshFixtureOptions{kind: "rule", behavior: "domain", format: "text", published: "", served: served.String(), mapped: true})
+	fixture.start()
+	entry := fixture.waitForEntry("a settled refresh result", func(e *providerCacheEntry) bool {
+		return e.Result != "" && e.Result != providerRefreshScheduled
+	})
+	if entry.Result != providerRefreshPendingApp || entry.PendingSHA256 == "" {
+		t.Fatalf("a %d-byte set the App compiles: result %q, error %q, waiting %v", served.Len(), entry.Result, entry.Error, entry.PendingSHA256 != "")
+	}
+}
+
+func TestAStopgapIsBuiltOnlyWithinTheJudgesEstimate(t *testing.T) {
+	served := "a.example\n+.b.example\nc.example\n"
+	estimate := estimateProviderBuildBytes("rule", "text", "domain", len(served), nil)
+	if estimate < providerBuildFloorBytes+int64(len(served))*int64(providerBuildTextFactor) {
+		t.Fatalf("the judge estimates a text stopgap at %d bytes, below 4 MiB + 10x", estimate)
+	}
+	for _, c := range []struct {
+		name      string
+		available int64
+		rules     int
+		result    string
+	}{
+		{"short of the estimate", estimate - 1, 0, providerRefreshPendingApp},
+		{"within it", estimate + 1<<20, 3, providerRefreshUpdated},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			withBuildMemory(t, c.available)
+			fixture := newRefreshFixture(t, refreshFixtureOptions{kind: "rule", behavior: "domain", format: "text", served: served, mapped: true})
+			fixture.start()
+			entry := fixture.waitForEntry("a settled refresh result", func(e *providerCacheEntry) bool {
+				return e.Result != "" && e.Result != providerRefreshScheduled
+			})
+			if n := liveRuleCount(); n != c.rules || entry.Result != c.result ||
+				c.result == providerRefreshPendingApp && entry.PendingReason != providerRefreshPendingMemory {
+				t.Fatalf("%d bytes free: the stopgap runs %d rules (result %q, waiting for %q), want %d (%q)", c.available, n, entry.Result, entry.PendingReason, c.rules, c.result)
+			}
+		})
 	}
 }

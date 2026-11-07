@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -20,13 +19,11 @@ import (
 	"github.com/ProjectClash/Clash/component/resolver"
 	"github.com/ProjectClash/Clash/component/slowdown"
 	C "github.com/ProjectClash/Clash/constant"
-	"github.com/ProjectClash/Clash/constant/features"
 	"github.com/ProjectClash/Clash/dns"
 	"github.com/ProjectClash/Clash/log"
 
 	amneziav3 "github.com/metacubex/amneziawg-go/device"
 	amnezia "github.com/metacubex/amneziawg-go/device_v1"
-	"github.com/metacubex/mipstack"
 	wireguard "github.com/metacubex/sing-wireguard"
 	"github.com/metacubex/wireguard-go/device"
 	"github.com/metacubex/wireguard-go/tun"
@@ -160,79 +157,17 @@ func (o *IPStackOption) normalize() {
 
 func (o IPStackOption) validate() error {
 	switch o.Mode {
-	case ipStackAuto, ipStackMips:
-	case ipStackGVisor:
-		if !features.WithGVisor {
-			return errors.New("gVisor IP stack requires the with_gvisor build tag")
-		}
+	case ipStackAuto, ipStackMips, ipStackGVisor:
 	default:
 		return fmt.Errorf("invalid IP stack mode %q; expected auto, gvisor, or mips", o.Mode)
 	}
 	switch o.CongestionController {
-	case "", mipstack.CongestionControlCUBIC, mipstack.CongestionControlReno, mipstack.CongestionControlBBR, mipstack.CongestionControlBBR3:
+	case "", "cubic", "reno", "bbr", "bbr3":
 		return nil
 	default:
 		return fmt.Errorf("invalid IP stack congestion controller %q; expected cubic, reno, bbr, or bbr3", o.CongestionController)
 	}
 }
-
-// ipStack is the mihomo IP stack's packet and socket surface, adapted from
-// sing-wireguard only for gVisor.
-type ipStack interface {
-	Start() error
-	DialTCP(ctx context.Context, network string, source, destination netip.AddrPort) (net.Conn, error)
-	DialUDP(ctx context.Context, network string, source, destination netip.AddrPort) (net.Conn, error)
-	DialIP(ctx context.Context, network string, source, destination netip.Addr) (net.Conn, error)
-	ListenTCP(ctx context.Context, network string, local netip.AddrPort) (net.Listener, error)
-	ListenUDP(ctx context.Context, network string, local netip.AddrPort) (net.PacketConn, error)
-	ListenIP(ctx context.Context, network string, local netip.Addr) (net.PacketConn, error)
-	Read(buffers [][]byte, sizes []int, offset int) (int, error)
-	Write(buffers [][]byte, offset int) (int, error)
-	MTU() (int, error)
-	Name() (string, error)
-	BatchSize() int
-	Close() error
-}
-
-// newIPStack constructs the selected userspace IP stack.
-func newIPStack(option IPStackOption, localAddresses []netip.Prefix, mtu uint32) (ipStack, error) {
-	mode := option.Mode
-	if mode == ipStackAuto {
-		if features.WithGVisor {
-			mode = ipStackGVisor
-		} else {
-			mode = ipStackMips
-		}
-	}
-	switch mode {
-	case ipStackGVisor:
-		return wireguard.NewStackDevice(localAddresses, mtu)
-	case ipStackMips:
-		return mipstack.New(mipstack.Config{
-			LocalAddresses: localAddresses,
-			MTU:            mtu,
-			TCP: mipstack.TCPSocketDefaults{
-				CongestionControl: option.CongestionController,
-				// Align with sing-wireguard: enable keepalive with 15-second
-				// idle/interval timing and gVisor's default probe count.
-				KeepAlive: true,
-				KeepAliveConfig: mipstack.KeepAliveConfig{
-					Idle: 15 * time.Second, Interval: 15 * time.Second, Count: 9,
-				},
-			},
-			IP: mipstack.IPSocketDefaults{
-				// Align with sing-wireguard: fellow its IP socket semantics
-				IPHeaderIncludedOnRead:  true,
-				IPHeaderIncludedOnWrite: true,
-			},
-		})
-	default:
-		return nil, errors.New("invalid IP stack mode")
-	}
-}
-
-var _ ipStack = (*mipstack.Stack)(nil)
-var _ ipStack = (wireguard.Device)(nil)
 
 type ipStackNetDialer struct {
 	stack ipStack

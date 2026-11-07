@@ -1,0 +1,10 @@
+/.idea/
+/vendor/
+.DS_Store
+!/README.md
+/*.md
+CLAUDE.md
+AGENTS.md
+/.claude/
+# Clash: the record of what this copy changes is kept (CLASH_PATCH.md); upstream ignores root Markdown.
+!/CLASH_PATCH.md

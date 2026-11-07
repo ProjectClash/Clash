@@ -2,6 +2,7 @@ package clash
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -26,10 +28,12 @@ func TestProxyShareLifecycleSurvivesReloadAndClosesWithService(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	port := reserveProxySharePort(t)
 	const username = "clash-test-user"
 	const password = "clash-test-password"
-	if err := service.StartProxyShare(int32(port), username, password); err != nil {
+	port, err := startProxyShareOnAFreePort(t, func(port int32) error {
+		return service.StartProxyShare(port, username, password)
+	})
+	if err != nil {
 		t.Fatalf("StartProxyShare: %v", err)
 	}
 	assertProxyShareStatus(t, service, true, port)
@@ -72,8 +76,10 @@ func TestProxyShareCoexistsWithConfigMixedPort(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sharePort := reserveProxySharePort(t)
-	if err := service.StartProxyShare(int32(sharePort), "clash-test-user", "clash-test-password"); err != nil {
+	sharePort, err := startProxyShareOnAFreePort(t, func(port int32) error {
+		return service.StartProxyShare(port, "clash-test-user", "clash-test-password")
+	})
+	if err != nil {
 		t.Fatalf("StartProxyShare next to a config mixed-port: %v -- a community "+
 			"subscription's standard shape permanently locked the feature", err)
 	}
@@ -95,6 +101,9 @@ func TestProxyShareCoexistsWithConfigMixedPort(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "conflicts with an existing local listener") {
 		t.Fatalf("collision reported the removed policy refusal instead of the bind error: %v", err)
+	}
+	if !errors.Is(err, syscall.EADDRINUSE) {
+		t.Fatalf("an occupied port's error does not carry EADDRINUSE: %v", err)
 	}
 }
 
@@ -298,6 +307,19 @@ func TestProxyShareRemoteFilterAllowsOnlyLocalScope(t *testing.T) {
 	}
 }
 
+func startProxyShareOnAFreePort(t *testing.T, start func(port int32) error) (int, error) {
+	t.Helper()
+	var err error
+	for attempt := 0; attempt < 5; attempt++ {
+		port := reserveProxySharePort(t)
+		if err = start(int32(port)); err == nil || !errors.Is(err, syscall.EADDRINUSE) {
+			return port, err
+		}
+		t.Logf("proxy-share port %d was taken before the share bound it: %v", port, err)
+	}
+	return 0, err
+}
+
 func reserveProxySharePort(t *testing.T) int {
 	t.Helper()
 	for attempt := 0; attempt < 20; attempt++ {
@@ -312,10 +334,14 @@ func reserveProxySharePort(t *testing.T) int {
 		if udpListener != nil {
 			_ = udpListener.Close()
 		}
+		ipv6Listener, ipv6Error := net.Listen("tcp6", net.JoinHostPort("::", strconv.Itoa(port)))
+		if ipv6Listener != nil {
+			_ = ipv6Listener.Close()
+		}
 		if err := tcpListener.Close(); err != nil {
 			t.Fatal(err)
 		}
-		if udpError == nil && port >= int(ProxyShareMinimumPort) {
+		if udpError == nil && ipv6Error == nil && port >= int(ProxyShareMinimumPort) {
 			return port
 		}
 	}

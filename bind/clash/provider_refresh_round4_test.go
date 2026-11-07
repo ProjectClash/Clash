@@ -34,6 +34,7 @@ func TestASeedThatWillNotBuildLeavesWhatWaits(t *testing.T) {
 	fixture := newRefreshFixture(t, refreshFixtureOptions{kind: "proxy",
 		published: "proxies:\n  - {name: A, type: direct}\n", served: "proxies:\n  - {name: B1, type: direct}\n  - {name: B2, type: direct}\n",
 		fetchedAgo: 2 * time.Hour})
+	providerRefreshFirstLoadMinimum = time.Hour
 	service := fixture.start()
 	waiting := fixture.waitForResult(providerRefreshPendingApp)
 	available.Store(1 << 32)
@@ -46,6 +47,7 @@ func TestASeedThatWillNotBuildLeavesWhatWaits(t *testing.T) {
 func TestASeedWithNoConfirmationLeavesAWaitingFirstLoad(t *testing.T) {
 	available := adjustableBuildMemory(t, 1<<20)
 	fixture := newRefreshFixture(t, refreshFixtureOptions{kind: "rule", served: "new.example\nmore.example\n"})
+	providerRefreshFirstLoadMinimum = time.Hour
 	service := fixture.start()
 	waiting := fixture.waitForResult(providerRefreshPendingApp)
 	available.Store(1 << 32)

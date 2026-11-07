@@ -10,12 +10,11 @@ require (
 	github.com/easytier/easytier/easytier-go v0.0.0-20260918161347-e313ba8efb84
 	github.com/enfein/mieru/v3 v3.38.1
 	github.com/google/pprof v0.0.0-20240727154555-813a5fbdbec8
-	github.com/klauspost/compress v1.17.9
+	github.com/klauspost/compress v1.20.2
 	github.com/metacubex/chi v0.1.1
 	github.com/metacubex/connect-ip-go v0.0.0-20260727083417-67ccdb0cf771
 	github.com/metacubex/http v0.1.8
 	github.com/ProjectClash/Clash v1.19.33
-	github.com/metacubex/mipstack v0.0.0-20261019124225-9a80a07eaeb9
 	github.com/metacubex/quic-go v0.61.1-0.20260727080200-2548683b76f4
 	github.com/metacubex/sing v0.5.8
 	github.com/metacubex/sing-shadowsocks v0.2.13
@@ -29,8 +28,9 @@ require (
 	github.com/miekg/dns v1.1.63
 	github.com/oschwald/maxminddb-golang v1.12.0
 	github.com/sagernet/gomobile v0.1.13
-	github.com/sagernet/sing v0.8.12-0.20260727003324-d096a164bc7f
+	github.com/sagernet/sing v0.9.5-0.20260917142815-f37989cadbf0
 	github.com/sagernet/sing-snell v0.0.0-20260904135315-bc5a12ac736f
+	github.com/sagernet/sing-tun v0.9.7-0.20261023115453-611d83b7a57b
 	github.com/samber/lo v1.53.0
 	github.com/sirupsen/logrus v1.9.4
 	github.com/yosida95/uritemplate/v3 v3.0.2
@@ -47,7 +47,7 @@ require (
 	github.com/Yawning/aez v0.0.0-20211027044916-e49e68abd344 // indirect
 	github.com/ajg/form v1.7.1 // indirect
 	github.com/akutz/memconn v0.1.0 // indirect
-	github.com/andybalholm/brotli v1.1.1 // indirect
+	github.com/andybalholm/brotli v1.2.7 // indirect
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/bodgit/plumbing v1.3.0 // indirect
 	github.com/bodgit/windows v1.0.1 // indirect
@@ -59,7 +59,6 @@ require (
 	github.com/ericlagergren/subtle v0.0.0-20220507045147-890d697da010 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
 	github.com/gaukas/godicttls v0.0.4 // indirect
-	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/gobwas/httphead v0.1.0 // indirect
 	github.com/gobwas/pool v0.2.1 // indirect
 	github.com/gobwas/ws v1.4.0 // indirect
@@ -155,6 +154,9 @@ replace github.com/metacubex/fswatch => ../../third_party/fswatch-noop
 // Keep gomobile on Clash's Darwin dispatcher teardown fix.
 replace github.com/metacubex/sing-tun => ../../third_party/sing-tun
 
+// The go stack, sing-box 1.15's TCP/IP stack, vendored and trimmed to Apple.
+replace github.com/sagernet/sing-tun => ../../third_party/sing-tun-go
+
 // Keep gomobile on Clash's full-duplex ReTLS debug-race fix. Replacements are
 // not inherited through the local mihomo module replacement above.
 replace github.com/metacubex/restls-client-go => ../../third_party/restls-client-go
@@ -170,9 +172,6 @@ replace go.yaml.in/yaml/v3 => ../../third_party/yaml-v3
 // vendored mihomo root module. Replacements are not inherited through the
 // local mihomo replace above.
 replace google.golang.org/protobuf => github.com/metacubex/protobuf-go v0.0.0-20260306035419-7ceee0674686
-
-// Pin the reviewed with_low_memory TCP storage patch; replacements are not inherited.
-replace github.com/metacubex/mipstack => ../../third_party/mipstack
 
 // Pin the ARM64 race CAS repair; ordinary build source is unchanged.
 replace github.com/metacubex/gvisor => ../../third_party/gvisor

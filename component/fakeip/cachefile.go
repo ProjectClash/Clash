@@ -27,6 +27,7 @@ type writeBehind struct {
 	ips   map[netip.Addr]pendingHost
 	ops   []cachefile.FakeIPOp
 	armed bool
+	closed bool
 }
 
 type pendingAddr struct {
@@ -45,6 +46,24 @@ var (
 	writeBehindsMu sync.Mutex
 	writeBehinds   = map[cachefile.FakeIPStoreKey]*writeBehind{}
 )
+
+func init() {
+	cachefile.OnRelease(func(cache *cachefile.CacheFile) {
+		for _, store := range []*cachefile.FakeIpStore{cache.FakeIpStore(), cache.FakeIpStore6()} {
+			key := store.Key()
+			writeBehindsMu.Lock()
+			w := writeBehinds[key]
+			delete(writeBehinds, key)
+			writeBehindsMu.Unlock()
+			if w != nil {
+				w.mu.Lock()
+				w.closed = true
+				w.mu.Unlock()
+				w.flush()
+			}
+		}
+	})
+}
 
 func sharedWriteBehind(cache *cachefile.FakeIpStore) *writeBehind {
 	writeBehindsMu.Lock()
@@ -83,7 +102,9 @@ func (c *cachefileStore) PutByHost(host string, ip netip.Addr) {
 	if host == "" {
 		return
 	}
-	w.mu.Lock()
+	if !w.lockOpen() {
+		return
+	}
 	w.seq++
 	w.hosts[host] = pendingAddr{ip: ip, seq: w.seq}
 	w.ops = append(w.ops, cachefile.FakeIPOp{Kind: cachefile.FakeIPPutByHost, Host: host, IP: ip})
@@ -116,7 +137,9 @@ func (c *cachefileStore) PutByIP(ip netip.Addr, host string) {
 		c.cache.PutByIP(ip, host)
 		return
 	}
-	w.mu.Lock()
+	if !w.lockOpen() {
+		return
+	}
 	w.seq++
 	w.ips[ip] = pendingHost{host: host, seq: w.seq}
 	w.ops = append(w.ops, cachefile.FakeIPOp{Kind: cachefile.FakeIPPutByIP, Host: host, IP: ip})
@@ -130,7 +153,9 @@ func (c *cachefileStore) DelByIP(ip netip.Addr) {
 		c.cache.DelByIP(ip)
 		return
 	}
-	w.mu.Lock()
+	if !w.lockOpen() {
+		return
+	}
 	host, found := c.getByIPLocked(ip)
 	w.seq++
 	w.ips[ip] = pendingHost{deleted: true, seq: w.seq}
@@ -170,6 +195,15 @@ func (c *cachefileStore) Sync() {
 	if c.pending != nil {
 		c.pending.flush()
 	}
+}
+
+func (w *writeBehind) lockOpen() bool {
+	w.mu.Lock()
+	if w.closed {
+		w.mu.Unlock()
+		return false
+	}
+	return true
 }
 
 func (w *writeBehind) armLocked() {

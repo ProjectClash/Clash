@@ -182,6 +182,9 @@ func buildSyntaxCatalog(targetProfile string) (syntaxCatalog, error) {
 
 	catalog.PlatformDecidedKeys = []syntaxPlatformKey{}
 	for _, rule := range deviationRules {
+		if rule.replacesSomeValues() {
+			continue
+		}
 		defaultOnly := rule.defaultOnly
 		if !rule.active(policy) {
 			if !rule.unwrittenUnconditional || !rule.activeFor(policy, false) {
@@ -189,7 +192,7 @@ func buildSyntaxCatalog(targetProfile string) (syntaxCatalog, error) {
 			}
 			defaultOnly = true
 		}
-		if rule.ruleScan && rule.ruleKind == "" {
+		if rule.ruleKind == "" && !rule.decidesKey() {
 			continue
 		}
 		catalog.PlatformDecidedKeys = append(catalog.PlatformDecidedKeys, syntaxPlatformKey{
@@ -248,6 +251,20 @@ func platformWalledValues(policy appleRuntimePolicy) []walledValue {
 			reason: deviationReason(listener.port),
 		})
 	}
+	for i := range deviationRules {
+		rule := &deviationRules[i]
+		if !rule.replacesSomeValues() || rule.applies != nil && !rule.applies(policy) {
+			continue
+		}
+		for _, value := range rule.forcedFrom {
+			walled = append(walled, walledValue{
+				value:       value,
+				in:          func(path string) bool { return path == rule.field },
+				reason:      rule.reason,
+				alternative: rule.forcedValue,
+			})
+		}
+	}
 	if easyTierWalledProfile(policy) {
 		walled = append(walled, walledValue{
 			value: "easytier",
@@ -283,15 +300,19 @@ func markUnavailableValues(fields []syntaxField, policy appleRuntimePolicy) {
 }
 
 func decidePlatformFields(fields []syntaxField, policy appleRuntimePolicy) {
-	byField := make(map[string]*deviationRule, len(deviationRules))
-	for i := range deviationRules {
-		if rule := &deviationRules[i]; !rule.ruleScan {
+	decidePlatformFieldsFrom(deviationRules, fields, policy)
+}
+
+func decidePlatformFieldsFrom(rules []deviationRule, fields []syntaxField, policy appleRuntimePolicy) {
+	byField := make(map[string]*deviationRule, len(rules))
+	for i := range rules {
+		if rule := &rules[i]; rule.decidesKey() {
 			byField[rule.field] = rule
 		}
 	}
 	for i := range fields {
 		rule := byField[fields[i].Path]
-		if rule == nil || (rule.applies != nil && !rule.applies(policy)) || rule.honouredBy != "" {
+		if rule == nil || (rule.applies != nil && !rule.applies(policy)) || rule.honouredBy != "" || rule.replacesSomeValues() {
 			continue
 		}
 		decision := &syntaxPlatformDecision{When: "always", Value: rule.forcedValue, Replaces: rule.forcedFrom,

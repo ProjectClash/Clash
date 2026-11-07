@@ -192,6 +192,9 @@ func writeNodeLibrary(root map[string]any, directory string) error {
 	if defaulted := xhttpReuseDefaultedIn(list, held); defaulted != nil {
 		reference["xhttp-reuse-defaulted"] = defaulted
 	}
+	if written := ipStackWrittenIn(list, held); written != nil {
+		reference["ip-stack-written"] = written
+	}
 	if len(kept) > 0 {
 		reference["inline-at"] = keptAt
 		root["proxies"] = kept

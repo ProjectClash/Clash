@@ -113,14 +113,13 @@ func TestWireGuardDialsRacingCloseLeaveNoDevice(t *testing.T) {
 func TestAFailedRebuildAfterAnIdleReleaseIsNotKept(t *testing.T) {
 	option := clashWireGuardOption()
 	option.MTU = 20
-	option.IPStack.Mode = ipStackMips
 	node, err := NewWireGuard(option)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer node.Close()
 	if err := node.init0(context.Background()); err == nil {
-		t.Fatal("a stack mipstack refuses was built")
+		t.Fatal("a stack with an MTU of 20 was built")
 	}
 	if node.initErr == nil {
 		t.Fatal("a node that never built did not keep its failure, as upstream's does")
@@ -130,7 +129,7 @@ func TestAFailedRebuildAfterAnIdleReleaseIsNotKept(t *testing.T) {
 	node.clashDevice.releases = 1
 	node.clashDevice.mu.Unlock()
 	if err := node.init0(context.Background()); err == nil {
-		t.Fatal("a stack mipstack refuses was built")
+		t.Fatal("a stack with an MTU of 20 was built")
 	}
 	if node.initErr != nil {
 		t.Fatalf("a failed rebuild after a release was kept: %v", node.initErr)

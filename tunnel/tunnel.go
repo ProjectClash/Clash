@@ -758,6 +758,14 @@ func handleTCPConn(connCtx C.ConnContext) {
 }
 
 func handleTCPConnContext(parent context.Context, connCtx C.ConnContext) {
+	var after tcpFlowCleanup
+	defer after.run()
+	if inbound, outbound, relay := prepareTCPFlow(parent, connCtx, &after); relay {
+		handleSocket(inbound, outbound)
+	}
+}
+
+func prepareTCPFlow(parent context.Context, connCtx C.ConnContext, after *tcpFlowCleanup) (inbound net.Conn, outbound C.Conn, relay bool) {
 	if !isHandle(connCtx.Metadata().Type) {
 		_ = connCtx.Conn().Close()
 		return
@@ -767,11 +775,9 @@ func handleTCPConnContext(parent context.Context, connCtx C.ConnContext) {
 		_ = connCtx.Conn().Close()
 		return
 	}
-	defer releaseTCPConnectionSlot()
+	after.slot = true
 
-	defer func(conn net.Conn) {
-		_ = conn.Close()
-	}(connCtx.Conn())
+	after.conn = connCtx.Conn()
 
 	metadata := connCtx.Metadata()
 	if !metadata.Valid() {
@@ -791,7 +797,7 @@ func handleTCPConnContext(parent context.Context, connCtx C.ConnContext) {
 
 	conn := connCtx.Conn()
 	conn.ResetPeeked() // reset before sniffer
-	if dispatcher := snifferDispatcher.Load(); sniffingEnable.Load() && dispatcher.Enable() && !sniffingStandsAside(conn, metadata) {
+	if dispatcher := snifferDispatcher.Load(); sniffingEnable.Load() && dispatcher.Enable() && !snifferStandsAside(conn, metadata, dispatcher) {
 		// Try to sniff a domain when `preHandleMetadata` failed, this is usually
 		// caused by a "Fake DNS record missing" error when enhanced-mode is fake-ip.
 		if dispatcher.TCPSniff(conn, metadata) {
@@ -844,7 +850,7 @@ func handleTCPConnContext(parent context.Context, connCtx C.ConnContext) {
 	var peekLen int
 
 	ctx, cancel := context.WithTimeout(parent, C.DefaultTCPTimeout)
-	defer cancel()
+	after.cancel = cancel
 	dialMetadata, err = ipStackDialMetadata(ctx, dialMetadata, !proxy.IsL3Protocol(dialMetadata))
 	if err != nil {
 		logMetadataErr(metadata, rule, proxy, err)
@@ -918,12 +924,7 @@ func handleTCPConnContext(parent context.Context, connCtx C.ConnContext) {
 		_ = N.ReportDeferredHandshake(conn, err)
 		return
 	}
-	tracked := false
-	defer func(remoteConn C.Conn) {
-		if !tracked {
-			_ = remoteConn.Close()
-		}
-	}(remoteConn)
+	after.remote = remoteConn
 
 	if loadVersion().routing.RejectPage && terminalAdapterType(proxy, dialMetadata) == C.Reject {
 		if answerRejectWithPage(conn, &peekMutex, metadata) {
@@ -947,17 +948,14 @@ func handleTCPConnContext(parent context.Context, connCtx C.ConnContext) {
 	logMetadata(metadata, rule, remoteConn)
 
 	remoteConn = statistic.NewTCPTracker(remoteConn, statistic.DefaultManager, metadata, rule, int64(peekLen), 0, true)
-	tracked = true
 	trackInbound(remoteConn, conn)
-	defer func(remoteConn C.Conn) {
-		_ = remoteConn.Close()
-	}(remoteConn)
+	after.remote = remoteConn
 
 	_ = conn.SetReadDeadline(time.Now()) // stop unfinished peek
 	peekMutex.Lock()
-	defer peekMutex.Unlock()
+	after.peek = &peekMutex
 	_ = conn.SetReadDeadline(time.Time{}) // reset
-	handleSocket(conn, remoteConn)
+	return conn, remoteConn, true
 }
 
 var dialOutcomeObserver syncatomic.Pointer[func(error)]
@@ -1099,8 +1097,19 @@ func getRules(metadata *C.Metadata, version *runtimeVersion) C.RuleTable {
 }
 
 func sniffingStandsAside(conn any, metadata *C.Metadata) bool {
-	return metadata.Host == "" &&
-		dialer.IsPhysicalGlobalIPv6(metadata.DstIP) &&
+	return metadata.Host == "" && standsAsideForItsDial(conn, metadata)
+}
+
+func snifferStandsAside(conn any, metadata *C.Metadata, dispatcher *sniffer.Dispatcher) bool {
+	if metadata.Host == "" {
+		return standsAsideForItsDial(conn, metadata)
+	}
+	return dialer.IsPhysicalGlobalIPv6(metadata.DstIP) && dispatcher.ReadsPastDnsMapping(metadata) &&
+		standsAsideForItsDial(conn, metadata)
+}
+
+func standsAsideForItsDial(conn any, metadata *C.Metadata) bool {
+	return dialer.IsPhysicalGlobalIPv6(metadata.DstIP) &&
 		N.HandshakePending(conn) &&
 		WouldDialPhysically(metadata)
 }

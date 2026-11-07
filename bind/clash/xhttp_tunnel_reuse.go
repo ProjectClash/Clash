@@ -134,14 +134,7 @@ func xhttpReuseDefaultedIn(list []any, held []int) map[string]any {
 func libraryReuseDefaulted(root map[string]any) (count int, first string) {
 	library, _ := root["x-clash-node-library"].(map[string]any)
 	defaulted, _ := library["xhttp-reuse-defaulted"].(map[string]any)
-	switch n := defaulted["count"].(type) {
-	case int:
-		count = n
-	case uint64:
-		count = int(n)
-	case float64:
-		count = int(n)
-	}
+	count = yamlCount(defaulted["count"])
 	first, _ = defaulted["first"].(string)
 	return count, first
 }

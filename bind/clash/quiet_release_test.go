@@ -9,8 +9,6 @@ import (
 type quietReleaseProbe struct {
 	traffic  int64
 	free     uint64
-	idle     int
-	idleAsks int
 	releases int
 }
 
@@ -18,7 +16,6 @@ func (p *quietReleaseProbe) quiet(start time.Time) *quietRelease {
 	return &quietRelease{total: p.traffic, quietSince: start,
 		traffic: func() int64 { return p.traffic },
 		free:    func() uint64 { return p.free },
-		idle:    func() int { p.idleAsks++; given := p.idle; p.idle = 0; return given },
 		release: func() { p.releases++; p.free = 0 }}
 }
 
@@ -58,36 +55,6 @@ func TestQuietReleaseWaitsForFreePagesWorthIt(t *testing.T) {
 	p.free = quietReleaseFreeBytes
 	if !q.observe(start.Add(11 * quietReleasePeriod)) {
 		t.Fatal("the spell did not release once its free pages reached the threshold")
-	}
-}
-
-func TestQuietReleaseGivesBackIdleConnectionStorageOncePerSpell(t *testing.T) {
-	start := time.Unix(1_000_000, 0)
-	p := &quietReleaseProbe{traffic: 100, free: quietReleaseFreeBytes / 2, idle: quietReleaseFreeBytes / 2}
-	q := p.quiet(start)
-	if q.observe(start.Add(quietReleasePeriod-time.Second)) || p.idleAsks != 0 {
-		t.Fatalf("asked the connections %d times before the spell lasted the period", p.idleAsks)
-	}
-	if !q.observe(start.Add(quietReleasePeriod)) || p.releases != 1 || p.idleAsks != 1 {
-		t.Fatalf("free pages plus the connections' storage reach the threshold: released %d, asked %d", p.releases, p.idleAsks)
-	}
-	for at := 2; at < 10; at++ {
-		q.observe(start.Add(time.Duration(at) * quietReleasePeriod))
-	}
-	if p.idleAsks != 1 {
-		t.Fatalf("asked the connections %d times in one spell, want once", p.idleAsks)
-	}
-	p.traffic++
-	p.free, p.idle = 1, 1
-	resumed := start.Add(100 * quietReleasePeriod)
-	q.observe(resumed)
-	for at := 1; at < 5; at++ {
-		if q.observe(resumed.Add(time.Duration(at) * quietReleasePeriod)) {
-			t.Fatal("released under the threshold")
-		}
-	}
-	if p.idleAsks != 2 || p.releases != 1 {
-		t.Fatalf("the second spell asked %d times and released %d, want once and none", p.idleAsks-1, p.releases-1)
 	}
 }
 

@@ -51,6 +51,7 @@ type providerRefreshTask struct {
 	targets          []*providerRefreshTarget
 	due              time.Time
 	failures         int
+	waitedThisRound  bool
 	routes           bool
 }
 
@@ -61,6 +62,15 @@ func (task *providerRefreshTask) loaded() bool {
 		}
 	}
 	return true
+}
+
+func (task *providerRefreshTask) nothingRuns() bool {
+	for _, target := range task.targets {
+		if target.product != nil {
+			return false
+		}
+	}
+	return len(task.targets) > 0
 }
 
 func (task *providerRefreshTask) current(entry *providerCacheEntry) bool {
@@ -693,6 +703,7 @@ func streamToCacheFile(requestKey, prefix string, body io.Reader) (string, strin
 
 func (r *providerRefresher) refresh(task *providerRefreshTask) providerRefreshResult {
 	started := time.Now()
+	task.waitedThisRound = false
 	entry := providerCache.get(task.requestKey)
 	serverFirst := false
 	for _, target := range task.targets {
@@ -701,7 +712,7 @@ func (r *providerRefresher) refresh(task *providerRefreshTask) providerRefreshRe
 	if entry != nil && entry.PendingSHA256 != "" && (entry.PendingWait == providerRefreshPendingRecompile ||
 		entry.PendingWait == "" && entry.PendingReason == providerRefreshPendingRecompile) {
 		pendingPath := providerCache.pendingPath(task.requestKey)
-		if size := fileSize(pendingPath); runsAsTextUntilTheApp(task, size) || size > 0 && taskBuiltHere(task) {
+		if size := fileSize(pendingPath); runsAsTextUntilTheApp(task, size) || size > 0 && (taskBuiltHere(task) || taskWaitsForNobody(task)) {
 			if sha, _, err := hashFile(pendingPath); err == nil && sha == entry.PendingSHA256 {
 				var confirmed time.Time
 				if entry.PendingCheckedAt > 0 {
@@ -711,7 +722,23 @@ func (r *providerRefresher) refresh(task *providerRefreshTask) providerRefreshRe
 			}
 		}
 	}
-	if entry != nil && entry.SourceSHA256 != "" && !task.current(entry) && entry.PendingSHA256 == "" &&
+	if entry != nil && task.nothingRuns() && entry.PendingSHA256 != "" && !serverFirst &&
+		(entry.PendingWait == providerRefreshPendingMemory || entry.PendingWait == "" && entry.PendingReason == providerRefreshPendingMemory) {
+		pendingPath := providerCache.pendingPath(task.requestKey)
+		if sha, size, err := hashFile(pendingPath); err == nil && sha == entry.PendingSHA256 {
+			var confirmed time.Time
+			if entry.PendingCheckedAt > 0 {
+				confirmed = time.Unix(entry.PendingCheckedAt, 0)
+			}
+			result := r.applySource(task, entry, providerSourceFile{pendingPath, sha, size, originPending}, confirmed, entry.PendingETag)
+			if result.stale || result.Result != providerRefreshPendingApp || result.PendingReason != providerRefreshPendingMemory ||
+				entry.SourceSHA256 == "" || entry.SourceSHA256 == sha {
+				return result
+			}
+			entry = providerCache.get(task.requestKey)
+		}
+	}
+	if entry != nil && entry.SourceSHA256 != "" && !task.current(entry) && (entry.PendingSHA256 == "" || task.nothingRuns()) &&
 		entry.RebuildFailedSHA256 != entry.SourceSHA256 && !serverFirst {
 		sourcePath := providerCache.sourcePath(task.requestKey)
 		if sha, size, err := hashFile(sourcePath); err == nil && sha == entry.SourceSHA256 {
@@ -750,7 +777,7 @@ func (r *providerRefresher) refresh(task *providerRefreshTask) providerRefreshRe
 		}
 		pendingPath := providerCache.pendingPath(task.requestKey)
 		if wait != providerRefreshPendingMemory && !(wait == providerRefreshPendingRecompile &&
-			(runsAsTextUntilTheApp(task, fileSize(pendingPath)) || taskBuiltHere(task))) {
+			(runsAsTextUntilTheApp(task, fileSize(pendingPath)) || taskBuiltHere(task) || taskWaitsForNobody(task))) {
 			return r.stillPending(task, started, wait)
 		}
 		return r.applySource(task, entry, providerSourceFile{pendingPath, entry.PendingSHA256, fileSize(pendingPath), originPending}, started, entry.PendingETag)
@@ -921,13 +948,21 @@ func (r *providerRefresher) failed(task *providerRefreshTask, started time.Time,
 }
 
 func (r *providerRefresher) pending(task *providerRefreshTask, started time.Time, reason string, source providerSourceFile, etag string) providerRefreshResult {
-	task.failures = 0
-	r.reschedule(task, time.Now(), false)
+	if reason == providerRefreshPendingMemory && task.nothingRuns() {
+		if !task.waitedThisRound {
+			task.failures++
+			task.waitedThisRound = true
+		}
+		r.reschedule(task, time.Now(), true)
+	} else {
+		task.failures = 0
+		r.reschedule(task, time.Now(), false)
+	}
 	count := r.liveCount(task)
 	sha := source.sha
 	if !r.locked(func() {
 		if waiting := providerCache.get(task.requestKey); waiting != nil && waiting.PendingSHA256 != "" && waiting.PendingSHA256 != sha &&
-			waiting.PendingCheckedAt > unixOrZero(started) {
+			(waiting.PendingCheckedAt > unixOrZero(started) || source.origin == originCache) {
 			source.discard()
 			r.recordLocked(task, func(cached *providerCacheEntry) {
 				cached.Result, cached.Error, cached.PendingReason = providerRefreshPendingApp, "", reason
@@ -1153,6 +1188,10 @@ func (r *providerRefresher) applySource(task *providerRefreshTask, entry *provid
 			cached.RebuildFailedSHA256 = ""
 			cached.CountBefore, cached.CountAfter = countBefore, countAfter
 			if source.origin == originCache {
+				if cached.PendingSHA256 == sha {
+					clearPendingLocked(cached)
+					dropPendingFile = true
+				}
 				reflectWaitLocked(cached)
 				return
 			}
@@ -1277,6 +1316,13 @@ func (r *providerRefresher) buildProduct(task *providerRefreshTask, group *provi
 		if len(stripped) > 0 {
 			content = prepared
 		}
+	}
+	if product.Stopgap && task.kind == "rule" {
+		text, err := stopgapText(target.sourceFormat, product.Format, content)
+		if err != nil {
+			return "", err
+		}
+		content = text
 	}
 	switch product.Variant {
 	case "mapped", "library":
@@ -1788,23 +1834,64 @@ func runsAsTextUntilTheApp(task *providerRefreshTask, size int64) bool {
 		if target.product != nil {
 			return false
 		}
-		if target.kind == "rule" && !strings.EqualFold(strings.TrimSpace(target.sourceFormat), "text") {
+		if target.kind == "rule" && !runsAsStopgapText(target.sourceFormat) {
 			return false
 		}
 	}
 	return true
 }
 
+func runsAsStopgapText(format string) bool {
+	return stopgapYaml(format) || strings.EqualFold(strings.TrimSpace(format), "text")
+}
+
+func stopgapYaml(format string) bool {
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "", "yaml":
+		return true
+	}
+	return false
+}
+
+func stopgapText(sourceFormat, providerFormat string, content []byte) ([]byte, error) {
+	if !stopgapYaml(sourceFormat) || !strings.EqualFold(strings.TrimSpace(providerFormat), "text") {
+		return content, nil
+	}
+	entries, err := ruleprovider.ClashClassicalLines(content, P.YamlRule)
+	if err != nil {
+		return nil, err
+	}
+	if len(entries) == 0 {
+		return []byte{}, nil
+	}
+	return []byte(strings.Join(entries, "\n") + "\n"), nil
+}
+
 func stopgapProduct(target *providerRefreshTarget) *providerCacheProduct {
 	variant, behavior, format := "proxy", target.sourceBehavior, target.sourceFormat
 	if target.kind == "rule" {
-		variant, behavior, format = "text", strings.ToLower(strings.TrimSpace(target.sourceBehavior)), "text"
+		if read, _ := target.definition["format"].(string); read != "" {
+			format = read
+		}
+		variant, behavior = "text", strings.ToLower(strings.TrimSpace(target.sourceBehavior))
 	}
 	return &providerCacheProduct{
 		Variant: variant, Entry: awaitedEntry, Files: []string{awaitedEntry}, Stopgap: true,
 		Behavior: behavior, Format: format, Generation: filepath.Base(target.productDirectory),
 		SourceForm: catalogForm(target.sourceBehavior, target.sourceFormat), Selection: target.selection,
 	}
+}
+
+func taskWaitsForNobody(task *providerRefreshTask) bool {
+	if len(task.targets) == 0 {
+		return false
+	}
+	for _, target := range task.targets {
+		if target.product != nil || target.kind != "rule" || formTheAppCompiles(target) != "" {
+			return false
+		}
+	}
+	return true
 }
 
 func taskBuiltHere(task *providerRefreshTask) bool {

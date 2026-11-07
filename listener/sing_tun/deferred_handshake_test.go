@@ -49,16 +49,20 @@ func TestDeferHandshakeScope(t *testing.T) {
 	}
 }
 
-func TestTheTunnelsOwnAddressesAreNotDeferred(t *testing.T) {
+func TestTheTunnelsOwnAddressesWaitForTheirDial(t *testing.T) {
 	h := &ListenerHandler{
-		Inet4Address: []netip.Prefix{netip.MustParsePrefix("172.19.0.1/30")},
-		Inet6Address: []netip.Prefix{netip.MustParsePrefix("2001:db8:1234::/64")},
+		Inet4Address: []netip.Prefix{netip.MustParsePrefix("198.18.0.1/30")},
+		Inet6Address: []netip.Prefix{netip.MustParsePrefix("fdfe:dcba:9876::1/126")},
+		DnsAddrPorts: []netip.AddrPort{netip.MustParseAddrPort("198.18.0.2:53")},
 	}
-	for _, addr := range []string{"172.19.0.1", "2001:db8:1234::5"} {
-		dst := M.SocksaddrFrom(netip.MustParseAddr(addr), 443)
-		if h.DeferHandshake(N.NetworkTCP, M.Socksaddr{}, dst) {
-			t.Fatalf("%s: a flow to the tunnel itself has no dial to wait for", addr)
+	for _, addr := range []string{"198.18.0.0:62078", "198.18.0.1:443", "198.18.0.2:5", "[fdfe:dcba:9876::]:62078"} {
+		dst := M.SocksaddrFromNetIP(netip.MustParseAddrPort(addr))
+		if !h.DeferHandshake(N.NetworkTCP, M.Socksaddr{}, dst) {
+			t.Fatalf("%s: a flow to the tunnel's own prefixes that no hijack answers must wait for its dial", addr)
 		}
+	}
+	if h.DeferHandshake(N.NetworkTCP, M.Socksaddr{}, M.SocksaddrFrom(netip.MustParseAddr("198.18.0.2"), 53)) {
+		t.Fatal("198.18.0.2:53 is the hijacked resolver, answered inside the tunnel")
 	}
 }
 

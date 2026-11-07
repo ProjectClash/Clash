@@ -12,6 +12,7 @@ import (
 	"github.com/ProjectClash/Clash/component/geodata"
 	C "github.com/ProjectClash/Clash/constant"
 	P "github.com/ProjectClash/Clash/constant/provider"
+	ruleprovider "github.com/ProjectClash/Clash/rules/provider"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -185,6 +186,10 @@ func ruleCatalogDocument(content string, resources resourceMap, policy appleRunt
 				continue
 			}
 			if _, identityErr := stagedSourceIdentity(sourcePath); identityErr != nil {
+				loads[name] = ruleLoad{content: payload, updatedAt: info.ModTime()}
+				continue
+			}
+			if strings.HasSuffix(sourcePath, providerRuntimeIndexStubSuffix) && ruleprovider.ClashStubbedPayload(payload) {
 				loads[name] = ruleLoad{content: payload, updatedAt: info.ModTime()}
 				continue
 			}

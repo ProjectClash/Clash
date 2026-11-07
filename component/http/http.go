@@ -8,6 +8,7 @@ import (
 	URL "net/url"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/ProjectClash/Clash/component/ca"
@@ -18,16 +19,17 @@ import (
 	"github.com/metacubex/http"
 )
 
-var (
-	ua string
-)
+var ua atomic.Pointer[string]
 
 func UA() string {
-	return ua
+	if p := ua.Load(); p != nil {
+		return *p
+	}
+	return ""
 }
 
 func SetUA(UA string) {
-	ua = UA
+	ua.Store(&UA)
 }
 
 func HttpRequest(ctx context.Context, url, method string, header map[string][]string, body io.Reader, options ...Option) (*http.Response, error) {

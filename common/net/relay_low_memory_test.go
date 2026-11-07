@@ -78,12 +78,16 @@ func TestRelayCopyPreservesReadWaiterAndBufferRequirements(t *testing.T) {
 	for _, handshake := range []bool{false, true} {
 		source := &relayWaitReader{}
 		source.handshake = handshake
-		destination := &relayHeadroomWriter{t: t}
+		mtu := relayBurstMTU - 32 - 16
+		if handshake {
+			mtu = 8192
+		}
+		destination := &relayHeadroomWriter{t: t, mtu: mtu}
 		n, err := relayCopy(destination, source)
 		if err != nil || n != 4 || destination.String() != "wait" || source.waits != 2 {
 			t.Fatalf("handshake=%v: n=%d output=%q waits=%d err=%v", handshake, n, destination.String(), source.waits, err)
 		}
-		if want := (N.ReadWaitOptions{MTU: 8192, FrontHeadroom: 32, RearHeadroom: 16}); source.options != want {
+		if want := (N.ReadWaitOptions{MTU: mtu, FrontHeadroom: 32, RearHeadroom: 16}); source.options != want {
 			t.Fatalf("read waiter options = %+v, want %+v", source.options, want)
 		}
 	}
@@ -116,14 +120,15 @@ func (r *relayWaitReader) WaitReadBuffer() (*buf.Buffer, error) {
 
 type relayHeadroomWriter struct {
 	bytes.Buffer
-	t *testing.T
+	t   *testing.T
+	mtu int
 }
 
 func (*relayHeadroomWriter) FrontHeadroom() int { return 32 }
 func (*relayHeadroomWriter) RearHeadroom() int  { return 16 }
 func (w *relayHeadroomWriter) WriteBuffer(b *buf.Buffer) error {
 	defer b.Release()
-	if b.Start() != 32 || b.Cap() != 8192+32+16 {
+	if b.Start() != 32 || b.Cap() != w.mtu+32+16 {
 		w.t.Errorf("headroom lost: start=%d cap=%d", b.Start(), b.Cap())
 	}
 	_, err := w.Write(b.Bytes())
@@ -132,7 +137,7 @@ func (w *relayHeadroomWriter) WriteBuffer(b *buf.Buffer) error {
 
 func TestRelayCopyPreservesFallbackBufferRequirements(t *testing.T) {
 	source := &relayMTUReader{Reader: strings.NewReader("fallback")}
-	destination := &relayHeadroomWriter{t: t}
+	destination := &relayHeadroomWriter{t: t, mtu: 8192}
 	n, err := relayCopy(destination, source)
 	if err != nil || n != 8 || destination.String() != "fallback" || source.capacity != 8192 {
 		t.Fatalf("fallback: n=%d output=%q capacity=%d err=%v", n, destination.String(), source.capacity, err)

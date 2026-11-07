@@ -28,7 +28,6 @@ require (
 	github.com/metacubex/jls-tls v0.0.0-20260723084315-67adc0e2f796
 	github.com/metacubex/kcp-go v0.0.0-20260105040817-550693377604
 	github.com/metacubex/mhurl v0.1.0
-	github.com/metacubex/mipstack v0.0.0-20261019124225-9a80a07eaeb9
 	github.com/metacubex/mlkem v0.1.0
 	github.com/metacubex/quic-go v0.61.1-0.20260727080200-2548683b76f4
 	github.com/metacubex/randv2 v0.2.0
@@ -96,7 +95,6 @@ require (
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
 	github.com/gaukas/godicttls v0.0.4 // indirect
-	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/gobwas/httphead v0.1.0 // indirect
 	github.com/gobwas/pool v0.2.1 // indirect
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
@@ -164,8 +162,6 @@ replace github.com/metacubex/smux => ./third_party/smux
 // queue; the snapshot starts the queue over once it is written out.
 replace go.yaml.in/yaml/v3 => ./third_party/yaml-v3
 
-// Pin the reviewed with_low_memory TCP storage patch; replacements are not inherited.
-replace github.com/metacubex/mipstack => ./third_party/mipstack
 
 // Pin the ARM64 race CAS repair; ordinary build source is unchanged.
 replace github.com/metacubex/gvisor => ./third_party/gvisor

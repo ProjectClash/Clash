@@ -3,6 +3,7 @@ package statistic
 import (
 	"io"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/ProjectClash/Clash/common/atomic"
@@ -40,6 +41,10 @@ type tcpTracker struct {
 	manager       *Manager
 	finalOutbound string
 	bucket        OutboundBucket
+
+	spliceAccess sync.Mutex
+	splice       io.Closer
+	spliceClosed bool
 
 	pushToManager bool `json:"-"`
 
@@ -120,7 +125,31 @@ func (tt *tcpTracker) UnwrapWriter() (io.Writer, []N.CountFunc) {
 
 func (tt *tcpTracker) Close() error {
 	tt.manager.Leave(tt)
+	tt.spliceAccess.Lock()
+	tt.spliceClosed = true
+	splice := tt.splice
+	tt.spliceAccess.Unlock()
+	if splice != nil {
+		return splice.Close()
+	}
 	return tt.Conn.Close()
+}
+
+
+func (tt *tcpTracker) AttachSplice(splice io.Closer) bool {
+	tt.spliceAccess.Lock()
+	defer tt.spliceAccess.Unlock()
+	if tt.spliceClosed || tt.splice != nil {
+		return false
+	}
+	tt.splice = splice
+	return true
+}
+
+func (tt *tcpTracker) DetachSplice() {
+	tt.spliceAccess.Lock()
+	tt.splice = nil
+	tt.spliceAccess.Unlock()
 }
 
 func (tt *tcpTracker) Upstream() any {

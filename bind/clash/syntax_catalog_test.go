@@ -224,7 +224,7 @@ func TestSyntaxCatalogFieldsSayWhenThePlatformDecides(t *testing.T) {
 		byPath[field.Path] = field
 	}
 	for path, want := range map[string]syntaxPlatformDecision{
-		"tun.stack":             {When: "conditional", Condition: "includeAllNetworks", Category: deviationForced},
+		"tun.stack":             {When: "always", Value: "go", Category: deviationForced},
 		"allow-lan":             {When: "conditional", Condition: "lanSharingOff", Category: deviationStripped},
 		"profile.store-fake-ip": {When: "default", Value: "true", Category: deviationForced},
 		"unified-delay":         {When: "default", Value: "true", Category: deviationForced},
@@ -248,7 +248,7 @@ func TestSyntaxCatalogFieldsSayWhenThePlatformDecides(t *testing.T) {
 	}
 	rules := map[string]*deviationRule{}
 	for i := range deviationRules {
-		if !deviationRules[i].ruleScan {
+		if deviationRules[i].decidesKey() {
 			rules[deviationRules[i].field] = &deviationRules[i]
 		}
 	}
@@ -295,33 +295,34 @@ func TestSyntaxCatalogFieldsSayWhenThePlatformDecides(t *testing.T) {
 }
 
 func TestSyntaxCatalogCarriesTheUnwrittenTunStackDefault(t *testing.T) {
-	for _, on := range []bool{false, true} {
-		withIncludeAllNetworks(t, on)
-		catalog := mustCatalog(t, RuntimeProfileIOSPacketTunnel)
-		var field *syntaxField
-		for i := range catalog.Fields {
-			if catalog.Fields[i].Path == "tun.stack" {
-				field = &catalog.Fields[i]
+	{
+		for _, profile := range []string{RuntimeProfileIOSPacketTunnel, RuntimeProfileMacOSPacketTunnel, RuntimeProfileTVOSPacketTunnel} {
+			catalog := mustCatalog(t, profile)
+			var field *syntaxField
+			for i := range catalog.Fields {
+				if catalog.Fields[i].Path == "tun.stack" {
+					field = &catalog.Fields[i]
+				}
 			}
-		}
-		if field == nil || field.PlatformDecision == nil {
-			t.Fatalf("IAN=%v: tun.stack has no platform decision", on)
-		}
-		decision := field.PlatformDecision
-		if decision.When != "conditional" || decision.Condition != deviationConditionIncludeAllNetworks || decision.Unwritten != "gvisor" {
-			t.Errorf("IAN=%v: decision %+v; want conditional on includeAllNetworks with unwritten gvisor", on, *decision)
-		}
-		var key *syntaxPlatformKey
-		for i := range catalog.PlatformDecidedKeys {
-			if catalog.PlatformDecidedKeys[i].Path == "tun.stack" {
-				key = &catalog.PlatformDecidedKeys[i]
+			if field == nil || field.PlatformDecision == nil {
+				t.Fatalf("%s: tun.stack has no platform decision", profile)
 			}
-		}
-		if key == nil {
-			t.Fatalf("IAN=%v: tun.stack is missing from the platform-decided keys", on)
-		}
-		if key.UpstreamDefault != "mips" || key.DefaultOnly == on {
-			t.Errorf("IAN=%v: key %+v; want upstreamDefault mips and defaultOnly %v", on, *key, !on)
+			decision := field.PlatformDecision
+			if decision.When != "always" || decision.Value != "go" || decision.Condition != "" || decision.Unwritten != "" || len(decision.Replaces) != 0 {
+				t.Errorf("%s: decision %+v; want always go", profile, *decision)
+			}
+			for _, unavailable := range field.UnavailableValues {
+				t.Errorf("%s: tun.stack walls off %+v", profile, unavailable)
+			}
+			var key *syntaxPlatformKey
+			for i := range catalog.PlatformDecidedKeys {
+				if catalog.PlatformDecidedKeys[i].Path == "tun.stack" {
+					key = &catalog.PlatformDecidedKeys[i]
+				}
+			}
+			if key == nil || key.UpstreamDefault != "mips" || key.DefaultOnly || key.Value != "go" {
+				t.Errorf("%s: key %+v; want forced go against upstream mips", profile, key)
+			}
 		}
 	}
 }

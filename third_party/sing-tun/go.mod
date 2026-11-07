@@ -6,8 +6,6 @@ require (
 	github.com/go-ole/go-ole v1.3.0
 	github.com/google/btree v1.1.3
 	github.com/metacubex/fswatch v0.1.1
-	github.com/metacubex/gvisor v0.0.0-20260922041103-e2cbcd6e7400
-	github.com/metacubex/mipstack v0.0.0-20261019124225-9a80a07eaeb9
 	github.com/metacubex/nftables v0.0.0-20260426003805-208c2c1ba2cb
 	github.com/metacubex/sing v0.5.8
 	github.com/sagernet/netlink v0.0.0-20240612041022-b9a21c07ac6a
@@ -27,11 +25,4 @@ require (
 	github.com/vishvananda/netns v0.0.5 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/sync v0.11.0 // indirect
-	golang.org/x/time v0.10.0 // indirect
 )
-
-// Pin the reviewed with_low_memory TCP storage patch; replacements are not inherited.
-replace github.com/metacubex/mipstack => ../mipstack
-
-// Pin the ARM64 race CAS repair; ordinary build source is unchanged.
-replace github.com/metacubex/gvisor => ../gvisor

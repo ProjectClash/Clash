@@ -40,8 +40,6 @@ import (
 var InterfaceName = "Meta"
 var EnforceBindInterface = false
 
-var IncludeAllNetworks = false
-
 var deviceFailure atomic.Pointer[func(error)]
 
 func SetDeviceFailure(hook func(error)) {
@@ -174,11 +172,9 @@ func New(options LC.Tun, tunnel C.Tunnel, additions ...inbound.Addition) (l *Lis
 		tunName = CalculateInterfaceName(InterfaceName)
 		options.Device = tunName
 	}
-	forwarderBindInterface := false
 	if options.FileDescriptor > 0 {
 		if tunnelName, err := getTunnelName(int32(options.FileDescriptor)); err == nil {
 			tunName = tunnelName // sing-tun must have the truth tun interface name even it from a fd
-			//forwarderBindInterface = true
 			log.Debugln("[TUN] use tun name %s for fd %d", tunnelName, options.FileDescriptor)
 		} else if options.Device != "clash-packet-flow" {
 			log.Warnln("[TUN] get tun name failed for fd %d, fallback to use tun interface name %s", options.FileDescriptor, tunName)
@@ -515,29 +511,17 @@ func New(options LC.Tun, tunnel C.Tunnel, additions ...inbound.Addition) (l *Lis
 	// after tun.New sing-tun has set DNS to TUN interface
 	resolver.AddSystemDnsBlacklist(dnsServerIp...)
 
-	stackOptions := tun.StackOptions{
-		Context:                ctx,
-		Tun:                    tunIf,
-		TunOptions:             tunOptions,
-		EndpointIndependentNat: options.EndpointIndependentNat,
-		UDPTimeout:             udpTimeout,
-		ICMPTimeout:            icmpTimeout,
-		Handler:                handler,
-		Logger:                 log.SingLogger,
-		ForwarderBindInterface: forwarderBindInterface,
-		InterfaceFinder:        interfaceFinder,
-		TCPCongestionControl:   options.CongestionController,
-		EnforceBindInterface:   EnforceBindInterface,
-		IncludeAllNetworks:     IncludeAllNetworks,
-	}
 	l.tunIf = tunIf
 
-	tunStack, err := tun.NewStack(strings.ToLower(options.Stack.String()), stackOptions)
-	if err != nil {
-		return
-	}
-
-	err = tunStack.Start()
+	tunStack, err := startGoStack(GoStackOptions{
+		Context:           ctx,
+		Device:            tunIf,
+		TunOptions:        tunOptions,
+		Handler:           handler,
+		UDPTimeout:        udpTimeout,
+		ICMPTimeout:       icmpTimeout,
+		CongestionControl: options.CongestionController,
+	})
 	if err != nil {
 		return
 	}
@@ -574,7 +558,7 @@ func New(options LC.Tun, tunnel C.Tunnel, additions ...inbound.Addition) (l *Lis
 		tunName = fmt.Sprintf("%s(fd=%d)", tunName, options.FileDescriptor)
 	}
 	l.addrStr = fmt.Sprintf("%s(%s,%s), mtu: %d, auto route: %v, auto redir: %v, ip stack: %s, dns mode: %s",
-		tunName, tunOptions.Inet4Address, tunOptions.Inet6Address, tunMTU, options.AutoRoute, options.AutoRedirect, options.Stack, options.DNSMode)
+		tunName, tunOptions.Inet4Address, tunOptions.Inet6Address, tunMTU, options.AutoRoute, options.AutoRedirect, C.TunGo, options.DNSMode)
 	return
 }
 
@@ -718,7 +702,11 @@ func (l *Listener) Close() error {
 }
 
 func (l *Listener) Config() LC.Tun {
-	return l.options
+	conf := l.options
+	if l.tunStack != nil {
+		conf.Stack = C.TunGo
+	}
+	return conf
 }
 
 func (l *Listener) Address() string {

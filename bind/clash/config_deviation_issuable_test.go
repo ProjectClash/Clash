@@ -60,14 +60,12 @@ func TestUIDRemovalIsReportedFromTheRulesList(t *testing.T) {
 func TestEveryRegisteredRuleIsIssuableOnSomeDocument(t *testing.T) {
 	written := issuanceProbeDocument(t)
 	const unwritten = "proxies: []\nrules:\n  - MATCH,DIRECT\n"
-	restoreLAN, restoreAllNetworks := !allowLanForcedOff.Load(), includeAllNetworksRequested.Load()
+	restoreLAN := !allowLanForcedOff.Load()
 	t.Cleanup(func() {
 		allowLanForcedOff.Store(!(restoreLAN))
-		includeAllNetworksRequested.Store(restoreAllNetworks)
 	})
 	for _, rule := range deviationRules {
 		allowLanForcedOff.Store(!(restoreLAN && rule.condition != deviationConditionLANSharingOff))
-		includeAllNetworksRequested.Store(restoreAllNetworks || rule.condition == deviationConditionIncludeAllNetworks)
 		for _, seat := range registryProfiles {
 			policy := runtimePolicyFor(seat.profile, seat.underNetworkExtension)
 			if rule.applies != nil && !rule.applies(policy) {
@@ -113,6 +111,12 @@ func issuanceProbeDocument(t *testing.T) string {
 		"uuid": "b831381d-6324-4d53-ad4f-8cda48b30811", "network": "xhttp",
 		"xhttp-opts": map[string]any{"path": "/"},
 	}}}
+	for _, nodeType := range ipStackNodeTypes {
+		root["proxies"] = append(root["proxies"].([]any), map[string]any{
+			"name": nodeType + "-node", "type": nodeType,
+			"ip-stack": map[string]any{"mode": "gvisor", "congestion-controller": "bbr3"},
+		})
+	}
 	rules := []any{"UID,501,DIRECT", "MATCH,DIRECT"}
 	for _, rule := range deviationRules {
 		if rule.ruleScan || rule.defaultOnly || strings.Contains(rule.field, " ") {

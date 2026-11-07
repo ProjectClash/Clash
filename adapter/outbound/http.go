@@ -40,6 +40,7 @@ type HttpOption struct {
 	Certificate    string            `proxy:"certificate,omitempty"`
 	PrivateKey     string            `proxy:"private-key,omitempty"`
 	Headers        map[string]string `proxy:"headers,omitempty"`
+	ClashConnectSniffedHost bool `proxy:"-"`
 }
 
 // StreamConnContext implements C.ProxyAdapter
@@ -91,7 +92,7 @@ func (h *Http) shakeHandContext(ctx context.Context, c net.Conn, metadata *C.Met
 		defer done(&err)
 	}
 
-	addr := metadata.RemoteAddress()
+	addr := h.connectTarget(metadata)
 	HeaderString := "CONNECT " + addr + " HTTP/1.1\r\n"
 	tempHeaders := map[string]string{
 		"Host":             addr,

@@ -5,7 +5,6 @@ import (
 
 	"github.com/ProjectClash/Clash/component/process"
 	"github.com/ProjectClash/Clash/config"
-	C "github.com/ProjectClash/Clash/constant"
 	LC "github.com/ProjectClash/Clash/listener/config"
 )
 
@@ -57,9 +56,6 @@ func ensureTunEnabled(tun *LC.Tun) {
 
 func overrideTunForIOS(tun *LC.Tun) {
 	tun.Device = packetFlowBridgeDevice
-	if includeAllNetworksActive() && (tun.Stack == C.TunSystem || tun.Stack == C.TunMixed) {
-		tun.Stack = C.TunGvisor
-	}
 	tun.MTU = uint32(effectiveTunMTU())
 	tun.AutoRoute = false
 	tun.AutoDetectInterface = false

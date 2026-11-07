@@ -107,16 +107,5 @@ func (h *ListenerHandler) DeferHandshake(network string, source M.Socksaddr, des
 	if network != N.NetworkTCP {
 		return false
 	}
-	dst := destination.Addr
-	for _, prefix := range h.Inet4Address {
-		if prefix.Contains(dst) {
-			return false
-		}
-	}
-	for _, prefix := range h.Inet6Address {
-		if prefix.Contains(dst) {
-			return false
-		}
-	}
 	return !h.ShouldHijackDns(destination.AddrPort())
 }

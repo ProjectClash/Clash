@@ -39,6 +39,8 @@ const clashMrsCacheTempPrefix = ".mrs-mapped-"
 
 var clashMrsCacheWrites atomic.Int64
 
+const ClashMrsMappedFormat = "CDS1+CIP1/1"
+
 func ClashSetMrsMappedCacheDirectory(directory, identity string) {
 	clashMrsCache.Lock()
 	defer clashMrsCache.Unlock()
@@ -48,11 +50,59 @@ func ClashSetMrsMappedCacheDirectory(directory, identity string) {
 	sum := sha256.Sum256([]byte("mrs-mapped/CDS1+CIP1/" + identity))
 	clashMrsCache.root = directory
 	clashMrsCache.generation = hex.EncodeToString(sum[:8])
+	if directory != "" {
+		clashMrsCacheAdopt(directory, clashMrsCache.generation, identity)
+		clashMrsCacheMark(filepath.Join(directory, clashMrsCache.generation), identity)
+	}
 	clashMrsCache.index = nil
 	clashMrsCache.used = map[string]time.Time{}
 	clashMrsCache.providers = map[string]string{}
 	clashMrsCache.refs = map[string]int{}
 	clashMrsCache.swept = time.Now()
+}
+
+const clashMrsCacheFormatFile = "format"
+
+const clashMrsCacheUnmarkedFormat = "CDS1+CIP1/1"
+
+func clashMrsCacheAdopt(root, generation, format string) {
+	current := filepath.Join(root, generation)
+	if _, err := os.Stat(current); err == nil {
+		return
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	newest, newestAt := "", time.Time{}
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Name() == generation || !clashMrsCacheGenerationName(entry.Name()) {
+			continue
+		}
+		held := clashMrsCacheUnmarkedFormat
+		if marked, err := os.ReadFile(filepath.Join(root, entry.Name(), clashMrsCacheFormatFile)); err == nil {
+			held = string(marked)
+		}
+		if held != format {
+			continue
+		}
+		if info, err := entry.Info(); err == nil && info.ModTime().After(newestAt) {
+			newest, newestAt = entry.Name(), info.ModTime()
+		}
+	}
+	if newest != "" {
+		_ = os.Rename(filepath.Join(root, newest), current)
+	}
+}
+
+func clashMrsCacheMark(directory, format string) {
+	path := filepath.Join(directory, clashMrsCacheFormatFile)
+	if held, err := os.ReadFile(path); err == nil && string(held) == format {
+		return
+	}
+	if os.MkdirAll(directory, 0o700) == nil {
+		_ = os.WriteFile(path, []byte(format), 0o600)
+	}
 }
 
 func ClashMrsMappedCacheDirectory() string {

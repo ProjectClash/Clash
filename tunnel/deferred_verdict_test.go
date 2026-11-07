@@ -182,25 +182,11 @@ func (nothingPacketConn) ResolveUDP(context.Context, *C.Metadata) error { return
 
 func withVerdictTunnel(t *testing.T, target string, proxy C.Proxy) {
 	t.Helper()
-	prevMode, prevProxies, prevRules, prevStatus := Mode(), loadProxies(), rules_(), status.Load()
-	t.Cleanup(func() {
-		SetMode(prevMode)
-		UpdateProxies(prevProxies, nil)
-		UpdateRules(prevRules, nil, nil)
-		status.Store(prevStatus)
-	})
-	UpdateProxies(map[string]C.Proxy{
+	withRules(t, map[string]C.Proxy{
 		"DIRECT": doorProxy{name: "DIRECT", typ: C.Direct},
 		"REJECT": doorProxy{name: "REJECT", typ: C.Reject},
 		target:   proxy,
-	}, nil)
-	match, err := R.ParseRule("MATCH", "", target, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	UpdateRules([]C.Rule{match}, nil, nil)
-	SetMode(Rule)
-	OnRunning()
+	}, [3]string{"MATCH", "", target})
 }
 
 var errRefused = &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}
@@ -397,13 +383,31 @@ func TestAClientThatLeftIsNotDialledForAgain(t *testing.T) {
 
 func withSnifferOn(t *testing.T) {
 	t.Helper()
+	withSniffer(t, false)
+}
+
+func withSniffer(t *testing.T, forceDnsMapping bool, forceDomains ...string) {
+	t.Helper()
+	previous := snifferDispatcher.Load()
+	UpdateSniffer(newTestSniffer(t, forceDnsMapping, forceDomains...))
+	t.Cleanup(func() { UpdateSniffer(previous) })
+}
+
+func newTestSniffer(t *testing.T, forceDnsMapping bool, forceDomains ...string) *sniffer.Dispatcher {
+	t.Helper()
 	ports, err := utils.NewUnsignedRanges[uint16]("80,443")
 	if err != nil {
 		t.Fatal(err)
 	}
+	var force []C.DomainMatcher
+	for _, domain := range forceDomains {
+		force = append(force, exactDomain(domain))
+	}
 	dispatcher, err := sniffer.NewDispatcher(&sniffer.Config{
-		Enable:      true,
-		ParsePureIp: true,
+		Enable:          true,
+		ParsePureIp:     true,
+		ForceDnsMapping: forceDnsMapping,
+		ForceDomain:     force,
 		Sniffers: map[CS.Type]sniffer.SnifferConfig{
 			CS.TLS:  {Ports: ports},
 			CS.HTTP: {Ports: ports},
@@ -412,9 +416,34 @@ func withSnifferOn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	previous := snifferDispatcher.Load()
-	UpdateSniffer(dispatcher)
-	t.Cleanup(func() { UpdateSniffer(previous) })
+	return dispatcher
+}
+
+type exactDomain string
+
+func (d exactDomain) MatchDomain(domain string) bool { return string(d) == domain }
+
+func withRules(t *testing.T, proxies map[string]C.Proxy, lines ...[3]string) {
+	t.Helper()
+	prevMode, prevProxies, prevRules, prevStatus := Mode(), loadProxies(), rules_(), status.Load()
+	t.Cleanup(func() {
+		SetMode(prevMode)
+		UpdateProxies(prevProxies, nil)
+		UpdateRules(prevRules, nil, nil)
+		status.Store(prevStatus)
+	})
+	UpdateProxies(proxies, nil)
+	var rules []C.Rule
+	for _, line := range lines {
+		rule, err := R.ParseRule(line[0], line[1], line[2], nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rules = append(rules, rule)
+	}
+	UpdateRules(rules, nil, nil)
+	SetMode(Rule)
+	OnRunning()
 }
 
 func TestTheSnifferStandsAsideForABareGlobalIPv6FlowDialledPhysically(t *testing.T) {

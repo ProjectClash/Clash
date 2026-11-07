@@ -33,7 +33,6 @@ func TestUserFacingSentencesCarryNoMechanism(t *testing.T) {
 		"tunPacketTunnelShape": tunPacketTunnelShape,
 		"tunRoutingIsApples":   tunRoutingIsApples,
 		"tunOffloadBridge":     tunOffloadBridge,
-		"tunBatchIOBridge":     tunBatchIOBridge,
 		"tunAutoRouteFilter":   tunAutoRouteFilter,
 	} {
 		check("family "+name, text)

@@ -161,6 +161,9 @@ func TestOneDecodeReadsWhatEachDecodeRead(t *testing.T) {
 		"odd entries":     "proxies:\n  - {name: a, type: easytier, network-name: n, network-secret: s}\n  - {1: one, name: b, type: easytier}\n  - ~\n  - {name: c, type: socks5, server: 10.0.0.1, port: 1080}\n",
 		"scalar entry":    "proxies:\n  - just-a-name\n",
 		"easytier":        easyTierWallDocument,
+		"ip-stack":        ipStackLibraryDocument,
+		"ip-stack published": "proxies:\n  - {name: zt, type: zerotier, network: n, ip-stack: {mode: gvisor, congestion-controller: cubic}}\n" +
+			"x-clash-node-library: {path: /nowhere, sha256: '00', inline-at: [2], ip-stack-written: {'proxies[wireguard].ip-stack.mode': {count: 2, first: 'wg1 (proxies[0]): gvisor', at: 0}}}\n",
 		"xhttp":           "proxies:\n  - {name: a, type: vless, server: 10.0.0.1, port: 443, uuid: b831381d-6324-4d53-ad4f-8cda48b30811, network: xhttp, xhttp-opts: {path: /}}\n  - {name: b, type: vless, server: 10.0.0.2, port: 443, uuid: b831381d-6324-4d53-ad4f-8cda48b30811, network: xhttp, xhttp-opts: {reuse-settings: {max-concurrency: '1'}}}\n  - {name: c, type: vless, server: 10.0.0.3, port: 443, uuid: b831381d-6324-4d53-ad4f-8cda48b30811, network: ws}\n",
 		"metadata rules":  "rules:\n  - PROCESS-NAME,Safari,DIRECT\n  - PROCESS-NAME-REGEX,.*,REJECT\n  - UID,501,DIRECT\n  - AND,((UID,501),(DOMAIN,x.com)),DIRECT\n  - 42\n  - MATCH,DIRECT\nsub-rules:\n  s1:\n    - UID,0,DIRECT\n    - MATCH,DIRECT\n  s0:\n    - PROCESS-PATH,/bin/x,DIRECT\n",
 		"bad probe value": "unified-delay: maybe\n",
@@ -190,8 +193,6 @@ func TestOneDecodeReadsWhatEachDecodeRead(t *testing.T) {
 		}
 	}
 	defer SetAllowLanPermitted(!allowLanForcedOff.Load())
-	previousInclude := includeAllNetworksRequested.Load()
-	defer includeAllNetworksRequested.Store(previousInclude)
 
 	for name, text := range documents {
 		t.Run(name, func(t *testing.T) {
@@ -215,18 +216,17 @@ func TestOneDecodeReadsWhatEachDecodeRead(t *testing.T) {
 			}
 			for _, lanOff := range []bool{false, true} {
 				SetAllowLanPermitted(!lanOff)
-				for _, include := range []bool{false, true} {
-					includeAllNetworksRequested.Store(include)
+				{
 					for _, c := range policies {
 						want, wantErr := collectConfigDeviations(text, c.policy)
 						got, gotErr := decoded.deviationRows(c.policy)
 						if fmt.Sprint(gotErr) != fmt.Sprint(wantErr) {
-							t.Fatalf("%s lan-off %v include-all %v: report error %v, want %v", c.name, lanOff, include, gotErr, wantErr)
+							t.Fatalf("%s lan-off %v: report error %v, want %v", c.name, lanOff, gotErr, wantErr)
 						}
 						gotJSON, _ := json.Marshal(got)
 						wantJSON, _ := json.Marshal(want)
 						if string(gotJSON) != string(wantJSON) {
-							t.Fatalf("%s lan-off %v include-all %v: rows\n%s\nwant\n%s", c.name, lanOff, include, gotJSON, wantJSON)
+							t.Fatalf("%s lan-off %v: rows\n%s\nwant\n%s", c.name, lanOff, gotJSON, wantJSON)
 						}
 					}
 				}

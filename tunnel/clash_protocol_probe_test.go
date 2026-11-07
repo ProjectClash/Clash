@@ -214,6 +214,20 @@ func TestTheProtocolReaderLeavesAHeldBackIPv6FlowUnanswered(t *testing.T) {
 	}
 }
 
+func TestTheProtocolReaderStandsAsideWhereTheSnifferDoes(t *testing.T) {
+	for _, forceDnsMapping := range []bool{true, false} {
+		withDoorTestTunnel(t, "DIRECT")
+		withSniffer(t, forceDnsMapping)
+		held := newVerdictConn(true)
+		var peek sync.Mutex
+		_ = tcpProtocolProbe(N.NewBufferedConn(held), &peek, dnsMappedFlowTo("2001:db8::10", "pay.bilibili.com"))()
+		if answered := !held.HandshakeDeferred(); answered == forceDnsMapping {
+			t.Fatalf("force-dns-mapping %v: the reader answered the held-back handshake: %v", forceDnsMapping, answered)
+		}
+		_ = held.Close()
+	}
+}
+
 func TestNoReaderIsInstalledBeforeAReadingRuleIsParsed(t *testing.T) {
 	if _, err := R.ParseRule("PROTOCOL", "TCP", "DIRECT", nil, nil); err != nil {
 		t.Fatal(err)
