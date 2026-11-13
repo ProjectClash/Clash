@@ -41,7 +41,7 @@ func TestAProxyThatAsksForTheSniffedNameConnectsToIt(t *testing.T) {
 				line <- strings.TrimSpace(request)
 				_, _ = server.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
 			}()
-			_ = proxy.shakeHandContext(context.Background(), client, tc.metadata)
+			_ = proxy.shakeHandContext(context.Background(), client, bufio.NewReader(client), tc.metadata)
 			if got := <-line; got != "CONNECT "+tc.want+" HTTP/1.1" {
 				t.Fatalf("the proxy was asked %q, want CONNECT %s", got, tc.want)
 			}

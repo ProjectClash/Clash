@@ -1408,7 +1408,7 @@ var (
 )
 
 func (cs *clientStream) frameScratchBufferLen(maxFrameSize int) int {
-	const max = 512 << 10
+	max := http.HTTP2RequestBodyScratchMax(cs.reqBodyContentLength)
 	n := int64(maxFrameSize)
 	if n > max {
 		n = max

@@ -161,8 +161,7 @@ func withUDPQuota(maker func() C.PacketSender) func() C.PacketSender {
 	return func() C.PacketSender { return &quotaSender{PacketSender: maker()} }
 }
 
-func admitUDPSession(ctx context.Context, sender C.PacketSender) bool {
-	waitNewSessionGate(ctx, C.UDP)
+func admitUDPSession(sender C.PacketSender) bool {
 	quota, ok := sender.(*quotaSender)
 	if !ok {
 		return true

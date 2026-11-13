@@ -301,3 +301,66 @@ func TestALibraryOpenedAgainUnchangedIsNotHashedAgain(t *testing.T) {
 		t.Fatal("a library rewritten in place after its proof reused the mapping")
 	}
 }
+
+func TestAnAnyTLSNodeOfALibraryAnEarlierBuildWroteIsResetOnANetworkChange(t *testing.T) {
+	anyTLS, err := NewAnyTLS(AnyTLSOption{Name: "anytls", Server: "127.0.0.1", Port: 9, Password: "p"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	socks, err := NewSocks5(Socks5Option{Name: "socks", Server: "127.0.0.1", Port: 9})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = anyTLS.Close(); _ = socks.Close() })
+	write := func(earlierBuild bool) *NodeStore {
+		t.Helper()
+		writer := NewNodeLibraryWriter("airport")
+		for i, node := range []ProxyAdapter{anyTLS, socks} {
+			if err := writer.Add(node, fmt.Sprintf("config-%d", i)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if earlierBuild {
+			for i := range writer.entries {
+				writer.entries[i].traits &^= catalogResetter | catalogPathResetter
+			}
+		}
+		var buffer bytes.Buffer
+		if err := writer.Write(&buffer); err != nil {
+			t.Fatal(err)
+		}
+		library, err := OpenNodeLibrary(libraryAligned(buffer.Bytes()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return NewLibraryNodeStore(library, nil, nil, func(string, C.Dialer, C.Tunnel, string) (ProxyAdapter, error) {
+			return NewDirectWithOption(DirectOption{Name: "built"}), nil
+		})
+	}
+
+	current, earlier := write(false), write(true)
+	if traits := current.library.traits(0); traits&catalogPathResetter == 0 || traits&catalogResetter != 0 {
+		t.Fatalf("a library written now stores traits %b for an AnyTLS node, want catalogPathResetter and not catalogResetter", traits)
+	}
+	if traits := earlier.library.traits(0); traits&(catalogResetter|catalogPathResetter) != 0 {
+		t.Fatalf("the earlier build's library stores traits %b for its AnyTLS node, want no resetter bit", traits)
+	}
+	for _, library := range []struct {
+		name  string
+		store *NodeStore
+	}{{"written now", current}, {"written by an earlier build", earlier}} {
+		node := LibraryCatalogNode(library.store, 0)
+		if _, ok := AsNetworkResetter(NewAutoCloseProxyAdapter(node)); !ok {
+			t.Errorf("%s: an AnyTLS library node is not reset on a network change", library.name)
+		}
+		if node.(*catalogNode).keepsSessions() {
+			t.Errorf("%s: the idle release would take an AnyTLS library node", library.name)
+		}
+		if libraryNodeAt(library.store, 0).traits&catalogPathResetter == 0 {
+			t.Errorf("%s: an AnyTLS library node read in place has no resetter bit", library.name)
+		}
+		if _, ok := AsNetworkResetter(NewAutoCloseProxyAdapter(LibraryCatalogNode(library.store, 1))); ok {
+			t.Errorf("%s: a SOCKS5 library node became a network resetter", library.name)
+		}
+	}
+}

@@ -71,9 +71,10 @@ func TestANewTCPFlowWaitsAtTheGateBeforeItDials(t *testing.T) {
 	}
 }
 
-func TestANewUDPSessionWaitsAtTheGateBeforeItOpens(t *testing.T) {
+func TestANewUDPSessionDoesNotWaitAtTheGate(t *testing.T) {
 	gate := newHoldingGate()
 	withNewSessionGate(t, gate.wait)
+	t.Cleanup(func() { close(gate.release) })
 	var listens atomic.Int32
 	proxy := &dialProxy{doorProxy: doorProxy{name: "out", typ: C.Shadowsocks}, listen: func() (C.PacketConn, error) {
 		listens.Add(1)
@@ -84,25 +85,22 @@ func TestANewUDPSessionWaitsAtTheGateBeforeItOpens(t *testing.T) {
 	metadata := tunFlowTo("192.0.2.1")
 	metadata.NetWork = C.UDP
 	handleUDPConn(C.NewPacketAdapter(newKeyedPacket(40101), metadata))
-	select {
-	case network := <-gate.entered:
-		if network != C.UDP {
-			t.Fatalf("the gate was asked for %v, want UDP", network)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("a new UDP session never reached the gate")
-	}
-	time.Sleep(50 * time.Millisecond)
-	if n := listens.Load(); n != 0 {
-		t.Fatalf("the session opened %d time(s) while the gate held it", n)
-	}
-	close(gate.release)
 	deadline := time.Now().Add(3 * time.Second)
 	for listens.Load() == 0 {
+		select {
+		case network := <-gate.entered:
+			t.Fatalf("a new UDP session waited at the gate (asked for %v)", network)
+		default:
+		}
 		if time.Now().After(deadline) {
-			t.Fatal("the session never opened after the gate let it go")
+			t.Fatal("a new UDP session never opened")
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+	select {
+	case network := <-gate.entered:
+		t.Fatalf("a new UDP session asked the gate (%v)", network)
+	default:
 	}
 }
 
@@ -117,7 +115,7 @@ func (p keyedPacket) LocalAddr() net.Addr {
 	return &net.UDPAddr{IP: net.IPv4(172, 19, 0, 2), Port: p.port}
 }
 
-func TestPacketsOfAnOpenUDPSessionDoNotWait(t *testing.T) {
+func TestNoPacketOfAUDPSessionAsksTheGate(t *testing.T) {
 	var asked atomic.Int32
 	withNewSessionGate(t, func(context.Context, C.NetWork) { asked.Add(1) })
 	remote, peer := net.Pipe()
@@ -133,8 +131,8 @@ func TestPacketsOfAnOpenUDPSessionDoNotWait(t *testing.T) {
 		handleUDPConn(C.NewPacketAdapter(newKeyedPacket(40102), metadata))
 	}
 	time.Sleep(100 * time.Millisecond)
-	if n := asked.Load(); n != 1 {
-		t.Fatalf("three packets of one session asked the gate %d times, want 1", n)
+	if n := asked.Load(); n != 0 {
+		t.Fatalf("three packets of one session asked the gate %d times, want none", n)
 	}
 }
 

@@ -375,7 +375,8 @@ func (t *Transport) Dial() (net.Conn, error) {
 	}
 
 	t.count.Add(1)
-	conn.onClose = func() { t.count.Add(-1) }
+	streamsOpen.Add(1)
+	conn.onClose = func() { t.count.Add(-1); streamsOpen.Add(-1) }
 
 	go conn.Init()
 

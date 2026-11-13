@@ -66,7 +66,7 @@ func (s *scriptDNSStub) answer(request *D.Msg) *D.Msg {
 
 func startScriptDNSUDP(t *testing.T, hold time.Duration, silent bool) *scriptDNSStub {
 	t.Helper()
-	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	conn, err := net.ListenPacket("udp", net.JoinHostPort(loopbackUDPHost(t), "0"))
 	if err != nil {
 		t.Fatal(err)
 	}

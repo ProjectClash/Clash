@@ -28,6 +28,7 @@ const (
 	catalogTFO
 	catalogMPTCP
 	catalogSMUX
+	catalogPathResetter
 )
 
 type catalogNode struct {
@@ -95,7 +96,11 @@ func catalogFacts(built ProxyAdapter, config string, storeProvider string) (reco
 		}
 	}
 	if _, ok := built.(NetworkResetter); ok && keepsOwnSessions(built) {
-		traits |= catalogResetter
+		if resetOnlyOnNetworkChange(built) {
+			traits |= catalogPathResetter
+		} else {
+			traits |= catalogResetter
+		}
 	}
 	if _, ok := built.(SessionReleaser); ok {
 		traits |= catalogReleaser

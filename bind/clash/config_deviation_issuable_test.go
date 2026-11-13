@@ -111,6 +111,14 @@ func issuanceProbeDocument(t *testing.T) string {
 		"uuid": "b831381d-6324-4d53-ad4f-8cda48b30811", "network": "xhttp",
 		"xhttp-opts": map[string]any{"path": "/"},
 	}}}
+	for _, nodeType := range []string{"hysteria", "hysteria2", "shadowquic", "tuic"} {
+		root["proxies"] = append(root["proxies"].([]any), map[string]any{
+			"name": nodeType + "-node", "type": nodeType, "server": "203.0.113.12", "port": 443,
+		})
+	}
+	root["proxies"] = append(root["proxies"].([]any), map[string]any{
+		"name": "mieru-node", "type": "mieru", "server": "203.0.113.13", "port": 2999, "transport": "TCP",
+	})
 	for _, nodeType := range ipStackNodeTypes {
 		root["proxies"] = append(root["proxies"].([]any), map[string]any{
 			"name": nodeType + "-node", "type": nodeType,

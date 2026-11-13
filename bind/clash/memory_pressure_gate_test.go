@@ -19,6 +19,8 @@ func (p *pressureProbe) Close() error {
 
 func (p *pressureProbe) ID() string { return p.id }
 
+func (p *pressureProbe) Info() *statistic.TrackerInfo { return nil }
+
 func newPressureProbe(t *testing.T, id string) *pressureProbe {
 	t.Helper()
 	probe := &pressureProbe{id: id}

@@ -79,6 +79,7 @@ func (m *Mieru) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, 
 	addr := metadataToMieruNetAddrSpec(metadata)
 	c, err := m.client.DialContext(ctx, addr)
 	if err != nil {
+		closeMieruDial(c)
 		return nil, fmt.Errorf("dial to %s failed: %w", addr, err)
 	}
 	return NewConn(c, m), nil
@@ -94,6 +95,7 @@ func (m *Mieru) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 	}
 	c, err := m.client.DialContext(ctx, metadata.UDPAddr())
 	if err != nil {
+		closeMieruDial(c)
 		return nil, fmt.Errorf("dial to %s failed: %w", metadata.UDPAddr(), err)
 	}
 	return NewPacketConn(N.NewThreadSafePacketConn(mierucommon.NewUDPAssociateWrapper(mierucommon.NewPacketOverStreamTunnel(c))), m), nil
@@ -276,7 +278,7 @@ func buildMieruClientConfig(option MieruOption) (*mieruclient.ClientConfig, erro
 			BypassDialerDNS: true,
 		},
 	}
-	if multiplexing, ok := mierupb.MultiplexingLevel_value[option.Multiplexing]; ok {
+	if multiplexing, ok := mierupb.MultiplexingLevel_value[mieruMultiplexing(option.Multiplexing, option.Transport)]; ok {
 		config.Profile.Multiplexing = &mierupb.MultiplexingConfig{
 			Level: mierupb.MultiplexingLevel(multiplexing).Enum(),
 		}

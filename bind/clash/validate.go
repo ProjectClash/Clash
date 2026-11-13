@@ -9,7 +9,6 @@ import (
 
 	"github.com/ProjectClash/Clash/common/utils"
 	"github.com/ProjectClash/Clash/config"
-	"github.com/ProjectClash/Clash/dns"
 	"github.com/ProjectClash/Clash/transport/xhttp"
 )
 
@@ -351,54 +350,6 @@ func validateDNSForIOS(cfg *config.Config, underNE bool) error {
 	return nil
 }
 
-func firstDNSPhysicalInterfaceFragment(raw *config.RawConfig) string {
-	knownProxies := map[string]struct{}{
-		"DIRECT": {}, "REJECT": {}, "REJECT-DROP": {}, "COMPATIBLE": {},
-		"PASS": {}, "PASS-RULE": {}, "GLOBAL": {}, dns.RespectRules: {},
-	}
-	for _, proxy := range raw.Proxy {
-		if name, _ := proxy["name"].(string); name != "" {
-			knownProxies[name] = struct{}{}
-		}
-	}
-	for _, group := range raw.ProxyGroup {
-		if name, _ := group["name"].(string); name != "" {
-			knownProxies[name] = struct{}{}
-		}
-	}
-
-	groups := []struct {
-		field   string
-		servers []string
-	}{
-		{field: "dns.nameserver", servers: raw.DNS.NameServer},
-		{field: "dns.fallback", servers: raw.DNS.Fallback},
-		{field: "dns.default-nameserver", servers: raw.DNS.DefaultNameserver},
-		{field: "dns.proxy-server-nameserver", servers: raw.DNS.ProxyServerNameserver},
-		{field: "dns.direct-nameserver", servers: raw.DNS.DirectNameServer},
-	}
-	for _, group := range groups {
-		if hasUnknownDNSFragmentProxy(group.servers, knownProxies) {
-			return group.field
-		}
-	}
-	if raw.DNS.NameServerPolicy != nil {
-		for pair := raw.DNS.NameServerPolicy.Oldest(); pair != nil; pair = pair.Next() {
-			if hasUnknownDNSFragmentProxy(dnsServerStrings(pair.Value), knownProxies) {
-				return "dns.nameserver-policy"
-			}
-		}
-	}
-	if raw.DNS.ProxyServerNameserverPolicy != nil {
-		for pair := raw.DNS.ProxyServerNameserverPolicy.Oldest(); pair != nil; pair = pair.Next() {
-			if hasUnknownDNSFragmentProxy(dnsServerStrings(pair.Value), knownProxies) {
-				return "dns.proxy-server-nameserver-policy"
-			}
-		}
-	}
-	return ""
-}
-
 func dnsServerStrings(raw any) []string {
 	switch value := raw.(type) {
 	case string:
@@ -416,19 +367,6 @@ func dnsServerStrings(raw any) []string {
 	default:
 		return nil
 	}
-}
-
-func hasUnknownDNSFragmentProxy(servers []string, knownProxies map[string]struct{}) bool {
-	for _, server := range servers {
-		proxyName := dnsFragmentProxyName(server)
-		if proxyName == "" {
-			continue
-		}
-		if _, known := knownProxies[proxyName]; !known {
-			return true
-		}
-	}
-	return false
 }
 
 func dnsFragmentProxyName(server string) string {

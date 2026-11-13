@@ -50,6 +50,7 @@ type deviationRule struct {
 	ruleScan               bool
 	ruleKind               string
 	nodeKey                bool
+	onlyWhere              []deviationOnlyWhere
 	applies                func(policy appleRuntimePolicy) bool
 	condition              string
 	upstreamDefault        string
@@ -117,6 +118,22 @@ func (r *deviationRule) runsAsWritten(given string) bool {
 }
 
 func (r *deviationRule) decidesKey() bool { return !r.ruleScan || r.nodeKey }
+
+type deviationOnlyWhere struct {
+	key    string
+	values []string
+}
+
+func (r *deviationRule) onlyWhereMap() map[string][]string {
+	if len(r.onlyWhere) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(r.onlyWhere))
+	for _, where := range r.onlyWhere {
+		out[where.key] = append([]string(nil), where.values...)
+	}
+	return out
+}
 
 func (r *deviationRule) activeFor(policy appleRuntimePolicy, written bool) bool {
 	if r.unwrittenUnconditional && !written {
@@ -227,6 +244,8 @@ var deviationRules = []deviationRule{
 	xhttpTunnelReuseRule,
 	ipStackModeRule("masque"), ipStackModeRule("openvpn"), ipStackModeRule("wireguard"), ipStackModeRule("zerotier"),
 	ipStackCongestionRule("masque"), ipStackCongestionRule("openvpn"), ipStackCongestionRule("wireguard"), ipStackCongestionRule("zerotier"),
+	quicWindowRule(0), quicWindowRule(1),
+	mieruMultiplexingRule,
 	{
 		field:     "tun.route-address-set",
 		category:  deviationUnavailable,
@@ -806,15 +825,28 @@ func deviationDocumentOf(root map[string]any) map[string]any {
 				entries[index] = map[string]any{"type": proxy["type"], "name": proxy["name"]}
 			} else if isMap && isXHTTPReuseDefaulted(proxy) {
 				entries[index] = xhttpReuseKept(proxy)
-			} else if kept := ipStackKept(proxy); isMap && kept != nil {
-				entries[index] = kept
+			} else if isMap {
+				kept := ipStackKept(proxy)
+				if len(quicWindowDefaulted(proxy)) > 0 {
+					windows := quicWindowKept(proxy)
+					if kept != nil {
+						windows["ip-stack"] = kept["ip-stack"]
+					}
+					kept = windows
+				}
+				if replaced, _ := mieruMultiplexingReplaced(proxy); kept == nil && replaced {
+					kept = mieruMultiplexingKept(proxy)
+				}
+				if kept != nil {
+					entries[index] = kept
+				}
 			}
 		}
 		kept["proxies"] = entries
 	}
 	if library, isMap := root["x-clash-node-library"].(map[string]any); isMap {
 		record := map[string]any{}
-		for _, key := range []string{"xhttp-reuse-defaulted", "ip-stack-written", "inline-at"} {
+		for _, key := range []string{"xhttp-reuse-defaulted", "ip-stack-written", "quic-window-defaulted", mieruMultiplexingRecord, "inline-at"} {
 			if value, recorded := library[key]; recorded {
 				record[key] = value
 			}
@@ -831,6 +863,8 @@ func configDeviationRows(root map[string]any, policy appleRuntimePolicy) []confi
 	deviations = append(deviations, ownerMetadataRuleDeviations(root, policy)...)
 	deviations = append(deviations, easyTierPlaceholderDeviations(root, policy)...)
 	deviations = append(deviations, xhttpTunnelReuseDeviations(root, policy)...)
+	deviations = append(deviations, quicWindowDeviations(root, policy)...)
+	deviations = append(deviations, mieruMultiplexingDeviations(root, policy)...)
 	deviations = append(deviations, ipStackNodeDeviations(root, policy)...)
 	return deviations
 }

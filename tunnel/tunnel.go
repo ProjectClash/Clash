@@ -640,6 +640,7 @@ func handleUDPConn(packet C.PacketAdapter) {
 	metadata := packet.Metadata()
 	if !metadata.Valid() {
 		packet.Drop()
+		C.CloseUDPFlow(packet)
 		log.Warnln("[Metadata] not valid: %#v", metadata)
 		return
 	}
@@ -647,15 +648,22 @@ func handleUDPConn(packet C.PacketAdapter) {
 
 	if err := preHandleMetadata(metadata.Clone()); err != nil { // precheck without modify metadata
 		packet.Drop()
+		C.CloseUDPFlow(packet)
 		logPreHandleError(metadata, err)
 		return
 	}
 
 	key := packet.Key()
 	var plainSender *packetSender
+	sessionProtocol, sessionTimeout := "", udpTimeout
 	sender, loaded := natTable.GetOrCreate(key, withUDPQuota(func() C.PacketSender {
 		sender := newPacketSender()
 		plainSender, _ = sender.(*packetSender)
+		sessionProtocol = classifyDatagram(packet.Data())
+		sessionTimeout = udpSessionTimeout(sessionProtocol, packet.Data(), metadata.DstPort)
+		if plainSender != nil {
+			plainSender.timeout = sessionTimeout
+		}
 		if dispatcher := snifferDispatcher.Load(); sniffingEnable.Load() && dispatcher.Enable() {
 			return dispatcher.UDPSniff(packet, sender)
 		}
@@ -664,7 +672,7 @@ func handleUDPConn(packet C.PacketAdapter) {
 	if !loaded {
 		firstProtocol := ""
 		if routing := loadVersion().routing; RC.ProtocolReadersParsed() || routing.STUNResponseIPv4.IsValid() || routing.STUNResponseIPv6.IsValid() || routing.BlockQUIC != "" {
-			firstProtocol = classifyDatagram(packet.Data())
+			firstProtocol = sessionProtocol
 		}
 		dial := func() (C.PacketConn, C.WriteBackProxy, error) {
 			originMetadata := metadata  // save origin metadata
@@ -725,13 +733,28 @@ func handleUDPConn(packet C.PacketAdapter) {
 			oAddrPort := dialMetadata.AddrPort()
 			writeBackProxy := nat.NewWriteBackProxy(packet)
 
-			go handleUDPToLocal(stunWriteBack(writeBackProxy, firstProtocol, loadVersion().routing), pc, sender, key, oAddrPort)
+			var ended func()
+			if terminalAdapterType(proxy, dialMetadata) != C.Reject {
+				ended = func() { C.CloseUDPFlow(packet) }
+			}
+			go handleUDPToLocal(stunWriteBack(writeBackProxy, firstProtocol, loadVersion().routing), pc, sender, key, oAddrPort, sessionTimeout, ended)
 			return pc, writeBackProxy, nil
 		}
 
 		go func() {
-			if !admitUDPSession(context.Background(), sender) {
+			if C.UDPFlowEnded(packet) {
+				sender.Close()
+				natTable.Delete(key)
+				return
+			}
+			if !admitUDPSession(sender) {
 				reportUDPUnreachable(packet, metadata, "the UDP session quota is full")
+				C.CloseUDPFlow(packet)
+				sender.Close()
+				natTable.Delete(key)
+				return
+			}
+			if C.UDPFlowEnded(packet) {
 				sender.Close()
 				natTable.Delete(key)
 				return
@@ -743,6 +766,7 @@ func handleUDPConn(packet C.PacketAdapter) {
 				} else {
 					reportUDPUnreachable(packet, metadata, "the outbound could not be opened")
 				}
+				C.CloseUDPFlow(packet)
 				sender.Close()
 				natTable.Delete(key)
 				return

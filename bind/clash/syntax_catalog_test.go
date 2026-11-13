@@ -63,6 +63,27 @@ func mustCatalog(t *testing.T, profile string) syntaxCatalog {
 	return catalog
 }
 
+func catalogWire(t *testing.T, profile string) (fields map[string]map[string]any, keys []map[string]any) {
+	t.Helper()
+	box, err := SyntaxCatalogForIOS(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire struct {
+		Fields              []map[string]any `json:"fields"`
+		PlatformDecidedKeys []map[string]any `json:"platformDecidedKeys"`
+	}
+	if err := json.Unmarshal([]byte(box.Value), &wire); err != nil {
+		t.Fatal(err)
+	}
+	fields = map[string]map[string]any{}
+	for _, field := range wire.Fields {
+		path, _ := field["path"].(string)
+		fields[path] = field
+	}
+	return fields, wire.PlatformDecidedKeys
+}
+
 func TestSyntaxCatalogRuleKindsAreTheParsersCases(t *testing.T) {
 	want := quotedCases(t, upstreamSource(t, "rules/parser.go"), "ParseRule(")
 	var got []string

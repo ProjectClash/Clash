@@ -116,7 +116,7 @@ func TestEditYAMLRefusesWhatItCannotDoSafely(t *testing.T) {
 		{"not found", yamlEditFixture, `["rules",9]`, "set", `"x"`, "notFound"},
 		{"no such key", yamlEditFixture, `["nope","x"]`, "set", `1`, "notFound"},
 		{"type mismatch", yamlEditFixture, `["mode",0]`, "set", `1`, "typeMismatch"},
-		{"flow list", yamlEditFixture, `["proxies",1,"type"]`, "set", `"ss"`, "unsupportedStyle"},
+		{"flow rename", yamlEditFixture, `["proxies",1,"type"]`, "rename", `"kind"`, "unsupportedStyle"},
 		{"bad op", yamlEditFixture, `["mode"]`, "transmogrify", `"x"`, "invalidRequest"},
 		{"bad value", yamlEditFixture, `["mode"]`, "set", `{`, "invalidRequest"},
 	}

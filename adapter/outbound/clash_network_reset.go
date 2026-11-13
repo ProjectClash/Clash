@@ -19,12 +19,17 @@ func keepsOwnSessions(a any) bool {
 	return true
 }
 
+func resetOnlyOnNetworkChange(a any) bool {
+	only, ok := a.(interface{ resetsOnNetworkChangeOnly() bool })
+	return ok && only.resetsOnNetworkChangeOnly()
+}
+
 func AsNetworkResetter(a C.ProxyAdapter) (NetworkResetter, bool) {
 	if wrapped, ok := a.(*autoCloseProxyAdapter); ok {
 		a = wrapped.ProxyAdapter
 	}
 	if node, ok := a.(*catalogNode); ok {
-		if node.traits&catalogResetter == 0 {
+		if node.traits&(catalogResetter|catalogPathResetter) == 0 {
 			return nil, false
 		}
 		return node, true
@@ -45,6 +50,17 @@ func (h *Hysteria2) ResetNetwork() {
 		_ = client.CloseWithError(errNetworkChanged)
 	}
 }
+
+func (t *AnyTLS) ResetNetwork() {
+	t.clientMu.Lock()
+	client := t.client
+	t.clientMu.Unlock()
+	if client != nil {
+		client.Reset()
+	}
+}
+
+func (*AnyTLS) resetsOnNetworkChangeOnly() bool { return true }
 
 func (t *Tuic) ResetNetwork() {
 	if t.client != nil {
@@ -75,7 +91,7 @@ func (s *SingMux) ReleaseSessions() bool {
 	}
 	if inner, ok := s.ProxyAdapter.(SessionReleaser); ok {
 		return inner.ReleaseSessions()
-	} else if inner, ok := s.ProxyAdapter.(NetworkResetter); ok {
+	} else if inner, ok := s.ProxyAdapter.(NetworkResetter); ok && !resetOnlyOnNetworkChange(s.ProxyAdapter) {
 		inner.ResetNetwork()
 	}
 	return true

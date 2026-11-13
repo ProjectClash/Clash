@@ -70,7 +70,7 @@ func runControlledTrustTunnelVariant(
 	server, err := IN.NewTrustTunnel(&IN.TrustTunnelOption{
 		BaseOption: IN.BaseOption{
 			NameStr: "controlled-trusttunnel-inbound",
-			Listen:  "127.0.0.1",
+			Listen:  loopbackUDPHost(t),
 			Port:    "0",
 		},
 		Users:                IN.AuthUsers{{Username: username, Password: password}},

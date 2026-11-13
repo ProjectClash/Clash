@@ -5,6 +5,7 @@ import (
 	"runtime/debug"
 	runtimemetrics "runtime/metrics"
 	"sync/atomic"
+	"time"
 
 	"github.com/ProjectClash/Clash/log"
 )
@@ -79,13 +80,22 @@ func handleMemoryPressure() {
 func handleMemoryPressureWith(footprint, softLimit int64) {
 	memoryPressureEventCount.Add(1)
 	refreshStartupBreadcrumbFootprint()
-	if err := RecordMemoryPressureEvidence(); err != nil {
+	lineDue := criticalHeapAttributionLineDue()
+	var attribution *heapAttribution
+	if lineDue || oomEvidenceRecordDue(time.Now()) {
+		counted := currentHeapAttribution()
+		attribution = &counted
+	}
+	if err := recordMemoryPressureEvidence(attribution); err != nil {
 		log.Warnln("[Memory] persist pressure evidence: %v", err)
 	}
 	log.Warnln(
 		"[Memory] critical pressure: releasing memory (footprint=%d softLimit=%d); "+
 			"the notification never closes connections — the threshold machine decides that",
 		footprint, softLimit)
+	if lineDue && attribution != nil {
+		log.Warnln("%s", attribution.logLine())
+	}
 
 	notifyPressureThreshold()
 

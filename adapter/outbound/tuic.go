@@ -188,6 +188,7 @@ func newTuicQUICConfig(option *TuicOption) *quic.Config {
 		quicConfig.InitialConnectionReceiveWindow = tuic.DefaultConnectionReceiveWindow / 10
 		quicConfig.MaxConnectionReceiveWindow = tuic.DefaultConnectionReceiveWindow
 	}
+	applyQUICDefaultReceiveWindows(quicConfig, option.ReceiveWindow != 0)
 	return quicConfig
 }
 

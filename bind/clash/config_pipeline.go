@@ -109,6 +109,11 @@ func parseConfigForIOSInternal(content string, decoded *configDecode, underNE bo
 		}
 		return nil, nil, fmt.Errorf("clash: parse config: %w", explainInvalidDomainPatterns(raw, err))
 	}
+	if policy.networkExtension {
+		for _, ns := range detectUnroutableDNSFragments(raw, libraryHolds(cfg.ProxyLibrary)) {
+			log.Warnln("[Apple %s] DNS %s names a physical interface or an unknown proxy in its fragment; kept as-is — it will fail closed at runtime unless the name materializes (config still starts)", policy.profile.String(), ns)
+		}
+	}
 	startupStage("bind:apple-validate-in")
 	if err := validateForApple(cfg, raw, policy); err != nil {
 		if runtime != nil {
@@ -255,9 +260,6 @@ func normalizeRawConfigForApple(raw *config.RawConfig, policy appleRuntimePolicy
 			for _, repair := range repairApplePacketTunnelDNS(raw) {
 				log.Warnln("[Apple %s] DNS %s", policy.profile.String(), repair)
 			}
-		}
-		for _, ns := range detectUnroutableDNSFragments(raw) {
-			log.Warnln("[Apple %s] DNS %s names a physical interface or an unknown proxy in its fragment; kept as-is — it will fail closed at runtime unless the name materializes (config still starts)", policy.profile.String(), ns)
 		}
 		capability := policy.processMetadata()
 		if !capability.resolves("UID") || !uidRuleConstructible(runtime.GOOS) {
@@ -589,6 +591,16 @@ func filterPolicyNameserversWhere(field string, policy *orderedmap.OrderedMap[st
 	return stripped
 }
 
+func libraryHolds(library C.ProxyLibrary) func(string) bool {
+	if library == nil {
+		return nil
+	}
+	return func(name string) bool {
+		_, ok := library.Lookup(name)
+		return ok
+	}
+}
+
 func knownDNSFragmentProxies(raw *config.RawConfig) map[string]struct{} {
 	known := map[string]struct{}{
 		"DIRECT": {}, "REJECT": {}, "REJECT-DROP": {}, "COMPATIBLE": {},
@@ -624,20 +636,25 @@ func stripDNSFragmentName(server string) string {
 	return base + "#" + strings.Join(kept, "&")
 }
 
-func detectUnroutableDNSFragments(raw *config.RawConfig) []string {
+func detectUnroutableDNSFragments(raw *config.RawConfig, inLibrary func(name string) bool) []string {
 	known := knownDNSFragmentProxies(raw)
+	isKnown := func(name string) bool {
+		if _, ok := known[name]; ok {
+			return true
+		}
+		return inLibrary != nil && inLibrary(name)
+	}
 	stripped := []string{}
 	rewrite := func(field string, list []string) {
-		for index, server := range list {
+		for _, server := range list {
 			name := dnsFragmentProxyName(server)
 			if name == "" {
 				continue
 			}
-			if _, ok := known[name]; ok {
+			if isKnown(name) {
 				continue
 			}
 			stripped = append(stripped, field+" "+server)
-			_ = index
 		}
 	}
 	rewrite("nameserver", raw.DNS.NameServer)
@@ -658,7 +675,7 @@ func detectUnroutableDNSFragments(raw *config.RawConfig) []string {
 				if name == "" {
 					continue
 				}
-				if _, ok := known[name]; ok {
+				if isKnown(name) {
 					continue
 				}
 				stripped = append(stripped, field+" "+pair.Key+" "+server)

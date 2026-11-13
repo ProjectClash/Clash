@@ -236,6 +236,7 @@ func applyShedLayers(step shedStep, sample pressureSample) {
 
 func runShedLayer(lines shedLines, sample pressureSample, predicted, mayClose bool, stop <-chan struct{}) shedEpisodeResult {
 	pressureShedEpisodeCount.Add(1)
+	logShedHeapAttribution()
 	if !pressureThresholdShedEnabled.Load() {
 		log.Warnln("[Memory] layer 3 due at footprint %d MiB (report only, predicted=%v): connections kept", sample.usage>>20, predicted)
 		pressureShedFree()

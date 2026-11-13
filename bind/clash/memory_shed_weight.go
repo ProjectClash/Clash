@@ -4,10 +4,12 @@ import (
 	"sort"
 	"time"
 
+	"github.com/ProjectClash/Clash/adapter/outbound"
 	C "github.com/ProjectClash/Clash/constant"
 	P "github.com/ProjectClash/Clash/constant/provider"
 	"github.com/ProjectClash/Clash/tunnel"
 	"github.com/ProjectClash/Clash/tunnel/statistic"
+	mieru "github.com/enfein/mieru/v3/pkg/protocol"
 )
 
 const (
@@ -20,17 +22,54 @@ const (
 )
 
 func quicWindow(adapterType C.AdapterType) (stream, connection int64, ok bool) {
+	windows, ok := quicWindowDefaults(adapterType)
+	return windows.stalledStream, windows.stalledConnection, ok
+}
+
+type quicDefaultWindows struct {
+	stalledStream, stalledConnection int64
+	maxStream, maxConnection         int64
+}
+
+func quicWindowDefaults(adapterType C.AdapterType) (quicDefaultWindows, bool) {
+	windows, ok := quicProtocolWindows(adapterType)
+	if tunnel := outbound.QUICDefaultReceiveWindows(); tunnel != nil && ok {
+		ceiling := int64(0)
+		switch adapterType {
+		case C.Hysteria2:
+			ceiling = int64(tunnel.MaxConnection)
+		case C.Tuic, C.Hysteria, C.ShadowQuic:
+			ceiling = int64(tunnel.GrowingMaxConnection)
+		}
+		if ceiling != 0 {
+			windows.stalledConnection = min(windows.stalledConnection, ceiling)
+			windows.maxConnection = min(windows.maxConnection, ceiling)
+		}
+	}
+	return windows, ok
+}
+
+func quicProtocolWindows(adapterType C.AdapterType) (quicDefaultWindows, bool) {
 	switch adapterType {
 	case C.Hysteria2:
-		return 8 << 20, 20 << 20, true
+		return quicDefaultWindows{8 << 20, 20 << 20, 8 << 20, 20 << 20}, true
 	case C.Tuic:
-		return 15728640 / 10, 67108864 / 10, true
+		return quicDefaultWindows{15728640 / 10, 67108864 / 10, 15728640, 67108864}, true
 	case C.Hysteria:
-		return 15728640, 67108864, true
-	case C.ShadowQuic, C.Masque:
-		return shedUnknownQUICWindow, shedUnknownQUICWindow, true
+		return quicDefaultWindows{15728640, 67108864, 15728640, 67108864}, true
+	case C.ShadowQuic:
+		return quicDefaultWindows{shedUnknownQUICWindow, shedUnknownQUICWindow, 15728640, 67108864}, true
+	case C.Masque:
+		return quicDefaultWindows{shedUnknownQUICWindow, shedUnknownQUICWindow, 6 << 20, 15 << 20}, true
 	}
-	return 0, 0, false
+	return quicDefaultWindows{}, false
+}
+
+func mieruStalledBytes() int64 {
+	if limit := mieru.StreamReceiveByteLimit(); limit > 0 {
+		return limit + 2*mieru.StreamSegmentPayload
+	}
+	return 0
 }
 
 type shedView struct {
@@ -104,6 +143,11 @@ func rankShedCandidates(views []shedView, nodeType func(name string) (C.AdapterT
 			if adapterType, ok := nodeType(view.node); ok {
 				stream, connection, _ := quicWindow(adapterType)
 				weight += min(stream, connection/stalledOnNode[view.node])
+			}
+		}
+		if view.stalled() {
+			if adapterType, ok := nodeType(view.node); ok && adapterType == C.Mieru {
+				weight += mieruStalledBytes()
 			}
 		}
 		candidates = append(candidates, shedCandidate{shedView: view, weight: weight, group: group})

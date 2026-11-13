@@ -77,7 +77,7 @@ func runControlledTUICVariant(
 	server, err := IN.NewTuic(&IN.TuicOption{
 		BaseOption: IN.BaseOption{
 			NameStr: "controlled-tuic-inbound",
-			Listen:  "127.0.0.1",
+			Listen:  loopbackUDPHost(t),
 			Port:    "0",
 		},
 		Token:                 []string{token},

@@ -726,8 +726,15 @@ func strippedDNSFragmentNotices(raw *config.RawConfig, policy appleRuntimePolicy
 	if !policy.networkExtension {
 		return nil
 	}
+	var inLibrary func(string) bool
+	if library := openReferencedLibrary(raw.ClashNodeLibrary.Path, raw.ClashNodeLibrary.SHA256); library != nil {
+		inLibrary = func(name string) bool {
+			_, ok := library.Lookup(name)
+			return ok
+		}
+	}
 	notices := []planNotice{}
-	for _, entry := range detectUnroutableDNSFragments(raw) {
+	for _, entry := range detectUnroutableDNSFragments(raw, inLibrary) {
 		notices = append(notices, planNotice{Kind: planNoticeDNSFragmentUnroutable, Field: "dns." + entry,
 			Text: "dns." + entry + ": fragment names a physical interface/unknown proxy; kept — fails closed at runtime unless the name materializes"})
 	}

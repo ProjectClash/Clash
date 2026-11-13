@@ -53,7 +53,7 @@ func TestThePacerSpacesNewSessions(t *testing.T) {
 		}
 	}
 	for i := 0; i < 100; i++ {
-		pacer.wait(context.Background(), C.UDP)
+		pacer.wait(context.Background(), C.TCP)
 	}
 	last := (*waits)[len(*waits)-1]
 	if last != shedPaceMaxWait {

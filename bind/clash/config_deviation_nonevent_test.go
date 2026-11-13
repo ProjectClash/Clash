@@ -81,6 +81,9 @@ func TestEveryForcedRuleNamesItsValueOrIsExempt(t *testing.T) {
 		"proxies[vless].xhttp-opts.reuse-settings": "an object of five ranges, not a scalar; the scan reports only nodes that write none",
 		"tun.dns-mode": "forced to empty, which is also the unwritten value: a file that writes the key wrote something else",
 	}
+	for _, pair := range quicWindowPairs {
+		exempt[pair.field] = "a node's window: the scan reports only nodes that write none, so a written window is never a row"
+	}
 	for _, nodeType := range ipStackNodeTypes {
 		exempt["proxies["+nodeType+"].ip-stack.mode"] = "go runs, and go is not a mode the core accepts: every written mode is replaced"
 	}

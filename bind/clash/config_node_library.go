@@ -195,6 +195,12 @@ func writeNodeLibrary(root map[string]any, directory string) error {
 	if written := ipStackWrittenIn(list, held); written != nil {
 		reference["ip-stack-written"] = written
 	}
+	if defaulted := quicWindowDefaultedIn(list, held); defaulted != nil {
+		reference["quic-window-defaulted"] = defaulted
+	}
+	if replaced := mieruMultiplexingReplacedIn(list, held); replaced != nil {
+		reference[mieruMultiplexingRecord] = replaced
+	}
 	if len(kept) > 0 {
 		reference["inline-at"] = keptAt
 		root["proxies"] = kept

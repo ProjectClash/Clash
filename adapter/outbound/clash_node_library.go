@@ -305,6 +305,14 @@ func (l *NodeLibrary) traits(i int) catalogTraits {
 	return catalogTraits(binary.LittleEndian.Uint16(l.data[l.table+i*nodeLibraryEntrySize+18:]))
 }
 
+func libraryNodeTraits(l *NodeLibrary, i int) catalogTraits {
+	traits := l.traits(i)
+	if l.Type(i) == C.AnyTLS && traits&(catalogResetter|catalogPathResetter) == 0 {
+		traits |= catalogPathResetter
+	}
+	return traits
+}
+
 func (l *NodeLibrary) record(i int) []byte {
 	_, _, at, n := l.entry(i)
 	return l.data[at : at+n]
@@ -346,7 +354,7 @@ func NewLibraryNodeStore(library *NodeLibrary, dialerForAPI C.Dialer, tunnelForA
 
 func LibraryCatalogNode(store *NodeStore, i int) ProxyAdapter {
 	l := store.library
-	return &catalogNode{name: l.Name(i), store: store, ref: uint32(i), tp: uint8(l.Type(i)), traits: l.traits(i)}
+	return &catalogNode{name: l.Name(i), store: store, ref: uint32(i), tp: uint8(l.Type(i)), traits: libraryNodeTraits(l, i)}
 }
 
 func OpenNodeLibraryFile(path string, want [sha256.Size]byte) (*NodeLibrary, error) {
@@ -427,7 +435,7 @@ func provenOrHashes(path string, info os.FileInfo, want [sha256.Size]byte) bool 
 
 func libraryNodeAt(store *NodeStore, i int) *catalogNode {
 	l := store.library
-	return &catalogNode{name: l.Name(i), store: store, ref: uint32(i), tp: uint8(l.Type(i)), traits: l.traits(i)}
+	return &catalogNode{name: l.Name(i), store: store, ref: uint32(i), tp: uint8(l.Type(i)), traits: libraryNodeTraits(l, i)}
 }
 
 func LibraryNodeAnswers(store *NodeStore, i int) (udp, uot, l3 bool) {

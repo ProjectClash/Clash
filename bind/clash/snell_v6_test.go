@@ -636,8 +636,11 @@ func TestSnellV6RefusesWhatTheOfficialServerRefuses(t *testing.T) {
 			t.Errorf("%s: a node was built", name)
 		}
 	}
-	if _, err := outbound.NewSnell(outbound.SnellOption{Name: "v4", Server: "127.0.0.1", Port: 1, Psk: snellV6TestPSK, Version: 4, Mode: "unshaped", UserKey: "u"}); err != nil {
-		t.Errorf("a version-4 node with a mode was refused: %v", err)
+	if _, err := outbound.NewSnell(outbound.SnellOption{Name: "v4", Server: "127.0.0.1", Port: 1, Psk: snellV6TestPSK, Version: 4, Mode: "unshaped"}); err == nil || !strings.Contains(err.Error(), "mode is only supported on version 6") {
+		t.Errorf("a version-4 node with a mode: %v, want upstream's refusal", err)
+	}
+	if _, err := outbound.NewSnell(outbound.SnellOption{Name: "v4", Server: "127.0.0.1", Port: 1, Psk: snellV6TestPSK, Version: 4, UserKey: "u"}); err != nil {
+		t.Errorf("a version-4 node with a user-key was refused: %v", err)
 	}
 	if l, err := inbound.NewSnell(&inbound.SnellOption{BaseOption: inbound.BaseOption{NameStr: "x", Listen: "127.0.0.1", Port: "0"}, Psk: "short", Version: 6}); err == nil {
 		if err := l.Listen(tunnel.Tunnel); err == nil {
@@ -645,8 +648,15 @@ func TestSnellV6RefusesWhatTheOfficialServerRefuses(t *testing.T) {
 			t.Error("a listener with a short psk listened")
 		}
 	}
-	if _, err := inbound.NewSnell(&inbound.SnellOption{BaseOption: inbound.BaseOption{NameStr: "x", Listen: "127.0.0.1", Port: "0"}, Psk: snellV6TestPSK, Version: 4, Mode: "unshaped"}); err != nil {
-		t.Errorf("a version-4 listener with a mode was refused: %v", err)
+	l, err := inbound.NewSnell(&inbound.SnellOption{BaseOption: inbound.BaseOption{NameStr: "x", Listen: "127.0.0.1", Port: "0"}, Psk: snellV6TestPSK, Version: 4, Mode: "unshaped"})
+	if err != nil {
+		t.Fatalf("a version-4 listener with a mode was refused before it listened: %v", err)
+	}
+	if err := l.Listen(tunnel.Tunnel); err == nil || !strings.Contains(err.Error(), "snell inbound mode is only supported on version 6") {
+		if err == nil {
+			_ = l.Close()
+		}
+		t.Errorf("a version-4 listener with a mode: %v, want upstream's refusal", err)
 	}
 }
 

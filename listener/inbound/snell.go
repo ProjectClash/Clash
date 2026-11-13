@@ -49,9 +49,6 @@ func NewSnell(options *SnellOption) (*Snell, error) {
 	if options.Version < 1 || options.Version > 6 {
 		return nil, fmt.Errorf("snell inbound version %d is not supported", options.Version)
 	}
-	if options.Version != 6 && options.Mode != "" {
-		log.Warnln("Snell[%s] inbound: mode is version 6's; version %d ignores it", options.NameStr, options.Version)
-	}
 
 	return &Snell{
 		Base:   base,

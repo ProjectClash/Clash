@@ -5,7 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ProjectClash/Clash/adapter/outbound"
 	C "github.com/ProjectClash/Clash/constant"
+	mieru "github.com/enfein/mieru/v3/pkg/protocol"
 )
 
 func shedNodeTypes(types map[string]C.AdapterType) func(string) (C.AdapterType, bool) {
@@ -28,6 +30,7 @@ func stalledFlow(id, node string) shedView {
 }
 
 func TestAWedgedQUICNodeGoesWhole(t *testing.T) {
+	withProtocolQUICWindows(t)
 	types := shedNodeTypes(map[string]C.AdapterType{"HY2": C.Hysteria2, "Trojan": C.Trojan})
 	var views []shedView
 	for i := 0; i < 20; i++ {
@@ -64,6 +67,7 @@ func TestAWedgedQUICNodeGoesWhole(t *testing.T) {
 }
 
 func TestAPartlyWedgedQUICNodeIsLeftAlone(t *testing.T) {
+	withProtocolQUICWindows(t)
 	types := shedNodeTypes(map[string]C.AdapterType{"HY2": C.Hysteria2, "Trojan": C.Trojan, "TUIC": C.Tuic})
 	views := []shedView{activeFlow("hy2-moving", "HY2"), stalledFlow("trojan-stalled", "Trojan"), stalledFlow("tuic-alone", "TUIC")}
 	for i := 0; i < 20; i++ {
@@ -84,6 +88,7 @@ func TestAPartlyWedgedQUICNodeIsLeftAlone(t *testing.T) {
 }
 
 func TestOnlyAFullBufferWithNothingTakenIsAStall(t *testing.T) {
+	withProtocolQUICWindows(t)
 	types := shedNodeTypes(map[string]C.AdapterType{"HY2": C.Hysteria2})
 	busy := activeFlow("busy", "HY2")
 	busy.queued = 128 << 10
@@ -114,6 +119,7 @@ func TestYoungConnectionsAreNotCandidates(t *testing.T) {
 }
 
 func TestAnUploadIsMovement(t *testing.T) {
+	withProtocolQUICWindows(t)
 	types := shedNodeTypes(map[string]C.AdapterType{"HY2": C.Hysteria2})
 	uploading := activeFlow("hy2-uploading", "HY2")
 	uploading.sinceDownload = time.Minute
@@ -125,6 +131,7 @@ func TestAnUploadIsMovement(t *testing.T) {
 }
 
 func TestAWedgedNodeNeedsEveryOtherFlowQuietForLong(t *testing.T) {
+	withProtocolQUICWindows(t)
 	types := shedNodeTypes(map[string]C.AdapterType{"HY2": C.Hysteria2})
 	for _, c := range []struct {
 		quiet time.Duration
@@ -148,6 +155,7 @@ func TestAWedgedNodeNeedsEveryOtherFlowQuietForLong(t *testing.T) {
 }
 
 func TestAStalledFlowThatSendsIsMovement(t *testing.T) {
+	withProtocolQUICWindows(t)
 	types := shedNodeTypes(map[string]C.AdapterType{"HY2": C.Hysteria2})
 	for _, c := range []struct {
 		sinceUpload time.Duration
@@ -163,5 +171,70 @@ func TestAStalledFlowThatSendsIsMovement(t *testing.T) {
 		if len(ranked) != c.want {
 			t.Fatalf("a stalled flow that sent %v ago: %d candidates (%+v), want %d", c.sinceUpload, len(ranked), ranked, c.want)
 		}
+	}
+}
+
+func withProtocolQUICWindows(t *testing.T) {
+	t.Helper()
+	before := outbound.QUICDefaultReceiveWindows()
+	outbound.SetQUICDefaultReceiveWindows(nil)
+	t.Cleanup(func() { outbound.SetQUICDefaultReceiveWindows(before) })
+}
+
+func TestAWedgedQUICNodeGoesWholeUnderTheTunnelsWindows(t *testing.T) {
+	before := outbound.QUICDefaultReceiveWindows()
+	outbound.SetQUICDefaultReceiveWindows(outbound.QUICTunnelReceiveWindows())
+	t.Cleanup(func() { outbound.SetQUICDefaultReceiveWindows(before) })
+	types := shedNodeTypes(map[string]C.AdapterType{"HY2": C.Hysteria2, "Trojan": C.Trojan})
+	var views []shedView
+	for i := 0; i < 20; i++ {
+		views = append(views, stalledFlow(fmt.Sprintf("hy2-stalled-%02d", i), "HY2"))
+	}
+	for i := 0; i < 5; i++ {
+		views = append(views, activeFlow(fmt.Sprintf("trojan-%02d", i), "Trojan"))
+	}
+	ranked := rankShedCandidates(views, types)
+	share := int64(outbound.QUICTunnelMaxConnection) / 20
+	for i, c := range ranked[:20] {
+		if c.group != "HY2" || c.weight != shedTCPBaseBytes+128<<10+share {
+			t.Fatalf("rank %d = %+v; the stalled HY2 flows come first, the tunnels' connection window shared by 20", i, c)
+		}
+	}
+	for _, c := range ranked[20:] {
+		if c.group != "" {
+			t.Fatalf("%s on a TCP outbound was grouped as %q", c.id, c.group)
+		}
+	}
+}
+
+func TestAFlowStalledOnAMieruNodeWeighsWhatItsSessionCanHold(t *testing.T) {
+	types := shedNodeTypes(map[string]C.AdapterType{"Mieru": C.Mieru, "Trojan": C.Trojan})
+	views := []shedView{stalledFlow("trojan-stalled", "Trojan"), stalledFlow("mieru-stalled", "Mieru"), activeFlow("mieru-active", "Mieru")}
+	weights := func() map[string]int64 {
+		byID := map[string]int64{}
+		for _, candidate := range rankShedCandidates(views, types) {
+			byID[candidate.id] = candidate.weight
+		}
+		return byID
+	}
+	before := mieru.SetStreamReceiveByteLimit(0)
+	t.Cleanup(func() { mieru.SetStreamReceiveByteLimit(before) })
+
+	shipped := weights()
+	if shipped["mieru-stalled"] != shipped["trojan-stalled"] {
+		t.Fatalf("with no limit a stalled mieru flow weighs %d and a Trojan one %d", shipped["mieru-stalled"], shipped["trojan-stalled"])
+	}
+
+	mieru.SetStreamReceiveByteLimit(tunnelMieruStreamReceiveLimit)
+	bounded := weights()
+	if extra := bounded["mieru-stalled"] - bounded["trojan-stalled"]; extra != tunnelMieruStreamReceiveLimit+2*mieru.StreamSegmentPayload {
+		t.Fatalf("a stalled mieru flow weighs %d more than a Trojan one, want the limit and two segments, %d",
+			extra, tunnelMieruStreamReceiveLimit+2*mieru.StreamSegmentPayload)
+	}
+	if bounded["mieru-active"] != shipped["mieru-active"] {
+		t.Fatalf("a mieru flow its app is reading weighs %d, it weighed %d", bounded["mieru-active"], shipped["mieru-active"])
+	}
+	if first := rankShedCandidates(views, types)[0].id; first != "mieru-stalled" {
+		t.Fatalf("the heaviest is %s, want the stalled mieru flow", first)
 	}
 }

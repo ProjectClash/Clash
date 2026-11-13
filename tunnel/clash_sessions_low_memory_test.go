@@ -3,6 +3,9 @@
 package tunnel
 
 import (
+	"context"
+	"runtime/pprof"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -265,5 +268,77 @@ func TestASlotThatFreesWhileNothingIsIdleIsTaken(t *testing.T) {
 	}
 	if reserved := reservedTCPConnectionSlots.Load(); reserved != 0 {
 		t.Fatalf("%d slots stay reserved", reserved)
+	}
+}
+
+func TestAUDPFloodAtAFullQuotaIsRefusedAtOnceWhileThePacerHolds(t *testing.T) {
+	fillUDPSlots(t)
+	busy := newQuotaTracker(C.UDP, udpEvictMinIdle-time.Second, func() { releaseUDPSessionSlot() })
+	withSessionTable(t, busy)
+	var listens atomic.Int32
+	proxy := &dialProxy{doorProxy: doorProxy{name: "out", typ: C.Shadowsocks}, listen: func() (C.PacketConn, error) {
+		listens.Add(1)
+		return nothingPacketConn{}, nil
+	}}
+	withVerdictTunnel(t, "out", proxy)
+	var waited atomic.Int32
+	release := make(chan struct{})
+	withNewSessionGate(t, func(ctx context.Context, network C.NetWork) {
+		if network == C.UDP {
+			waited.Add(1)
+		}
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+	})
+	t.Cleanup(func() { close(release) })
+
+	before := UDPSessionAdmissionSnapshot()
+	const flood = 64
+	packets := make([]keyedPacket, flood)
+	for i := range packets {
+		packets[i] = newKeyedPacket(40300 + i)
+		metadata := tunFlowTo("192.0.2.1")
+		metadata.NetWork = C.UDP
+		handleUDPConn(C.NewPacketAdapter(packets[i], metadata))
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		answered := int(listens.Load())
+		for _, packet := range packets {
+			select {
+			case <-packet.reported:
+				answered++
+			default:
+			}
+		}
+		if answered >= flood {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d of the flood's %d sessions answered in 3 s (%d waited at the pacer)", answered, flood, waited.Load())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := waited.Load(); n != 0 {
+		t.Fatalf("%d new UDP sessions waited at the pacer", n)
+	}
+	if busy.closed.Load() != 0 {
+		t.Fatal("a session that was not idle long enough was evicted")
+	}
+	if after := UDPSessionAdmissionSnapshot(); after.Rejected+uint64(listens.Load()) < before.Rejected+flood {
+		t.Fatalf("snapshot %+v -> %+v with %d opened: want every other session refused", before, after, listens.Load())
+	}
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		var stacks strings.Builder
+		_ = pprof.Lookup("goroutine").WriteTo(&stacks, 1)
+		held := strings.Count(stacks.String(), "tunnel.waitNewSessionGate") + strings.Count(stacks.String(), "tunnel.admitUDPSession")
+		if held == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d goroutine frame(s) still in the gate or in admission:\n%s", held, stacks.String())
+		}
 	}
 }

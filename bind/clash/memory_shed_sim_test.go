@@ -2,6 +2,7 @@ package clash
 
 import (
 	"fmt"
+	"github.com/ProjectClash/Clash/adapter/outbound"
 	"testing"
 	"time"
 
@@ -201,6 +202,7 @@ func (w *simWorld) batches() []time.Duration {
 const simHardLine = 49 << 20
 
 func TestGarbageThatAReleaseReturnsClosesNothing(t *testing.T) {
+	withProtocolQUICWindows(t)
 	w := newSimWorld(44*shedMiB + 512<<10)
 	w.rate = float64(shedMiB)
 	w.openMany(100, "Trojan", 0)
@@ -216,6 +218,7 @@ func TestGarbageThatAReleaseReturnsClosesNothing(t *testing.T) {
 }
 
 func TestClosesThatDoNotPayBackOff(t *testing.T) {
+	withProtocolQUICWindows(t)
 	w := newSimWorld(46 * shedMiB)
 	w.openMany(100, "Trojan", 0)
 	w.age(time.Minute)
@@ -239,6 +242,7 @@ func TestClosesThatDoNotPayBackOff(t *testing.T) {
 }
 
 func TestClosesThatPayStillTakeTheFootprintUnderTheLine(t *testing.T) {
+	withProtocolQUICWindows(t)
 	w := newSimWorld(48*shedMiB - 100*300<<10)
 	w.openMany(100, "Trojan", 300<<10)
 	w.age(time.Minute)
@@ -256,6 +260,7 @@ func TestClosesThatPayStillTakeTheFootprintUnderTheLine(t *testing.T) {
 }
 
 func TestClosesKeepUpWithConnectionsThatKeepComing(t *testing.T) {
+	withProtocolQUICWindows(t)
 	w := newSimWorld(46*shedMiB - 100*uint64(shedTCPBaseBytes))
 	w.openMany(100, "Trojan", uint64(shedTCPBaseBytes))
 	w.age(time.Minute)
@@ -279,6 +284,7 @@ func TestClosesKeepUpWithConnectionsThatKeepComing(t *testing.T) {
 }
 
 func TestSlowSteadyGrowthNeverReachesTheHardLine(t *testing.T) {
+	withProtocolQUICWindows(t)
 	w := newSimWorld(30 * shedMiB)
 	next := w.now
 	w.every = func(w *simWorld) {
@@ -295,6 +301,19 @@ func TestSlowSteadyGrowthNeverReachesTheHardLine(t *testing.T) {
 }
 
 func TestAWedgedNodeIsShedWholeEachTimeAndNothingElse(t *testing.T) {
+	withProtocolQUICWindows(t)
+	wedgedNodeIsShedWholeEachTime(t)
+}
+
+func TestAWedgedNodeIsShedWholeUnderTheTunnelsWindows(t *testing.T) {
+	before := outbound.QUICDefaultReceiveWindows()
+	outbound.SetQUICDefaultReceiveWindows(outbound.QUICTunnelReceiveWindows())
+	t.Cleanup(func() { outbound.SetQUICDefaultReceiveWindows(before) })
+	wedgedNodeIsShedWholeEachTime(t)
+}
+
+func wedgedNodeIsShedWholeEachTime(t *testing.T) {
+	t.Helper()
 	w := newSimWorld(24 * shedMiB)
 	w.openMany(40, "Trojan", uint64(shedTCPBaseBytes))
 	w.age(time.Minute)
@@ -343,6 +362,7 @@ func TestAWedgedNodeIsShedWholeEachTimeAndNothingElse(t *testing.T) {
 }
 
 func TestAStalledFlowStillSendingKeepsItsNodeUp(t *testing.T) {
+	withProtocolQUICWindows(t)
 	w := newSimWorld(26 * shedMiB)
 	w.openMany(40, "Trojan", uint64(shedTCPBaseBytes))
 	for i, flow := range w.wedge(20, "HY2", 2500*time.Millisecond) {

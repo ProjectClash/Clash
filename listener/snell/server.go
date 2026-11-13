@@ -40,6 +40,9 @@ func New(config LC.SnellServer, lc C.InboundListenConfig, tunnel C.Tunnel, addit
 	}
 	switch config.Version {
 	case snell.Version1, snell.Version2, snell.Version3, snell.Version4, snell.Version5:
+		if config.Mode != "" {
+			return nil, errors.New("snell inbound mode is only supported on version 6")
+		}
 	case versionV6:
 	default:
 		return nil, fmt.Errorf("snell inbound version %d is not supported", config.Version)

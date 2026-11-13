@@ -24,28 +24,29 @@ const (
 )
 
 type oomEvidence struct {
-	SchemaVersion        int    `json:"schemaVersion"`
-	RecordedAtUnix       int64  `json:"recordedAtUnix"`
-	PressureLevel        string `json:"pressureLevel"`
-	ProcessIdentifier    int    `json:"processIdentifier"`
-	PossibleSystemKill   bool   `json:"possibleSystemKill"`
-	PhysicalMemoryBytes  int64  `json:"physicalMemoryBytes"`
-	SoftMemoryLimit      int64  `json:"softMemoryLimit,omitempty"`
-	GCPercent            int    `json:"gcPercent"`
-	CoreState            string `json:"coreState"`
-	CoreStartTimeUnix    int64  `json:"coreStartTimeUnix"`
-	InboundCount         int32  `json:"inboundCount"`
-	OutboundCount        int32  `json:"outboundCount"`
-	ConnectionCount      int32  `json:"connectionCount"`
-	GoroutineCount       int    `json:"goroutineCount"`
-	HeapAllocBytes       uint64 `json:"heapAllocBytes"`
-	HeapInuseBytes       uint64 `json:"heapInuseBytes"`
-	StackInuseBytes      uint64 `json:"stackInuseBytes"`
-	NumGC                uint32 `json:"numGC"`
-	ReloadPhase          string `json:"reloadPhase,omitempty"`
-	ReloadStartedUnix    int64  `json:"reloadStartedUnix,omitempty"`
-	ReloadNeededBytes    int64  `json:"reloadNeededBytes,omitempty"`
-	ReloadAvailableBytes int64  `json:"reloadAvailableBytes,omitempty"`
+	SchemaVersion        int              `json:"schemaVersion"`
+	RecordedAtUnix       int64            `json:"recordedAtUnix"`
+	PressureLevel        string           `json:"pressureLevel"`
+	ProcessIdentifier    int              `json:"processIdentifier"`
+	PossibleSystemKill   bool             `json:"possibleSystemKill"`
+	PhysicalMemoryBytes  int64            `json:"physicalMemoryBytes"`
+	SoftMemoryLimit      int64            `json:"softMemoryLimit,omitempty"`
+	GCPercent            int              `json:"gcPercent"`
+	CoreState            string           `json:"coreState"`
+	CoreStartTimeUnix    int64            `json:"coreStartTimeUnix"`
+	InboundCount         int32            `json:"inboundCount"`
+	OutboundCount        int32            `json:"outboundCount"`
+	ConnectionCount      int32            `json:"connectionCount"`
+	GoroutineCount       int              `json:"goroutineCount"`
+	HeapAllocBytes       uint64           `json:"heapAllocBytes"`
+	HeapInuseBytes       uint64           `json:"heapInuseBytes"`
+	StackInuseBytes      uint64           `json:"stackInuseBytes"`
+	NumGC                uint32           `json:"numGC"`
+	ReloadPhase          string           `json:"reloadPhase,omitempty"`
+	ReloadStartedUnix    int64            `json:"reloadStartedUnix,omitempty"`
+	ReloadNeededBytes    int64            `json:"reloadNeededBytes,omitempty"`
+	ReloadAvailableBytes int64            `json:"reloadAvailableBytes,omitempty"`
+	HeapAttribution      *heapAttribution `json:"heapAttribution,omitempty"`
 }
 
 var (
@@ -82,6 +83,19 @@ func setOOMEvidenceCoreState(running bool, startTimeUnix int64, inboundCount, ou
 }
 
 func RecordMemoryPressureEvidence() error {
+	return bridgeSafeError(recordMemoryPressureEvidence(nil))
+}
+
+func oomEvidenceRecordDue(now time.Time) bool {
+	lastNanos := oomEvidenceLastWrite.Load()
+	return lastNanos == 0 || now.Sub(time.Unix(0, lastNanos)) >= oomEvidenceMinInterval
+}
+
+func recordMemoryPressureEvidence(attribution *heapAttribution) error {
+	if attribution == nil && oomEvidenceRecordDue(time.Now()) {
+		counted := currentHeapAttribution()
+		attribution = &counted
+	}
 	oomEvidenceMu.Lock()
 	defer oomEvidenceMu.Unlock()
 
@@ -97,6 +111,7 @@ func RecordMemoryPressureEvidence() error {
 		return bridgeSafeError(err)
 	}
 	report := currentOOMEvidenceLocked(now, "critical", physFootprint(), runtimeSetup)
+	report.HeapAttribution = attribution
 	if err := writeOOMEvidenceAt(path, report, os.Rename); err != nil {
 		return bridgeSafeError(err)
 	}

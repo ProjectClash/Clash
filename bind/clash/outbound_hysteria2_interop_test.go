@@ -75,7 +75,7 @@ func runControlledHysteria2Variant(
 	server, err := IN.NewHysteria2(&IN.Hysteria2Option{
 		BaseOption: IN.BaseOption{
 			NameStr: "controlled-hysteria2-inbound",
-			Listen:  "127.0.0.1",
+			Listen:  loopbackUDPHost(t),
 			Port:    "0",
 		},
 		Users:             map[string]string{"controlled": password},

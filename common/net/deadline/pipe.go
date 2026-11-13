@@ -49,8 +49,9 @@ func (d *PipeDeadline) Set(t time.Time) {
 		if closed {
 			d.cancel = make(chan struct{})
 		}
+		cancel := d.cancel
 		d.timer = time.AfterFunc(dur, func() {
-			close(d.cancel)
+			close(cancel)
 		})
 		return
 	}

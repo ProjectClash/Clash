@@ -24,6 +24,8 @@ type packetSender struct {
 	mappingMutex   sync.RWMutex
 
 	dialRewrite func(flow, dial *C.Metadata) *C.Metadata
+
+	timeout time.Duration
 }
 
 // newPacketSender return a chan based C.PacketSender
@@ -38,6 +40,8 @@ func newPacketSender() C.PacketSender {
 
 		originToTarget: make(map[string]netip.Addr),
 		targetToOrigin: make(map[netip.Addr]netip.Addr),
+
+		timeout: udpTimeout,
 	}
 }
 
@@ -104,7 +108,7 @@ func (s *packetSender) processPacket(pc C.PacketConn, packet C.PacketAdapter) {
 		s.AddMapping(originMetadata, metadata)
 		addr = metadata.UDPAddr()
 	}
-	_ = handleUDPToRemote(packet, pc, addr)
+	_ = handleUDPToRemote(packet, pc, addr, s.timeout)
 }
 
 func (s *packetSender) Process(pc C.PacketConn, proxy C.WriteBackProxy) {
@@ -157,7 +161,7 @@ func (s *packetSender) Close() {
 
 func (s *packetSender) DoSniff(metadata *C.Metadata) error { return nil }
 
-func handleUDPToRemote(packet C.UDPPacket, pc C.PacketConn, addr *net.UDPAddr) error {
+func handleUDPToRemote(packet C.UDPPacket, pc C.PacketConn, addr *net.UDPAddr, timeout time.Duration) error {
 	if addr == nil {
 		return errors.New("udp addr invalid")
 	}
@@ -166,21 +170,24 @@ func handleUDPToRemote(packet C.UDPPacket, pc C.PacketConn, addr *net.UDPAddr) e
 		return err
 	}
 	// reset timeout
-	_ = pc.SetReadDeadline(time.Now().Add(udpTimeout))
+	_ = pc.SetReadDeadline(time.Now().Add(timeout))
 
 	return nil
 }
 
-func handleUDPToLocal(writeBack C.WriteBack, pc C.PacketConn, sender C.PacketSender, key string, oAddrPort netip.AddrPort) {
+func handleUDPToLocal(writeBack C.WriteBack, pc C.PacketConn, sender C.PacketSender, key string, oAddrPort netip.AddrPort, timeout time.Duration, ended func()) {
 	defer func() {
 		sender.Close()
 		_ = pc.Close()
+		if ended != nil {
+			ended()
+		}
 		closeAllLocalCoon(key)
 		natTable.Delete(key)
 	}()
 
 	for {
-		_ = pc.SetReadDeadline(time.Now().Add(udpTimeout))
+		_ = pc.SetReadDeadline(time.Now().Add(timeout))
 		data, put, from, err := pc.WaitReadFrom()
 		if err != nil {
 			return

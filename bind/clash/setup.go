@@ -219,6 +219,9 @@ func Setup(options *SetupOptions) error {
 	setTunMTU(requestedTunMTU)
 	setupRuntimeProfile.Store(uint32(requestedRuntimeProfile))
 	applyXHTTPTunnelReuse(requestedRuntimeProfile)
+	applyHTTP2RequestBodyScratch(requestedRuntimeProfile)
+	applyQUICTunnelReceiveWindows(requestedRuntimeProfile)
+	applyMieruTunnelBounds(requestedRuntimeProfile)
 	armMemoryPressureMonitorForRuntime(
 		requestedRuntimeProfile,
 		options.DisablePersistentCache,

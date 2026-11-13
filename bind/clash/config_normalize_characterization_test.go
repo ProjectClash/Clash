@@ -32,7 +32,7 @@ dns:
 rules:
   - MATCH,DIRECT
 `)
-	reported := detectUnroutableDNSFragments(raw)
+	reported := detectUnroutableDNSFragments(raw, nil)
 	if len(reported) == 0 {
 		t.Fatal("a fragment naming an undefined proxy must be reported")
 	}
@@ -51,7 +51,7 @@ dns:
 rules:
   - MATCH,DIRECT
 `)
-	if reported := detectUnroutableDNSFragments(fine); len(reported) != 0 {
+	if reported := detectUnroutableDNSFragments(fine, nil); len(reported) != 0 {
 		t.Fatalf("a fragment naming a defined proxy must not be reported: %v", reported)
 	}
 }
@@ -69,7 +69,7 @@ dns:
 rules:
   - MATCH,DIRECT
 `)
-	reported := detectUnroutableDNSFragments(raw)
+	reported := detectUnroutableDNSFragments(raw, nil)
 	if len(reported) == 0 {
 		t.Fatal("a fragment naming an undefined proxy must still be reported")
 	}

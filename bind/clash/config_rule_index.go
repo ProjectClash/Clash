@@ -90,17 +90,25 @@ func addLibraryNames(names ruleNames, reference any) {
 	mapping, _ := reference.(map[string]any)
 	path, _ := mapping["path"].(string)
 	want, _ := mapping["sha256"].(string)
-	sum, err := hex.DecodeString(want)
-	if path == "" || err != nil || len(sum) != sha256.Size {
-		return
-	}
-	library, err := outbound.OpenNodeLibraryFile(path, [sha256.Size]byte(sum))
-	if err != nil {
+	library := openReferencedLibrary(path, want)
+	if library == nil {
 		return
 	}
 	for i := 0; i < library.Len(); i++ {
 		names.targets[library.Name(i)] = struct{}{}
 	}
+}
+
+func openReferencedLibrary(path, want string) *outbound.NodeLibrary {
+	sum, err := hex.DecodeString(want)
+	if path == "" || err != nil || len(sum) != sha256.Size {
+		return nil
+	}
+	library, err := outbound.OpenNodeLibraryFile(path, [sha256.Size]byte(sum))
+	if err != nil {
+		return nil
+	}
+	return library
 }
 
 func ruleIndexProfile(named string) (runtimeProfile, error) {

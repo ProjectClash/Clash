@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ProjectClash/Clash/adapter/inbound"
@@ -165,6 +167,8 @@ func (h *ListenerHandler) NewPacketConnection(ctx context.Context, conn network.
 		defer mutex.Unlock()
 		writer = nil
 	}()
+	flow := &udpFlow{conn: conn, closable: h.Type == C.TUN}
+	defer flow.ended.Store(true)
 	rwOptions := network.ReadWaitOptions{}
 	readWaiter, isReadWaiter := bufio.CreatePacketReadWaiter(conn)
 	if isReadWaiter {
@@ -198,6 +202,7 @@ func (h *ListenerHandler) NewPacketConnection(ctx context.Context, conn network.
 			rAddr:  metadata.Source.UDPAddr(),
 			lAddr:  conn.LocalAddr(),
 			buff:   buff,
+			flow:   flow,
 		}
 		cPacket.rAddr = N.NewCustomAddr(h.Type.String(), connID, cPacket.rAddr) // for tunnel's handleUDPConn
 		if lAddr := getInAddr(ctx); lAddr != nil {
@@ -273,6 +278,20 @@ type packet struct {
 	rAddr  net.Addr
 	lAddr  net.Addr
 	buff   *buf.Buffer
+	flow   *udpFlow
+}
+
+type udpFlow struct {
+	ended    atomic.Bool
+	conn     io.Closer
+	closable bool
+}
+
+func (f *udpFlow) close() {
+	if f.closable {
+		f.ended.Store(true)
+		_ = f.conn.Close()
+	}
 }
 
 func (c *packet) Data() []byte {
@@ -322,6 +341,16 @@ func (c *packet) ReportUnreachable() error {
 		return nil
 	}
 	return reporter.ReportUnreachable()
+}
+
+func (c *packet) CloseFlow() {
+	if c.flow != nil {
+		c.flow.close()
+	}
+}
+
+func (c *packet) FlowEnded() bool {
+	return c.flow != nil && c.flow.ended.Load()
 }
 
 func (c *packet) InAddr() net.Addr {

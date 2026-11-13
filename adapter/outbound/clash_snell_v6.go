@@ -33,8 +33,8 @@ type SnellV6Client interface {
 var NewSnellV6Client func(SnellV6ClientOptions) (SnellV6Client, error)
 
 func warnSnellV6OnlyFields(addr string, option SnellOption) {
-	if option.Version != snellVersionV6 && (option.Mode != "" || option.UserKey != "") {
-		log.Warnln("[Snell] %s: mode and user-key are version 6's; version %d ignores them", addr, option.Version)
+	if option.Version != snellVersionV6 && option.UserKey != "" {
+		log.Warnln("[Snell] %s: user-key is version 6's; version %d ignores it", addr, option.Version)
 	}
 }
 

@@ -44,7 +44,7 @@ func runControlledShadowQUICVariant(t *testing.T, quicVersion, congestionControl
 	server, err := IN.NewShadowQuic(&IN.ShadowQuicOption{
 		BaseOption: IN.BaseOption{
 			NameStr: "controlled-shadowquic-inbound",
-			Listen:  "127.0.0.1",
+			Listen:  loopbackUDPHost(t),
 			Port:    "0",
 		},
 		ALPN:                 []string{"h3"},

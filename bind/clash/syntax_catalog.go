@@ -36,16 +36,17 @@ type syntaxGroupType struct {
 }
 
 type syntaxPlatformKey struct {
-	Path            string `json:"path"`
-	Category        string `json:"category"`
-	Value           string `json:"value,omitempty"`
-	Effective       string `json:"effective"`
-	Reason          string `json:"reason"`
-	Alternative     string `json:"alternative,omitempty"`
-	UpstreamDefault string `json:"upstreamDefault,omitempty"`
-	DefaultOnly     bool   `json:"defaultOnly,omitempty"`
-	Honoured        bool   `json:"honoured,omitempty"`
-	RuleKind        string `json:"ruleKind,omitempty"`
+	Path            string              `json:"path"`
+	Category        string              `json:"category"`
+	Value           string              `json:"value,omitempty"`
+	Effective       string              `json:"effective"`
+	Reason          string              `json:"reason"`
+	Alternative     string              `json:"alternative,omitempty"`
+	UpstreamDefault string              `json:"upstreamDefault,omitempty"`
+	DefaultOnly     bool                `json:"defaultOnly,omitempty"`
+	Honoured        bool                `json:"honoured,omitempty"`
+	RuleKind        string              `json:"ruleKind,omitempty"`
+	OnlyWhere       map[string][]string `json:"onlyWhere,omitempty"`
 }
 
 type syntaxCatalog struct {
@@ -206,6 +207,7 @@ func buildSyntaxCatalog(targetProfile string) (syntaxCatalog, error) {
 			DefaultOnly:     defaultOnly,
 			Honoured:        rule.honouredBy != "",
 			RuleKind:        rule.ruleKind,
+			OnlyWhere:       rule.onlyWhereMap(),
 		})
 	}
 	catalog.Fields = fieldList()
@@ -215,15 +217,16 @@ func buildSyntaxCatalog(targetProfile string) (syntaxCatalog, error) {
 }
 
 type syntaxPlatformDecision struct {
-	When        string   `json:"when"`
-	Condition   string   `json:"condition,omitempty"`
-	Value       string   `json:"value,omitempty"`
-	Replaces    []string `json:"replaces,omitempty"`
-	Unwritten   string   `json:"unwritten,omitempty"`
-	Category    string   `json:"category"`
-	Effective   string   `json:"effective"`
-	Reason      string   `json:"reason"`
-	Alternative string   `json:"alternative,omitempty"`
+	When        string              `json:"when"`
+	Condition   string              `json:"condition,omitempty"`
+	Value       string              `json:"value,omitempty"`
+	Replaces    []string            `json:"replaces,omitempty"`
+	Unwritten   string              `json:"unwritten,omitempty"`
+	Category    string              `json:"category"`
+	Effective   string              `json:"effective"`
+	Reason      string              `json:"reason"`
+	Alternative string              `json:"alternative,omitempty"`
+	OnlyWhere   map[string][]string `json:"onlyWhere,omitempty"`
 }
 
 type walledValue struct {
@@ -326,6 +329,7 @@ func decidePlatformFieldsFrom(rules []deviationRule, fields []syntaxField, polic
 		if rule.unwrittenUnconditional {
 			decision.Unwritten = rule.forcedValue
 		}
+		decision.OnlyWhere = rule.onlyWhereMap()
 		fields[i].PlatformDecision = decision
 	}
 }

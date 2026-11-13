@@ -15,6 +15,7 @@ import (
 	"github.com/ProjectClash/Clash/component/resolver"
 	"github.com/ProjectClash/Clash/listener/sing_tun"
 	"github.com/ProjectClash/Clash/log"
+	"github.com/ProjectClash/Clash/tunnel"
 
 	tun "github.com/metacubex/sing-tun"
 	"github.com/metacubex/sing/common/buf"
@@ -251,6 +252,9 @@ func (h goStackHandler) JudgeFlow(network uint8, source netip.AddrPort, destinat
 		}
 		if _, err := h.doorway().PrepareConnection(name, M.SocksaddrFromNetIP(source), M.SocksaddrFromNetIP(destination), nil, 0); err != nil {
 			return gotun.FlowVerdict{Action: gotun.ActionReject}
+		}
+		if network == unix.IPPROTO_UDP {
+			return gotun.FlowVerdict{Action: gotun.ActionAccept, UDPTimeout: tunnel.UDPProtocolTimeout(firstPacket, destination.Port())}
 		}
 	case unix.IPPROTO_ICMP, unix.IPPROTO_ICMPV6:
 		if !resolver.CurrentIPQueryPolicy().AllowsAddress(destination.Addr()) {

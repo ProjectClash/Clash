@@ -25,6 +25,7 @@ type syntaxField struct {
 	Min               *float64                 `json:"min,omitempty"`
 	Max               *float64                 `json:"max,omitempty"`
 	Unit              string                   `json:"unit,omitempty"`
+	ZeroMeansUnset    bool                     `json:"zeroMeansUnset,omitempty"`
 	Default           string                   `json:"default,omitempty"`
 	Format            string                   `json:"format,omitempty"`
 	Refers            []string                 `json:"refers,omitempty"`
@@ -33,6 +34,7 @@ type syntaxField struct {
 	PlatformDecision  *syntaxPlatformDecision  `json:"platformDecision,omitempty"`
 	UnavailableValues []syntaxUnavailableValue `json:"unavailableValues,omitempty"`
 	Required          bool                     `json:"required,omitempty"`
+	RequiredOneOf     []string                 `json:"requiredOneOf,omitempty"`
 	Key               *syntaxValue             `json:"key,omitempty"`
 	Value             *syntaxValue             `json:"value,omitempty"`
 	Source            string                   `json:"-"`
@@ -403,6 +405,32 @@ func annotateField(field *syntaxField, typeSets map[string][]string) {
 	if field.Kind == "multiSelect" && reflected == "text" {
 		field.Separator = fieldJoinedChoices(fieldJoinedChoicesKey(field.Path))
 	}
+	field.ZeroMeansUnset = fieldZeroMeansUnset(field.Path)
+	field.RequiredOneOf = fieldRequiredOneOf(field.Path)
+}
+
+func fieldRequiredOneOf(path string) []string {
+	switch path {
+	case "listeners[shadowsocks].password", "listeners[shadowsocks].users":
+		return []string{"password", "users"}
+	case "proxies[mieru].port", "proxies[mieru].port-range":
+		return []string{"port", "port-range"}
+	case "proxies[hysteria2].port", "proxies[hysteria2].ports":
+		return []string{"port", "ports"}
+	}
+	return nil
+}
+
+func fieldZeroMeansUnset(path string) bool {
+	switch path {
+	case "listeners[mieru].tcp-idle-timeout":
+		return true
+	case "proxies[zerotier].mtu", "proxies[zerotier].physical-mtu":
+		return true
+	case "proxies[hysteria2].port", "proxies[mieru].port":
+		return true
+	}
+	return false
 }
 
 func fieldJoinedChoices(key string) string {

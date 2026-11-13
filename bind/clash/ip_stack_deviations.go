@@ -45,7 +45,7 @@ func ipStackCongestionRule(nodeType string) deviationRule {
 var ipStackRules = sync.OnceValue(func() map[string]*deviationRule {
 	rules := map[string]*deviationRule{}
 	for i := range deviationRules {
-		if deviationRules[i].nodeKey {
+		if deviationRules[i].nodeKey && strings.Contains(deviationRules[i].field, "].ip-stack.") {
 			rules[deviationRules[i].field] = &deviationRules[i]
 		}
 	}
@@ -144,10 +144,16 @@ func inlinePlaces(library map[string]any, count int) []int {
 }
 
 func ipStackWrittenIn(list []any, held []int) map[string]any {
+	return nodeTallyRecordIn(list, held, tallyIPStack)
+}
+
+type nodeTallyFunc func(tallies map[string]*ipStackTally, proxy map[string]any, at int)
+
+func nodeTallyRecordIn(list []any, held []int, tally nodeTallyFunc) map[string]any {
 	tallies := map[string]*ipStackTally{}
 	for _, at := range held {
 		if proxy, _ := list[at].(map[string]any); proxy != nil {
-			tallyIPStack(tallies, proxy, at)
+			tally(tallies, proxy, at)
 		}
 	}
 	if len(tallies) == 0 {
@@ -160,7 +166,7 @@ func ipStackWrittenIn(list []any, held []int) map[string]any {
 	return recorded
 }
 
-func ipStackNodeDeviations(root map[string]any, policy appleRuntimePolicy) []configDeviation {
+func nodeTalliesOf(root map[string]any, recordKey string, tally nodeTallyFunc, accept func(field string) bool) map[string]*ipStackTally {
 	tallies := map[string]*ipStackTally{}
 	library, _ := root["x-clash-node-library"].(map[string]any)
 	proxies, _ := root["proxies"].([]any)
@@ -174,14 +180,14 @@ func ipStackNodeDeviations(root map[string]any, policy appleRuntimePolicy) []con
 		if places != nil {
 			at = places[k]
 		}
-		tallyIPStack(tallies, proxy, at)
+		tally(tallies, proxy, at)
 	}
-	recorded, _ := library["ip-stack-written"].(map[string]any)
+	recorded, _ := library[recordKey].(map[string]any)
 	for field, raw := range recorded {
 		entry, _ := raw.(map[string]any)
 		count := yamlCount(entry["count"])
 		first, _ := entry["first"].(string)
-		if count <= 0 || first == "" || ipStackRules()[field] == nil {
+		if count <= 0 || first == "" || !accept(field) {
 			continue
 		}
 		if tallies[field] == nil {
@@ -189,11 +195,16 @@ func ipStackNodeDeviations(root map[string]any, policy appleRuntimePolicy) []con
 		}
 		tallies[field].add(count, first, yamlCount(entry["at"]))
 	}
+	return tallies
+}
+
+func ipStackNodeDeviations(root map[string]any, policy appleRuntimePolicy) []configDeviation {
+	tallies := nodeTalliesOf(root, "ip-stack-written", tallyIPStack, func(field string) bool { return ipStackRules()[field] != nil })
 	var reported []configDeviation
 	for i := range deviationRules {
 		rule := &deviationRules[i]
 		tally := tallies[rule.field]
-		if !rule.nodeKey || tally == nil || !rule.active(policy) {
+		if ipStackRules()[rule.field] == nil || tally == nil || !rule.active(policy) {
 			continue
 		}
 		given := tally.first

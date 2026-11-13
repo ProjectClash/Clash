@@ -2,24 +2,25 @@ module github.com/ProjectClash/Clash/bind/clash
 
 go 1.26.0
 
-toolchain go1.26.10
+toolchain go1.26.11
 
 require (
 	github.com/coder/websocket v1.8.12
 	github.com/dlclark/regexp2 v1.12.0
-	github.com/easytier/easytier/easytier-go v0.0.0-20260918161347-e313ba8efb84
-	github.com/enfein/mieru/v3 v3.38.1
+	github.com/easytier/easytier/easytier-go v0.0.0-20261111015056-2abb1676b475
+	github.com/enfein/mieru/v3 v3.39.0
 	github.com/google/pprof v0.0.0-20240727154555-813a5fbdbec8
 	github.com/klauspost/compress v1.20.2
 	github.com/metacubex/chi v0.1.1
 	github.com/metacubex/connect-ip-go v0.0.0-20260727083417-67ccdb0cf771
 	github.com/metacubex/http v0.1.8
-	github.com/ProjectClash/Clash v1.19.33
+	github.com/ProjectClash/Clash v1.19.34
 	github.com/metacubex/quic-go v0.61.1-0.20260727080200-2548683b76f4
-	github.com/metacubex/sing v0.5.8
+	github.com/metacubex/sing v0.5.9
 	github.com/metacubex/sing-shadowsocks v0.2.13
 	github.com/metacubex/sing-shadowsocks2 v0.2.8
-	github.com/metacubex/sing-tun v0.4.28
+	github.com/metacubex/sing-tun v0.4.29
+	github.com/metacubex/smux v0.0.0-20260105030934-d0c8756d3141
 	github.com/metacubex/ssh v0.1.0
 	github.com/metacubex/tailscale v0.0.0-20260821153257-ff0ecd818181
 	github.com/metacubex/tailscale-wireguard-go v0.0.0-20260725073821-e61ab99cede2
@@ -104,9 +105,8 @@ require (
 	github.com/metacubex/sing-quic v0.0.0-20260904234848-1c242664697a // indirect
 	github.com/metacubex/sing-vmess v0.2.5 // indirect
 	github.com/metacubex/sing-wireguard v0.0.0-20261002050126-e5fa1a607406 // indirect
-	github.com/metacubex/smux v0.0.0-20260105030934-d0c8756d3141 // indirect
-	github.com/metacubex/tfo-go v0.0.0-20260623020846-376a77860b8c // indirect
-	github.com/metacubex/utls v1.8.8 // indirect
+	github.com/metacubex/tfo-go v0.0.0-20261026151606-08d83ec08c84 // indirect
+	github.com/metacubex/utls v1.9.0-alpha.1 // indirect
 	github.com/metacubex/wazero v0.0.0-20260628025728-9ae6bdcf2a7d // indirect
 	github.com/metacubex/yamux v0.0.0-20250918083631-dd5f17c0be49 // indirect
 	github.com/metacubex/zerotier-go v0.0.0-20260813124750-13fa6f45da5f // indirect
@@ -183,3 +183,9 @@ replace github.com/metacubex/sing-quic => ../../third_party/sing-quic
 // health-check timers in v0.1.8, so every closed XHTTP stream without
 // reuse-settings holds its connection for up to 300 s.
 replace github.com/metacubex/http => ../../third_party/metacubex-http
+
+// v3.39.0, as v3.38.1 did, queues what a stream session received and its application has not read by
+// the segment, with no bound in bytes, and a client records every segment in a replay
+// cache it never consults; the snapshot bounds the one and skips the other where the
+// tunnel asks for it.
+replace github.com/enfein/mieru/v3 => ../../third_party/mieru

@@ -274,6 +274,9 @@ func NewSnell(option SnellOption) (*Snell, error) {
 	default:
 		return nil, fmt.Errorf("snell version error: %d", option.Version)
 	}
+	if option.Mode != "" && option.Version != snell.Version6 {
+		return nil, fmt.Errorf("snell %s mode is only supported on version 6", addr)
+	}
 
 	s := &Snell{
 		Base: NewBase(BaseOption{

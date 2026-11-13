@@ -207,6 +207,7 @@ func NewHysteria(option HysteriaOption) (*Hysteria, error) {
 		quicConfig.InitialConnectionReceiveWindow = DefaultConnectionReceiveWindow / 10
 		quicConfig.MaxConnectionReceiveWindow = DefaultConnectionReceiveWindow
 	}
+	applyQUICDefaultReceiveWindows(quicConfig, option.ReceiveWindow != 0)
 	if !quicConfig.DisablePathMTUDiscovery && pmtud_fix.DisablePathMTUDiscovery {
 		log.Infoln("hysteria: Path MTU Discovery is not yet supported on this platform")
 	}

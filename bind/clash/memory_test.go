@@ -15,6 +15,8 @@ type fakeTracker struct {
 func (f *fakeTracker) ID() string   { return "clash-test-tracker" }
 func (f *fakeTracker) Close() error { f.closed = true; return nil }
 
+func (f *fakeTracker) Info() *statistic.TrackerInfo { return nil }
+
 func TestHandleMemoryPressureRecordsEvidenceAndKeepsConnections(t *testing.T) {
 	const softLimit = 50 << 20
 	path := setupOOMEvidenceTest(t)

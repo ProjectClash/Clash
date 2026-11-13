@@ -88,15 +88,17 @@ func (f *Fallback) ClashAppendSummaryJSON(b []byte) []byte {
 }
 
 func (f *Fallback) clashAppendJSON(b []byte, members C.ProxyList) []byte {
+	now := f.Now()
+	fixed := f.selected.Load()
 	b = append(b, `{"all":`...)
 	b = appendMemberNames(b, members, false)
 	b = appendGroupString(b, "emptyFallback", f.EmptyFallback().Name())
 	b = appendGroupString(b, "expectedStatus", f.expectedStatus)
-	b = appendGroupString(b, "fixed", f.selected.Load())
+	b = appendGroupString(b, "fixed", fixed)
 	b = append(b, `,"hidden":`...)
 	b = strconv.AppendBool(b, f.Hidden())
 	b = appendGroupString(b, "icon", f.Icon())
-	b = appendGroupString(b, "now", f.Now())
+	b = appendGroupString(b, "now", now)
 	b = appendGroupString(b, "testUrl", f.testUrl)
 	b = appendGroupString(b, "type", f.Type().String())
 	return append(b, '}')

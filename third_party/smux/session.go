@@ -141,6 +141,7 @@ func newSession(config *Config, conn io.ReadWriteCloser, client bool) *Session {
 	}
 
 	go s.shaperLoop()
+	liveSessions.Store(s, struct{}{})
 	go s.recvLoop()
 	go s.sendLoop()
 	if !config.KeepAliveDisabled {
@@ -348,6 +349,7 @@ func (s *Session) returnTokens(n int) {
 }
 
 func (s *Session) recvLoop() {
+	defer liveSessions.Delete(s)
 	var hdr rawHeader
 	var updHdr updHeader
 

@@ -72,7 +72,7 @@ func (d *DNSDialer) DialContext(ctx context.Context, network, addr string) (net.
 			}
 		} else {
 			var ok bool
-			proxyAdapter, ok = Proxies()[proxyName]
+			proxyAdapter, ok = LookupProxy(proxyName)
 			if ok {
 				metadata.SpecialProxy = proxyName // just for log
 			} else {
@@ -165,7 +165,7 @@ func (d *DNSDialer) ListenPacket(ctx context.Context, network, addr string) (net
 			}
 		} else {
 			var ok bool
-			proxyAdapter, ok = Proxies()[proxyName]
+			proxyAdapter, ok = LookupProxy(proxyName)
 			if ok {
 				metadata.SpecialProxy = proxyName // just for log
 			} else {

@@ -318,6 +318,23 @@ func ReportUDPUnreachable(packet UDPPacket) error {
 	return nil
 }
 
+func (s *packetAdapter) CloseFlow() { CloseUDPFlow(s.UDPPacket) }
+
+func (s *packetAdapter) FlowEnded() bool { return UDPFlowEnded(s.UDPPacket) }
+
+func CloseUDPFlow(packet UDPPacket) {
+	if closer, ok := packet.(interface{ CloseFlow() }); ok {
+		closer.CloseFlow()
+	}
+}
+
+func UDPFlowEnded(packet UDPPacket) bool {
+	if ended, ok := packet.(interface{ FlowEnded() bool }); ok {
+		return ended.FlowEnded()
+	}
+	return false
+}
+
 func NewPacketAdapter(packet UDPPacket, metadata *Metadata) PacketAdapter {
 	return &packetAdapter{
 		packet,

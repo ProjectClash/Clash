@@ -7331,7 +7331,7 @@ var (
 )
 
 func (cs *http2clientStream) frameScratchBufferLen(maxFrameSize int) int {
-	const max = 512 << 10
+	max := HTTP2RequestBodyScratchMax(cs.reqBodyContentLength)
 	n := int64(maxFrameSize)
 	if n > max {
 		n = max
@@ -7376,7 +7376,10 @@ func (cs *http2clientStream) writeRequestBody(req *Request) (err error) {
 	scratchLen := cs.frameScratchBufferLen(maxFrameSize)
 	var buf []byte
 	index := http2bufPoolIndex(scratchLen)
-	if bp, ok := http2bufPools[index].Get().(*[]byte); ok && len(*bp) >= scratchLen {
+	onDemand := newHTTP2OnDemandScratch(body, hasContentLen, scratchLen, &http2bufPools[index])
+	if onDemand != nil {
+		defer onDemand.Release()
+	} else if bp, ok := http2bufPools[index].Get().(*[]byte); ok && len(*bp) >= scratchLen {
 		defer http2bufPools[index].Put(bp)
 		buf = *bp
 	} else {
@@ -7386,7 +7389,13 @@ func (cs *http2clientStream) writeRequestBody(req *Request) (err error) {
 
 	var sawEOF bool
 	for !sawEOF {
-		n, err := body.Read(buf)
+		var n int
+		var err error
+		if onDemand != nil {
+			buf, n, err = onDemand.Read(body)
+		} else {
+			n, err = body.Read(buf)
+		}
 		if hasContentLen {
 			remainLen -= int64(n)
 			if remainLen == 0 && err == nil {
@@ -7431,6 +7440,9 @@ func (cs *http2clientStream) writeRequestBody(req *Request) (err error) {
 				err = cc.bw.Flush()
 			}
 			cc.wmu.Unlock()
+		}
+		if onDemand != nil {
+			onDemand.Release()
 		}
 		if err != nil {
 			return err

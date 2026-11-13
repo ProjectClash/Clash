@@ -1187,6 +1187,12 @@ func parseYAMLForCheck(text string) (*parsedYAML, error) {
 var yamlEditSurgeryFault func(string) string
 
 func (d *yamlEditDocument) apply(path []any, op string, value any) *yamlEditError {
+	if k, flow, inFlow := d.flowAncestor(path); inFlow {
+		_, underKey := path[k-1].(string)
+		if !(op == "insert" && k == len(path)-1 && len(flow.Content) == 0 && underKey) {
+			return d.applyInFlow(path, k, op, value)
+		}
+	}
 	parentPath, last := path[:len(path)-1], path[len(path)-1]
 	parent, refusal := d.locate(parentPath)
 	if refusal != nil {

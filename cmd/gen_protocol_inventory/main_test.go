@@ -30,6 +30,43 @@ func testSurface(t *testing.T, name string) (*generator, map[string]string) {
 	return gen, roots
 }
 
+var acceptedTypes = map[string][]string{
+	"proxies": {"anytls", "direct", "dns", "easytier", "gost-relay", "http", "hysteria", "hysteria2", "masque",
+		"mieru", "openvpn", "reject", "rematch", "shadowquic", "snell", "socks5", "ss", "ssh", "ssr", "sudoku",
+		"tailscale", "trojan", "trusttunnel", "tuic", "vless", "vmess", "wireguard", "zerotier"},
+	"listeners": {"anytls", "http", "hysteria2", "hysteria2-realm", "mieru", "mixed", "mtproto", "redir",
+		"shadowquic", "shadowsocks", "snell", "socks", "sudoku", "tproxy", "trojan", "trusttunnel", "tuic", "tun",
+		"tunnel", "vless", "vmess"},
+}
+
+func requireAcceptedTypes(t *testing.T, surface string, got []string) {
+	t.Helper()
+	want, have := map[string]bool{}, map[string]bool{}
+	for _, name := range acceptedTypes[surface] {
+		want[name] = true
+	}
+	for _, name := range got {
+		have[name] = true
+	}
+	var missing, extra []string
+	for name := range want {
+		if !have[name] {
+			missing = append(missing, name)
+		}
+	}
+	for name := range have {
+		if !want[name] {
+			extra = append(extra, name)
+		}
+	}
+	sort.Strings(missing)
+	sort.Strings(extra)
+	if len(missing) > 0 || len(extra) > 0 {
+		t.Fatalf("%s: missing %v; not in the list %v (a new upstream type is added to acceptedTypes with its golden entry)",
+			surface, missing, extra)
+	}
+}
+
 func collectType(t *testing.T, gen *generator, roots map[string]string, typeName string) []inventoryField {
 	t.Helper()
 	structName, ok := roots[typeName]
@@ -82,9 +119,7 @@ func TestProxyRootsAreReadFromTheParserSwitch(t *testing.T) {
 	if got := roots["easytier"]; got != "EasyTierOption" {
 		t.Fatalf("easytier maps to %q, want EasyTierOption", got)
 	}
-	if len(roots) != 28 {
-		t.Fatalf("expected 28 proxy types at v1.19.31, derived %d: %v", len(roots), sortedKeys(roots))
-	}
+	requireAcceptedTypes(t, "proxies", sortedKeys(roots))
 	for typeName, structName := range roots {
 		if _, ok := gen.structs[structName]; !ok {
 			t.Errorf("type %q maps to %q which is not defined in the outbound package", typeName, structName)
@@ -94,7 +129,7 @@ func TestProxyRootsAreReadFromTheParserSwitch(t *testing.T) {
 
 func TestListenerRootsAreReadFromTheParserSwitch(t *testing.T) {
 	gen, roots := testSurface(t, "listeners")
-	for _, typeName := range []string{"socks", "http", "mixed", "tun", "tuic", "hysteria2", "shadowquic", "anytls", "mtproto"} {
+	for _, typeName := range []string{"socks", "http", "mixed", "tun", "tuic", "hysteria2", "shadowquic", "anytls"} {
 		if _, ok := roots[typeName]; !ok {
 			t.Errorf("listener type %q missing from the derived roots", typeName)
 		}
@@ -102,9 +137,7 @@ func TestListenerRootsAreReadFromTheParserSwitch(t *testing.T) {
 	if got := roots["hysteria2-realm"]; got != "Hysteria2RealmServerOption" {
 		t.Fatalf("hysteria2-realm maps to %q, want Hysteria2RealmServerOption via the constructor shape", got)
 	}
-	if len(roots) != 21 {
-		t.Fatalf("expected 21 listener types, derived %d: %v", len(roots), sortedKeys(roots))
-	}
+	requireAcceptedTypes(t, "listeners", sortedKeys(roots))
 	for typeName, structName := range roots {
 		if _, ok := gen.structs[structName]; !ok {
 			t.Errorf("listener type %q maps to %q which is not defined in listener/inbound", typeName, structName)
@@ -278,8 +311,12 @@ func TestAllSurfacesRenderDeterministically(t *testing.T) {
 	if err := json.Unmarshal(first, &doc); err != nil {
 		t.Fatal(err)
 	}
-	if len(doc["proxies"]) != 28 || len(doc["listeners"]) != 21 {
-		t.Fatalf("all-surface document has %d proxies / %d listeners", len(doc["proxies"]), len(doc["listeners"]))
+	for _, surface := range []string{"proxies", "listeners"} {
+		var rendered []string
+		for name := range doc[surface] {
+			rendered = append(rendered, name)
+		}
+		requireAcceptedTypes(t, surface, rendered)
 	}
 }
 

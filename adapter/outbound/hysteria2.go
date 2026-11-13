@@ -245,6 +245,7 @@ func NewHysteria2(option Hysteria2Option) (*Hysteria2, error) {
 			InitialConnectionReceiveWindow: option.InitialConnectionReceiveWindow,
 			MaxConnectionReceiveWindow:     option.MaxConnectionReceiveWindow,
 		}
+		fillQUICDefaultReceiveWindows(quicConfig)
 
 		clientOptions := hysteria2.ClientOptions{
 			Context:            context.TODO(),
