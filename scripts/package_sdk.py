@@ -17,6 +17,13 @@ import zipfile
 SDK_CONTENTS = ['Clash.xcframework', 'LICENSE', 'NOTICE', 'THIRD_PARTY_LICENSES.md',
                 'THIRD_PARTY_LICENSES', 'SOURCES.json']
 EASYTIER = 'github.com/easytier/easytier/easytier-go'
+# An easytier-go version whose embedded core names a build commit EasyTier has not published.
+# Its source is the public EasyTier commit that easytier-go version is, recorded as such.
+UNPUBLISHED_EASYTIER_BUILDS = {
+    '5f1eaa7c9f9d3e89e9b75a6d87531a436fae40c4': dict(
+        module='v0.0.0-20261111015056-2abb1676b475',
+        source='2abb1676b475947e46c527b57acc5f296cb48482'),
+}
 
 
 def sha(path):
@@ -188,22 +195,34 @@ def prepare(root, inventory, output):
     easy = modules[EASYTIER]
     easy_root = download_module(EASYTIER + '@' + easy['version'])
     provenance = wasm_provenance(easy_root / 'internal/artifact')
-    source_url = 'https://codeload.github.com/EasyTier/EasyTier/tar.gz/' + provenance['commit']
-    source_name = 'EasyTier-source-' + provenance['commit'] + '.tar.gz'
+    source_commit = provenance['commit']
+    unpublished = UNPUBLISHED_EASYTIER_BUILDS.get(provenance['commit'])
+    if unpublished:
+        if unpublished['module'] != easy['version']:
+            raise ValueError('An unpublished EasyTier build is recorded for another easytier-go version')
+        source_commit = unpublished['source']
+    source_url = 'https://codeload.github.com/EasyTier/EasyTier/tar.gz/' + source_commit
+    source_name = 'EasyTier-source-' + source_commit + '.tar.gz'
     with urllib.request.urlopen(source_url, timeout=120) as response, (output / source_name).open('xb') as file:
         shutil.copyfileobj(response, file)
     # Inspect the archive without extracting untrusted paths.
     with tarfile.open(output / source_name) as source:
-        prefix = 'EasyTier-' + provenance['commit'] + '/'
+        prefix = 'EasyTier-' + source_commit + '/'
         names = set(source.getnames())
         for required in ['Cargo.lock', 'Cargo.toml', 'LICENSE', 'script/build-wasi-core.sh']:
             if prefix + required not in names:
                 raise ValueError('Incomplete EasyTier corresponding source: ' + required)
         license_file = source.extractfile(prefix + 'LICENSE')
         (notices / module_directory(EASYTIER) / 'EMBEDDED-CORE-LICENSE').write_bytes(license_file.read())
-    provenance.update(sourceURL=source_url, sourceArchive=source_name,
+    provenance.update(sourceCommit=source_commit, sourceURL=source_url, sourceArchive=source_name,
                       sourceArchiveSHA256=sha(output / source_name),
                       buildScript='script/build-wasi-core.sh')
+    if source_commit != provenance['commit']:
+        provenance['sourceNote'] = (
+            'easytier-go ' + easy['version'] + ' embeds an EasyTier core built from commit '
+            + provenance['commit'] + ', which EasyTier has not published. The source shipped here is '
+            'EasyTier commit ' + source_commit + ', the public commit that easytier-go version is.')
+        (notices / module_directory(EASYTIER) / 'EMBEDDED-CORE-SOURCE.txt').write_text(provenance['sourceNote'] + '\n')
     provenance['dependencies'] = package_rust_sources(output / source_name, output, notices)
     (notices / module_directory(EASYTIER) / 'EMBEDDED-CORE.json').write_text(json.dumps(provenance, indent=2) + '\n')
     lzo = modules['github.com/rasky/go-lzo']
@@ -233,7 +252,7 @@ def prepare(root, inventory, output):
     make_zip(output / 'THIRD_PARTY_LICENSES.zip', output, SDK_CONTENTS[1:])
     assets = ['Clash.xcframework.zip', 'THIRD_PARTY_LICENSES.zip', 'EasyTier-dependencies.zip', source_name, 'SOURCES.json']
     (output / 'SHA256SUMS').write_text(''.join(sha(output / name) + '  ' + name + '\n' for name in assets))
-    print('Packaged SDK, licenses, exact embedded source and SHA256SUMS')
+    print('Packaged SDK, licenses, embedded source and SHA256SUMS')
 
 
 if __name__ == '__main__':
