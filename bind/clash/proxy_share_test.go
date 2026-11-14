@@ -89,10 +89,14 @@ func TestProxyShareCoexistsWithConfigMixedPort(t *testing.T) {
 	if err := service.StopProxyShare(); err != nil {
 		t.Fatal(err)
 	}
-	occupiedPort := reserveProxySharePort(t)
-	occupant, err := net.Listen("tcp4", net.JoinHostPort("0.0.0.0", strconv.Itoa(occupiedPort)))
-	if err != nil {
-		t.Fatal(err)
+	var occupiedPort int
+	var occupant net.Listener
+	for attempt := 0; occupant == nil; attempt++ {
+		occupiedPort = reserveProxySharePort(t)
+		occupant, err = net.Listen("tcp4", net.JoinHostPort("0.0.0.0", strconv.Itoa(occupiedPort)))
+		if err != nil && (!errors.Is(err, syscall.EADDRINUSE) || attempt == 4) {
+			t.Fatal(err)
+		}
 	}
 	t.Cleanup(func() { _ = occupant.Close() })
 	err = service.StartProxyShare(int32(occupiedPort), "clash-test-user", "clash-test-password")
@@ -189,10 +193,12 @@ func TestClashAPIClientControlsProxyShareWithoutLeakingCredentials(t *testing.T)
 	}
 	t.Cleanup(client.Close)
 
-	port := reserveProxySharePort(t)
 	const username = "private-user"
 	const password = "private-password-value"
-	if err := client.StartProxyShare(int32(port), username, password); err != nil {
+	port, err := startProxyShareOnAFreePort(t, func(port int32) error {
+		return client.StartProxyShare(port, username, password)
+	})
+	if err != nil {
 		t.Fatalf("client StartProxyShare: %v", err)
 	}
 	status, err := client.GetProxyShareStatus()
@@ -246,10 +252,14 @@ func TestProxyShareUnavailablePortIsDistinguishableFromOtherRejections(t *testin
 	}
 	t.Cleanup(client.Close)
 
-	occupiedPort := reserveProxySharePort(t)
-	occupant, err := net.Listen("tcp4", net.JoinHostPort("0.0.0.0", strconv.Itoa(occupiedPort)))
-	if err != nil {
-		t.Fatal(err)
+	var occupiedPort int
+	var occupant net.Listener
+	for attempt := 0; occupant == nil; attempt++ {
+		occupiedPort = reserveProxySharePort(t)
+		occupant, err = net.Listen("tcp4", net.JoinHostPort("0.0.0.0", strconv.Itoa(occupiedPort)))
+		if err != nil && (!errors.Is(err, syscall.EADDRINUSE) || attempt == 4) {
+			t.Fatal(err)
+		}
 	}
 	t.Cleanup(func() { _ = occupant.Close() })
 
@@ -312,12 +322,17 @@ func startProxyShareOnAFreePort(t *testing.T, start func(port int32) error) (int
 	var err error
 	for attempt := 0; attempt < 5; attempt++ {
 		port := reserveProxySharePort(t)
-		if err = start(int32(port)); err == nil || !errors.Is(err, syscall.EADDRINUSE) {
+		if err = start(int32(port)); err == nil || !proxySharePortTaken(err, port) {
 			return port, err
 		}
 		t.Logf("proxy-share port %d was taken before the share bound it: %v", port, err)
 	}
 	return 0, err
+}
+
+func proxySharePortTaken(err error, port int) bool {
+	return errors.Is(err, syscall.EADDRINUSE) ||
+		strings.Contains(err.Error(), "proxy-share port "+strconv.Itoa(port)+" is unavailable")
 }
 
 func reserveProxySharePort(t *testing.T) int {
@@ -341,7 +356,11 @@ func reserveProxySharePort(t *testing.T) int {
 		if err := tcpListener.Close(); err != nil {
 			t.Fatal(err)
 		}
-		if udpError == nil && ipv6Error == nil && port >= int(ProxyShareMinimumPort) {
+		wildcardListener, wildcardError := net.Listen("tcp4", net.JoinHostPort("0.0.0.0", strconv.Itoa(port)))
+		if wildcardListener != nil {
+			_ = wildcardListener.Close()
+		}
+		if udpError == nil && ipv6Error == nil && wildcardError == nil && port >= int(ProxyShareMinimumPort) {
 			return port
 		}
 	}
