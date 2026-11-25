@@ -5,8 +5,9 @@ import (
 )
 
 const (
-	magic   = "CRI1\x00\x00\x00\x00"
-	version = 1
+	magic = "CRI1\x00\x00\x00\x00"
+	version        = 1
+	versionWritten = 2
 
 	kindOther   = 0
 	kindDomain  = 1
@@ -46,14 +47,24 @@ const (
 	secNodes
 	secIPPosts
 	secResolvers
+	sectionCountV1
+)
+
+const (
+	secWrittenRules = sectionCountV1 + iota
+	secWrittenPool
 	sectionCount
 )
+
+const writtenEntry = 8
 
 const (
 	sourceAt   = 8 + 4*4
 	sectionsAt = sourceAt + 32
-	headerSize = sectionsAt + 8*sectionCount
+	headerSize = sectionsAt + 8*sectionCountV1
 )
+
+func headerSizeOf(sections int) int { return sectionsAt + 8*sections }
 
 func hashOf(s []byte) uint64 {
 	const (

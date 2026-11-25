@@ -22,6 +22,16 @@ static long long clash_phys_footprint() {
 	return (long long)info.phys_footprint;
 }
 
+// clash_virtual_size returns this task's virtual size -- the address space it has mapped, reserved
+// regions with no pages included. -1 on failure.
+static long long clash_virtual_size() {
+	task_vm_info_data_t info;
+	mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+	kern_return_t kr = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count);
+	if (kr != KERN_SUCCESS) return -1;
+	return (long long)info.virtual_size;
+}
+
 // os_proc_available_memory is iOS-only. It is a point-in-time advisory
 // snapshot and must be queried for every low-frequency diagnostic sample.
 // Keep the macOS gomobile slice linkable by returning -1 there.
@@ -99,6 +109,10 @@ func clashMemoryPressureCallback(_ C.ulong) {
 
 func physFootprint() int64 {
 	return int64(C.clash_phys_footprint())
+}
+
+func virtualSize() int64 {
+	return int64(C.clash_virtual_size())
 }
 
 func availableMemory() int64 {

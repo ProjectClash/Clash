@@ -37,34 +37,45 @@ func TestBlockQUICDecidesByTheOutboundTheFlowEndsAt(t *testing.T) {
 	}
 }
 
-type quicPacket struct{ *reportingPacket }
+type quicPacket struct{ keyedPacket }
 
 func (quicPacket) Data() []byte { return quicInitial(quicVersion1, 0) }
 
 func TestAQUICFlowToAProxyIsRefusedAndOneToDirectIsCarried(t *testing.T) {
+	prevRouting := loadVersion().routing
+	t.Cleanup(func() { UpdateClashRouting(prevRouting) })
 	for _, tc := range []struct {
 		typ     C.AdapterType
 		refused bool
 	}{{C.Shadowsocks, true}, {C.Direct, false}} {
 		var listens atomic.Int32
+		listened := make(chan struct{})
 		out := &dialProxy{doorProxy: doorProxy{name: "out", typ: tc.typ}, listen: func() (C.PacketConn, error) {
-			listens.Add(1)
+			if listens.Add(1) == 1 {
+				close(listened)
+			}
 			return nothingPacketConn{}, nil
 		}}
 		withVerdictTunnel(t, "out", out)
-		prevRouting := loadVersion().routing
 		UpdateClashRouting(C.ClashRouting{BlockQUIC: C.BlockQUICAllProxy})
-		packet := quicPacket{newReportingPacket()}
+		port := 41000 + int(tc.typ)
+		packet := quicPacket{newKeyedPacket(port)}
 		metadata := tunFlowTo("192.0.2.1")
-		metadata.NetWork, metadata.SrcPort = C.UDP, uint16(41000+int(tc.typ))
+		metadata.NetWork, metadata.SrcPort = C.UDP, uint16(port)
 		handleUDPConn(C.NewPacketAdapter(packet, metadata))
+		select {
+		case <-packet.reported:
+		case <-listened:
+		case <-time.After(5 * time.Second):
+			t.Errorf("%s: in 5 s the flow was neither answered unreachable nor opened its outbound", tc.typ)
+		}
+		waitSessionLeftTable(t, packet.LocalAddr().String())
 		reported := false
 		select {
 		case <-packet.reported:
 			reported = true
-		case <-time.After(500 * time.Millisecond):
+		default:
 		}
-		UpdateClashRouting(prevRouting)
 		if reported != tc.refused || (listens.Load() == 0) != tc.refused {
 			t.Errorf("%s: answered unreachable %v, outbound opened %d time(s); want refused %v", tc.typ, reported, listens.Load(), tc.refused)
 		}

@@ -22,7 +22,7 @@ func TestASnellV6NodeReachesSurgesServer(t *testing.T) {
 	echo := tcpEcho(t, nil)
 	banner := []byte("220 ready\r\n")
 	speaksFirst := tcpEcho(t, banner)
-	udpTarget := udpEcho(t)
+	udpTarget := udpEchoAt(t, "127.0.0.1")
 	for _, mode := range []string{"default", "unshaped", "unsafe-raw"} {
 		for _, reuse := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/reuse=%v", mode, reuse), func(t *testing.T) {

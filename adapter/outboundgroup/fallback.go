@@ -124,6 +124,14 @@ func (f *Fallback) findAliveProxy(touch bool) C.Proxy {
 		}
 	}
 
+	if selected != "" {
+		for i := 0; i < proxies.Len(); i++ {
+			if proxy := proxies.At(i); proxy.AliveForTestUrl(f.testUrl) {
+				return proxy
+			}
+		}
+	}
+
 	return proxies.At(0)
 }
 

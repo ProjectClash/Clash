@@ -59,16 +59,16 @@ func writtenRuleTypeIn(table C.RuleTable, i int, types map[string]bool) bool {
 	if prefixed, ok := table.(*C.ClashRulesBefore); ok {
 		if first := prefixed.FirstAfter(); i >= first {
 			j := i - first
-			if len(prefixed.AfterLines) == len(prefixed.After) {
+			if _, isList := prefixed.After.(C.RuleList); isList && len(prefixed.AfterLines) == prefixed.AfterLen() {
 				tp, _, _, _ := ruleTypeAndTarget(prefixed.AfterLines[j])
 				return types[tp]
 			}
 			return writtenRuleTypeIn(prefixed.After, j, types)
 		}
-		if i >= len(prefixed.Before) {
-			return writtenRuleTypeIn(prefixed.Rest, i-len(prefixed.Before), types)
+		if i >= prefixed.BeforeLen() {
+			return writtenRuleTypeIn(prefixed.Rest, i-prefixed.BeforeLen(), types)
 		}
-		if len(prefixed.Lines) == len(prefixed.Before) {
+		if _, isList := prefixed.Before.(C.RuleList); isList && len(prefixed.Lines) == prefixed.BeforeLen() {
 			tp, _, _, _ := ruleTypeAndTarget(prefixed.Lines[i])
 			return types[tp]
 		}

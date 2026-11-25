@@ -573,3 +573,13 @@ func TestTheIndexWalksAsTheLoopWithRulesDisabled(t *testing.T) {
 		}
 	}
 }
+
+func TestAdapterAtIsTheBuiltRulesAdapter(t *testing.T) {
+	c := newCorpus(t, 5, 3000, 50, 0)
+	table, _ := c.compile(t, false)
+	for i := 0; i < table.Len(); i++ {
+		if got, want := table.AdapterAt(i), table.At(i).Adapter(); got != want {
+			t.Fatalf("rule %d: AdapterAt %q, At(i).Adapter() %q", i, got, want)
+		}
+	}
+}

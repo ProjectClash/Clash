@@ -51,10 +51,10 @@ func RuleIndexOf(rule Rule) (int, bool) {
 }
 
 type ClashRulesBefore struct {
-	Before RuleList
+	Before RuleTable
 	Lines []string
 	Rest  RuleTable
-	After RuleList
+	After RuleTable
 	AfterLines []string
 }
 
@@ -67,130 +67,154 @@ func ClashWithRulesBefore(before RuleList, lines []string, rest RuleTable) RuleT
 	return ClashWithRulesAround(before, lines, rest, nil, nil)
 }
 
-func ClashWithRulesAround(before RuleList, lines []string, rest RuleTable, after RuleList, afterLines []string) RuleTable {
-	if len(before) == 0 && len(after) == 0 {
+func ClashWithRulesAround(before RuleTable, lines []string, rest RuleTable, after RuleTable, afterLines []string) RuleTable {
+	if lenOf(before) == 0 && lenOf(after) == 0 {
 		return rest
+	}
+	if before == nil {
+		before = RuleList(nil)
+	}
+	if after == nil {
+		after = RuleList(nil)
 	}
 	return &ClashRulesBefore{Before: before, Lines: lines, Rest: rest, After: after, AfterLines: afterLines}
 }
 
-func (t *ClashRulesBefore) Len() int { return len(t.Before) + t.Rest.Len() + len(t.After) }
+func lenOf(table RuleTable) int {
+	if table == nil {
+		return 0
+	}
+	return table.Len()
+}
 
-func (t *ClashRulesBefore) FirstAfter() int { return len(t.Before) + t.Rest.Len() }
+func (t *ClashRulesBefore) BeforeLen() int { return lenOf(t.Before) }
 
-func (t *ClashRulesBefore) At(i int) Rule {
-	if i < len(t.Before) {
-		return t.Before[i]
+func (t *ClashRulesBefore) AfterLen() int { return lenOf(t.After) }
+
+func (t *ClashRulesBefore) Len() int { return lenOf(t.Before) + t.Rest.Len() + lenOf(t.After) }
+
+func (t *ClashRulesBefore) FirstAfter() int { return lenOf(t.Before) + t.Rest.Len() }
+
+func (t *ClashRulesBefore) segments() [3]struct {
+	table RuleTable
+	first int
+} {
+	return [3]struct {
+		table RuleTable
+		first int
+	}{{t.Before, 0}, {t.Rest, lenOf(t.Before)}, {t.After, t.FirstAfter()}}
+}
+
+func (t *ClashRulesBefore) segmentOf(i int) (RuleTable, int) {
+	if k := lenOf(t.Before); i < k {
+		return t.Before, i
 	}
 	if first := t.FirstAfter(); i >= first {
-		return t.After[i-first]
+		return t.After, i - first
 	}
-	return t.Rest.At(i - len(t.Before))
+	return t.Rest, i - lenOf(t.Before)
+}
+
+func (t *ClashRulesBefore) At(i int) Rule {
+	table, j := t.segmentOf(i)
+	return table.At(j)
+}
+
+func (t *ClashRulesBefore) AdapterAt(i int) string {
+	table, j := t.segmentOf(i)
+	if namer, ok := table.(interface{ AdapterAt(int) string }); ok {
+		return namer.AdapterAt(j)
+	}
+	return table.At(j).Adapter()
+}
+
+func (t *ClashRulesBefore) ClashNamedOnly(i int) bool {
+	table, j := t.segmentOf(i)
+	named, ok := table.(interface{ ClashNamedOnly(int) bool })
+	return ok && named.ClashNamedOnly(j)
 }
 
 func (t *ClashRulesBefore) Walk(metadata *Metadata, helper RuleMatchHelper, before func(int, Rule), yield func(int, Rule, string) bool) {
-	stopped := false
-	t.Before.Walk(metadata, helper, before, func(i int, rule Rule, adapter string) bool {
-		stopped = yield(i, rule, adapter)
-		return stopped
-	})
-	if stopped {
-		return
+	for _, segment := range t.segments() {
+		if lenOf(segment.table) == 0 {
+			continue
+		}
+		k := segment.first
+		var shifted func(int, Rule)
+		if before != nil {
+			shifted = func(i int, rule Rule) { before(k+i, rule) }
+		}
+		stopped := false
+		segment.table.Walk(metadata, helper, shifted, func(i int, rule Rule, adapter string) bool {
+			stopped = yield(k+i, rule, adapter)
+			return stopped
+		})
+		if stopped {
+			return
+		}
 	}
-	k := len(t.Before)
-	var shifted func(int, Rule)
-	if before != nil {
-		shifted = func(i int, rule Rule) { before(k+i, rule) }
-	}
-	t.Rest.Walk(metadata, helper, shifted, func(i int, rule Rule, adapter string) bool {
-		stopped = yield(k+i, rule, adapter)
-		return stopped
-	})
-	if stopped || len(t.After) == 0 {
-		return
-	}
-	first := t.FirstAfter()
-	var shiftedAfter func(int, Rule)
-	if before != nil {
-		shiftedAfter = func(i int, rule Rule) { before(first+i, rule) }
-	}
-	t.After.Walk(metadata, helper, shiftedAfter, func(i int, rule Rule, adapter string) bool { return yield(first+i, rule, adapter) })
 }
 
 func (t *ClashRulesBefore) Statistics(i int) (RuleStatistics, bool) {
-	if s, ok := t.Rest.(RuleTableStatistics); ok && i >= len(t.Before) && i < t.FirstAfter() {
-		return s.Statistics(i - len(t.Before))
+	if table, j := t.segmentOf(i); table != nil {
+		if s, ok := table.(RuleTableStatistics); ok {
+			return s.Statistics(j)
+		}
 	}
 	return RuleStatistics{}, false
 }
 
 func (t *ClashRulesBefore) SetDisabled(i int, disabled bool) bool {
-	if s, ok := t.Rest.(RuleTableStatistics); ok && i >= len(t.Before) && i < t.FirstAfter() {
-		return s.SetDisabled(i-len(t.Before), disabled)
+	if table, j := t.segmentOf(i); table != nil {
+		if s, ok := table.(RuleTableStatistics); ok {
+			return s.SetDisabled(j, disabled)
+		}
 	}
 	return false
 }
 
 func (t *ClashRulesBefore) RangeStatistics(f func(i int, statistics RuleStatistics, ok bool) bool) {
-	for i := range t.Before {
-		if !f(i, RuleStatistics{}, false) {
-			return
+	for _, segment := range t.segments() {
+		k := segment.first
+		if ranged, ok := segment.table.(interface {
+			RangeStatistics(func(int, RuleStatistics, bool) bool)
+		}); ok {
+			going := true
+			ranged.RangeStatistics(func(i int, s RuleStatistics, ok bool) bool {
+				going = f(k+i, s, ok)
+				return going
+			})
+			if !going {
+				return
+			}
+			continue
 		}
-	}
-	k := len(t.Before)
-	if ranged, ok := t.Rest.(interface {
-		RangeStatistics(func(int, RuleStatistics, bool) bool)
-	}); ok {
-		going := true
-		ranged.RangeStatistics(func(i int, s RuleStatistics, ok bool) bool {
-			going = f(k+i, s, ok)
-			return going
-		})
-		if !going {
-			return
-		}
-	} else {
-		for i := 0; i < t.Rest.Len(); i++ {
+		for i := 0; i < lenOf(segment.table); i++ {
 			if !f(k+i, RuleStatistics{}, false) {
 				return
 			}
 		}
 	}
-	first := t.FirstAfter()
-	for i := range t.After {
-		if !f(first+i, RuleStatistics{}, false) {
-			return
-		}
-	}
 }
 
 func (t *ClashRulesBefore) Noted(f func(i int) bool) {
-	for i, rule := range t.Before {
-		if w, ok := rule.(RuleWrapper); ok && (w.HitCount() > 0 || w.IsDisabled()) && !f(i) {
-			return
-		}
-	}
-	k := len(t.Before)
-	if noted, ok := t.Rest.(interface{ Noted(func(int) bool) }); ok {
-		going := true
-		noted.Noted(func(i int) bool {
-			going = f(k + i)
-			return going
-		})
-		if !going {
-			return
-		}
-	} else {
-		for i := 0; i < t.Rest.Len(); i++ {
-			if w, ok := t.Rest.At(i).(RuleWrapper); ok && (w.HitCount() > 0 || w.IsDisabled()) && !f(k+i) {
+	for _, segment := range t.segments() {
+		k := segment.first
+		if noted, ok := segment.table.(interface{ Noted(func(int) bool) }); ok {
+			going := true
+			noted.Noted(func(i int) bool {
+				going = f(k + i)
+				return going
+			})
+			if !going {
 				return
 			}
+			continue
 		}
-	}
-	first := t.FirstAfter()
-	for i, rule := range t.After {
-		if w, ok := rule.(RuleWrapper); ok && (w.HitCount() > 0 || w.IsDisabled()) && !f(first+i) {
-			return
+		for i := 0; i < lenOf(segment.table); i++ {
+			if w, ok := segment.table.At(i).(RuleWrapper); ok && (w.HitCount() > 0 || w.IsDisabled()) && !f(k+i) {
+				return
+			}
 		}
 	}
 }

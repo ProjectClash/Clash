@@ -40,11 +40,20 @@ func serveTrafficSnapshot(writer http.ResponseWriter, _ *http.Request) {
 func serveMemorySnapshot(writer http.ResponseWriter, _ *http.Request) {
 	footprint := MemoryFootprint()
 	if footprint > 0 {
+		var virtual *int64
+		if size := virtualSize(); size > 0 {
+			virtual = &size
+		}
+		regions, kept, notKept := goStackRegionsKept()
 		writeSnapshotJSON(writer, struct {
-			Inuse     uint64 `json:"inuse"`
-			OSLimit   uint64 `json:"oslimit"`
-			Footprint uint64 `json:"footprint"`
-		}{statistic.DefaultManager.Memory(), 0, uint64(footprint)})
+			Inuse              uint64 `json:"inuse"`
+			OSLimit            uint64 `json:"oslimit"`
+			Footprint          uint64 `json:"footprint"`
+			Virtual            *int64 `json:"virtual,omitempty"`
+			GoRegionsKept      int    `json:"goRegionsKept"`
+			GoRegionsKeptBytes int64  `json:"goRegionsKeptBytes"`
+			GoRegionsNotKept   uint64 `json:"goRegionsNotKept"`
+		}{statistic.DefaultManager.Memory(), 0, uint64(footprint), virtual, regions, kept, notKept})
 		return
 	}
 	writeSnapshotJSON(writer, struct {

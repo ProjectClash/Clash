@@ -3,6 +3,7 @@ package clash
 import (
 	"errors"
 	"net/netip"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -92,5 +93,47 @@ func TestANilResolverUnregisters(t *testing.T) {
 	_, _, _ = process.FindConnectionOwner(process.TCP, ownerSource, 52000, ownerDestination, 443)
 	if fake.calls.Load() != 0 {
 		t.Fatal("an unregistered resolver was asked")
+	}
+}
+
+func TestTheMacTunnelsPlatformFailureIsFinal(t *testing.T) {
+	withRuntimeProfile(t, runtimeProfileMacOSPacketTunnel)
+	installOwnerResolver(t, nil)
+	if _, _, err := askPlatformForConnectionOwner(process.TCP, ownerSource, 52000, ownerDestination, 443); !errors.Is(err, process.ErrOwnerResolverIsFinal) {
+		t.Fatalf("no App registered: err=%v, want final", err)
+	}
+	for _, fake := range []*fakeOwnerResolver{
+		{err: errors.New("the App is not running")},
+		{owner: nil},
+		{owner: &ConnectionOwner{UserId: 501}},
+	} {
+		installOwnerResolver(t, fake)
+		_, path, err := askPlatformForConnectionOwner(process.TCP, ownerSource, 52000, ownerDestination, 443)
+		if path != "" || !errors.Is(err, process.ErrOwnerResolverIsFinal) || strings.Contains(err.Error(), "\n") {
+			t.Fatalf("fake %+v: path=%q err=%q, want no owner, final, one line", fake, path, err)
+		}
+	}
+}
+
+func TestTheIOSFamilyFailsFinallyWithoutAskingThePlatform(t *testing.T) {
+	for _, profile := range []runtimeProfile{runtimeProfileIOSPacketTunnel, runtimeProfileTVOSPacketTunnel} {
+		withRuntimeProfile(t, profile)
+		fake := &fakeOwnerResolver{owner: &ConnectionOwner{ProcessPath: "/x"}}
+		installOwnerResolver(t, fake)
+		_, path, err := askPlatformForConnectionOwner(process.TCP, ownerSource, 52000, ownerDestination, 443)
+		if path != "" || !errors.Is(err, process.ErrOwnerResolverIsFinal) || strings.Contains(err.Error(), "\n") {
+			t.Fatalf("profile %v: path=%q err=%q, want no owner, final, one line", profile, path, err)
+		}
+		if fake.calls.Load() != 0 {
+			t.Fatalf("profile %v asked the platform", profile)
+		}
+	}
+}
+
+func TestTheMacAppProcessKeepsTheOwnLookup(t *testing.T) {
+	withRuntimeProfile(t, runtimeProfileMacOSApplication)
+	installOwnerResolver(t, &fakeOwnerResolver{owner: &ConnectionOwner{ProcessPath: "/x"}})
+	if _, _, err := askPlatformForConnectionOwner(process.TCP, ownerSource, 52000, ownerDestination, 443); err == nil || errors.Is(err, process.ErrOwnerResolverIsFinal) {
+		t.Fatalf("err=%v, want a failure that is not final", err)
 	}
 }

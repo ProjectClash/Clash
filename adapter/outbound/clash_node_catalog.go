@@ -29,6 +29,7 @@ const (
 	catalogMPTCP
 	catalogSMUX
 	catalogPathResetter
+	catalogConnectsSniffedHost
 )
 
 type catalogNode struct {
@@ -105,6 +106,9 @@ func catalogFacts(built ProxyAdapter, config string, storeProvider string) (reco
 	if _, ok := built.(SessionReleaser); ok {
 		traits |= catalogReleaser
 	}
+	if connector, ok := built.(interface{ ClashConnectsSniffedHost() bool }); ok && connector.ClashConnectsSniffedHost() {
+		traits |= catalogConnectsSniffedHost
+	}
 	return record, uint8(built.Type()), traits, true
 }
 
@@ -128,7 +132,11 @@ func (n *catalogNode) SupportUDP() bool                 { return n.traits&catalo
 func (n *catalogNode) SupportUOT() bool                 { return n.traits&catalogUOT != 0 }
 func (n *catalogNode) IsL3Protocol(*C.Metadata) bool    { return n.traits&catalogL3 != 0 }
 func (n *catalogNode) Unwrap(*C.Metadata, bool) C.Proxy { return nil }
-func (n *catalogNode) keepsSessions() bool              { return n.traits&(catalogResetter|catalogReleaser) != 0 }
+
+func (n *catalogNode) ClashConnectsSniffedHost() bool {
+	return n.traits&catalogConnectsSniffedHost != 0
+}
+func (n *catalogNode) keepsSessions() bool { return n.traits&(catalogResetter|catalogReleaser) != 0 }
 
 func (n *catalogNode) Addr() string {
 	defer runtime.KeepAlive(n)

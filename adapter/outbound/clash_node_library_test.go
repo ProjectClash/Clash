@@ -158,6 +158,7 @@ func TestALibraryNodeIsTheNodeItWasWrittenFrom(t *testing.T) {
 		}
 	}
 	node := LibraryCatalogNode(store, 7)
+	t.Cleanup(func() { _ = node.Close() })
 	if conn, err := node.DialContext(context.Background(), &C.Metadata{Host: "localhost", DstPort: 1}); err == nil {
 		_ = conn.Close()
 	}

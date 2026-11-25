@@ -58,7 +58,7 @@ func TestNEPacingSoftLimitDecision(t *testing.T) {
 	}{
 		{"a budgeted-platform NE without a limit gets the pacing", true, true, 0, nePacingSoftLimitBytes},
 		{"an explicit limit is never overridden", true, true, 12345678, 0},
-		{"macOS keeps runtime defaults on purpose", false, true, 0, 0},
+		{"macOS is not on the NE budget (its pacing is macPacingSoftLimit)", false, true, 0, 0},
 		{"an app process is not on the NE budget", true, false, 0, 0},
 	}
 	for _, tc := range cases {
@@ -68,6 +68,83 @@ func TestNEPacingSoftLimitDecision(t *testing.T) {
 					tc.budgeted, tc.underNE, tc.existing, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestMacPacingSoftLimitDecision(t *testing.T) {
+	cases := []struct {
+		name     string
+		profile  runtimeProfile
+		existing int64
+		want     int64
+	}{
+		{"the macOS packet tunnel without a limit gets its pacing", runtimeProfileMacOSPacketTunnel, 0, macPacketTunnelSoftLimitBytes},
+		{"an explicit limit is never overridden", runtimeProfileMacOSPacketTunnel, 12345678, 0},
+		{"iOS has its own budget pacing", runtimeProfileIOSPacketTunnel, 0, 0},
+		{"tvOS has its own budget pacing", runtimeProfileTVOSPacketTunnel, 0, 0},
+		{"the macOS App process is not paced", runtimeProfileMacOSApplication, 0, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := macPacingSoftLimit(tc.profile, tc.existing); got != tc.want {
+				t.Fatalf("macPacingSoftLimit(%v, %d) = %d, want %d", tc.profile, tc.existing, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNewServiceArmsMacPacingWithoutTheMachine(t *testing.T) {
+	priorBudgeted := pacingBudgetedPlatform
+	priorLimit := debug.SetMemoryLimit(-1)
+	t.Cleanup(func() {
+		pacingBudgetedPlatform = priorBudgeted
+		debug.SetMemoryLimit(priorLimit)
+	})
+	pacingBudgetedPlatform = false
+	disarmThresholdMonitor(t, pressureThresholdShedEnabled.Load())
+	withRuntimeProfile(t, currentRuntimeProfile())
+
+	options := testOptions(t)
+	options.RuntimeProfile = RuntimeProfileMacOSPacketTunnel
+	if err := Setup(options); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	platform := newRecordingPlatform()
+	platform.underNetworkExtension = true
+	svc, err := NewService(platform)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	defer stopLogRedirect(svc.logWriter)
+
+	if got := debug.SetMemoryLimit(-1); got != macPacketTunnelSoftLimitBytes {
+		t.Fatalf("GOMEMLIMIT = %d, want %d", got, macPacketTunnelSoftLimitBytes)
+	}
+	if snapshot := runtimeSetupSnapshot(); snapshot.softMemoryLimit != 0 {
+		t.Fatalf("softMemoryLimit = %d, want 0: the Mac's pacing is not a budget", snapshot.softMemoryLimit)
+	}
+	pressureThresholdMu.Lock()
+	machine := pressureThresholdMachine
+	pressureThresholdMu.Unlock()
+	if machine != nil && (machine.mode == thresholdModeLimit || machine.limit != 0) {
+		t.Fatalf("the Mac's pacing armed the machine: mode=%v limit=%d", machine.mode, machine.limit)
+	}
+	sawPacing, sawMachine := false, false
+	deadline := time.After(2 * time.Second)
+	for !(sawPacing && sawMachine) {
+		select {
+		case line := <-platform.lines:
+			switch {
+			case strings.Contains(line, "GC pacing armed") && strings.Contains(line, "macOS packet tunnel default"):
+				sawPacing = true
+			case strings.Contains(line, "threshold monitor armed") && strings.Contains(line, "mode=limit"):
+				t.Fatalf("armed line = %q: the Mac's pacing armed the machine on a limit", line)
+			case strings.Contains(line, "threshold monitor idle") || strings.Contains(line, "threshold monitor armed"):
+				sawMachine = true
+			}
+		case <-deadline:
+			t.Fatalf("pacing line seen=%v, machine line seen=%v", sawPacing, sawMachine)
+		}
 	}
 }
 

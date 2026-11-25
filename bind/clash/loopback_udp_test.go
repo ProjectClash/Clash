@@ -23,6 +23,8 @@ func loopbackUDPHost(t testing.TB) string {
 		previous := resolver.DisableIPv6
 		resolver.DisableIPv6 = false
 		t.Cleanup(func() { resolver.DisableIPv6 = previous })
+	} else {
+		t.Logf("loopbackUDPHost: no IPv6 loopback here, using 127.0.0.1 (LOOPUDP collisions possible)")
 	}
 	return loopbackUDPHostValue
 }

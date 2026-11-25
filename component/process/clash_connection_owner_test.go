@@ -2,7 +2,9 @@ package process
 
 import (
 	"errors"
+	"fmt"
 	"net/netip"
+	"strings"
 	"testing"
 )
 
@@ -56,5 +58,47 @@ func TestAnEmptyAnswerFallsBackToo(t *testing.T) {
 		if path != want {
 			t.Fatalf("path %q is neither empty nor the own lookup's %q", path, want)
 		}
+	}
+}
+
+func countOwnLookups(t *testing.T) *int {
+	t.Helper()
+	calls := 0
+	saved := ownLookup
+	ownLookup = func(string, netip.Addr, int) (uint32, string, error) {
+		calls++
+		return 0, "", ErrNotFound
+	}
+	t.Cleanup(func() { ownLookup = saved })
+	return &calls
+}
+
+func TestAFinalResolverFailureIsNotFollowedByTheOwnLookup(t *testing.T) {
+	own := countOwnLookups(t)
+	SetConnectionOwnerResolver(func(string, netip.Addr, int, netip.Addr, int) (uint32, string, error) {
+		return 0, "", fmt.Errorf("%w (%w)", errors.New("the App did not answer in time"), ErrOwnerResolverIsFinal)
+	})
+	t.Cleanup(func() { SetConnectionOwnerResolver(nil) })
+	_, path, err := FindConnectionOwner(TCP, ownerSrc, 52000, ownerDst, 443)
+	if *own != 0 {
+		t.Fatalf("the own lookup ran %d times after a final failure", *own)
+	}
+	if path != "" || !errors.Is(err, ErrNotFound) || !errors.Is(err, ErrOwnerResolverIsFinal) {
+		t.Fatalf("path=%q err=%v, want no owner, ErrNotFound and the resolver's reason", path, err)
+	}
+	if strings.Contains(err.Error(), "\n") {
+		t.Fatalf("err %q spans lines", err.Error())
+	}
+}
+
+func TestANonFinalResolverFailureStillFallsBack(t *testing.T) {
+	own := countOwnLookups(t)
+	SetConnectionOwnerResolver(func(string, netip.Addr, int, netip.Addr, int) (uint32, string, error) {
+		return 0, "", errors.New("not this platform's resolver")
+	})
+	t.Cleanup(func() { SetConnectionOwnerResolver(nil) })
+	_, _, _ = FindConnectionOwner(TCP, ownerSrc, 52000, ownerDst, 443)
+	if *own != 1 {
+		t.Fatalf("the own lookup ran %d times, want 1", *own)
 	}
 }

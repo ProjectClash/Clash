@@ -145,11 +145,16 @@ func matchRuleForIOSUnguarded(document, resourceMapJSON, query string) (*StringB
 	var count int
 	var at func(i int) (C.Rule, string)
 	var indexed *clashindex.Index
-	var before, after []string
+	var before, after config.ClashRulesAround
 	if ref, named := documentRuleIndexRef(root); named && len(lines) == 0 {
-		before, after = ref.Prepend, ref.Append
 		var err error
 		if indexed, err = config.ClashOpenRuleIndex(ref); err != nil {
+			return nil, err
+		}
+		if before, err = ref.ClashRulesBefore(); err != nil {
+			return nil, err
+		}
+		if after, err = ref.ClashRulesAfter(); err != nil {
 			return nil, err
 		}
 	}
@@ -542,62 +547,79 @@ func fileExists(path string) bool {
 	return err == nil && info.Mode().IsRegular()
 }
 
-func (w *offlineRules) indexedRules(index *clashindex.Index, before, after []string, subRules map[string][]C.Rule) (int, func(i int) (C.Rule, string), error) {
-	k := len(before)
-	first := make([]C.Rule, k)
-	for i, line := range before {
+func (w *offlineRules) indexedRules(index *clashindex.Index, before, after config.ClashRulesAround, subRules map[string][]C.Rule) (int, func(i int) (C.Rule, string), error) {
+	first, err := w.rulesAround(before, 0, subRules)
+	if err != nil {
+		return 0, nil, err
+	}
+	k := before.Len()
+	own, err := w.indexRules(index, k, subRules)
+	if err != nil {
+		return 0, nil, err
+	}
+	n := k + index.Len()
+	last, err := w.rulesAround(after, n, subRules)
+	if err != nil {
+		return 0, nil, err
+	}
+	return n + after.Len(), func(i int) (C.Rule, string) {
+		if i < k {
+			return first(i)
+		}
+		if i >= n {
+			return last(i - n)
+		}
+		return own(i - k)
+	}, nil
+}
+
+func (w *offlineRules) rulesAround(rules config.ClashRulesAround, at int, subRules map[string][]C.Rule) (func(i int) (C.Rule, string), error) {
+	if rules.Index != nil {
+		return w.indexRules(rules.Index, at, subRules)
+	}
+	parsed := make([]C.Rule, len(rules.Lines))
+	for i, line := range rules.Lines {
 		rule, err := w.parseLine(line, subRules)
 		if err != nil {
-			return 0, nil, fmt.Errorf("rules[%d] [%s] error: %w", i, line, err)
+			return nil, fmt.Errorf("rules[%d] [%s] error: %w", at+i, line, err)
 		}
-		first[i] = rule
+		parsed[i] = rule
 	}
+	return func(i int) (C.Rule, string) { return parsed[i], rules.Lines[i] }, nil
+}
+
+func (w *offlineRules) indexRules(index *clashindex.Index, at int, subRules map[string][]C.Rule) (func(i int) (C.Rule, string), error) {
 	var failure error
-	index.Targets(func(name string, at int) bool {
+	index.Targets(func(name string, first int) bool {
 		if !w.policies[name] {
-			line, _, _ := index.Written(at)
-			failure = fmt.Errorf("rules[%d] [%s] error: proxy [%s] not found", k+at, line, name)
+			line, _, _ := index.Written(first)
+			failure = fmt.Errorf("rules[%d] [%s] error: proxy [%s] not found", at+first, line, name)
 		}
 		return failure == nil
 	})
 	if failure != nil {
-		return 0, nil, failure
+		return nil, failure
 	}
 	var others []C.Rule
 	index.Others(func(i int, line string) bool {
 		rule, err := w.parseLine(line, subRules)
 		if err != nil {
-			failure = fmt.Errorf("rules[%d] [%s] error: %w", k+i, line, err)
+			failure = fmt.Errorf("rules[%d] [%s] error: %w", at+i, line, err)
 			return false
 		}
 		others = append(others, rule)
 		return true
 	})
 	if failure != nil {
-		return 0, nil, failure
+		return nil, failure
 	}
 	table, err := index.Table(others)
 	if err != nil {
-		return 0, nil, err
+		return nil, err
 	}
-	n := k + table.Len()
-	last := make([]C.Rule, len(after))
-	for j, line := range after {
-		rule, err := w.parseLine(line, subRules)
-		if err != nil {
-			return 0, nil, fmt.Errorf("rules[%d] [%s] error: %w", n+j, line, err)
-		}
-		last[j] = rule
-	}
-	return n + len(after), func(i int) (C.Rule, string) {
-		if i < k {
-			return first[i], before[i]
-		}
-		if i >= n {
-			return last[i-n], after[i-n]
-		}
-		line, _, _ := index.Written(i - k)
-		return table.At(i - k), line
+	return func(i int) (C.Rule, string) {
+		line, _, _ := index.Written(i)
+		return table.At(i), line
 	}, nil
 }
 

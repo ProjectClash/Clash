@@ -20,7 +20,11 @@ func trackedConn(t *testing.T, m *statistic.Manager, adapter C.ProxyAdapter) C.C
 
 func TestConnectionsAreCountedIntoTheirOutboundBucket(t *testing.T) {
 	m := statistic.NewManagerForTest()
-	proxy := trackedConn(t, m, outbound.NewRejectWithOption(outbound.RejectOption{Name: "my-node"}))
+	node, err := outbound.NewHttp(outbound.HttpOption{Name: "my-node", Server: "127.0.0.1", Port: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := trackedConn(t, m, node)
 	direct := trackedConn(t, m, outbound.NewDirect())
 	compatible := trackedConn(t, m, outbound.NewCompatible())
 	reject := trackedConn(t, m, outbound.NewReject())

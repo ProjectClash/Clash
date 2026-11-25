@@ -21,3 +21,7 @@ func NewManagerForTest() *Manager {
 		sampleWake:         make(chan struct{}, 1),
 	}
 }
+
+func ForgetEgressFallbackNoteForTest() {
+	egressFallbackSaid.Store(false)
+}

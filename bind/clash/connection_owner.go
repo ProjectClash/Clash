@@ -2,6 +2,7 @@ package clash
 
 import (
 	"errors"
+	"fmt"
 	"net/netip"
 	"sync"
 	"sync/atomic"
@@ -54,12 +55,28 @@ func init() {
 	process.SetConnectionOwnerResolver(askPlatformForConnectionOwner)
 }
 
+var errNoOwnerInThisExtension = errors.New("no lookup in this extension can see another process's socket")
+
 func askPlatformForConnectionOwner(network string, srcIP netip.Addr, srcPort int, dstIP netip.Addr, dstPort int) (uint32, string, error) {
-	box := platformOwnerResolver.Load()
-	if box == nil || currentRuntimeProfile() != runtimeProfileMacOSPacketTunnel {
+	profile := currentRuntimeProfile()
+	if profile.inheritsIOSPacketTunnelBehavior() {
+		return 0, "", fmt.Errorf("%w (%w)", errNoOwnerInThisExtension, process.ErrOwnerResolverIsFinal)
+	}
+	if profile != runtimeProfileMacOSPacketTunnel {
 		return 0, "", errNoOwner
 	}
-	return platformOwnerBound.findAs(box.resolver, box.generation, network, srcIP, srcPort, dstIP, dstPort)
+	box := platformOwnerResolver.Load()
+	if box == nil {
+		return 0, "", fmt.Errorf("%w (%w)", errNoOwner, process.ErrOwnerResolverIsFinal)
+	}
+	uid, path, err := platformOwnerBound.findAs(box.resolver, box.generation, network, srcIP, srcPort, dstIP, dstPort)
+	if err == nil && path != "" {
+		return uid, path, nil
+	}
+	if err == nil {
+		err = errNoOwner
+	}
+	return 0, "", fmt.Errorf("%w (%w)", err, process.ErrOwnerResolverIsFinal)
 }
 
 type ownerBound struct {

@@ -220,3 +220,72 @@ func TestTheRulesAfterATableAreReachedOnlyWhenItsOwnDecideNothing(t *testing.T) 
 		t.Fatalf("a flow nothing of the configuration's matches stopped at %d, want the appended rule at 2", at)
 	}
 }
+
+func TestRulesBeforeAndAfterHeldAsTablesAreWalkedAndCountedAtTheirPlaces(t *testing.T) {
+	before := &statisticsTable{RuleList: RuleList{&hostRule{host: "ad.example", adapter: "REJECT"}, &hostRule{host: "x.example", adapter: "REJECT"}}, disabled: map[int]bool{}}
+	rest := RuleList{&hostRule{host: "a.example", adapter: "DIRECT"}, &hostRule{host: "ad.example", adapter: "Proxy"}}
+	after := &statisticsTable{RuleList: RuleList{&hostRule{host: "late.example", adapter: "REJECT"}}, disabled: map[int]bool{}}
+	table, ok := ClashWithRulesAround(before, nil, rest, after, nil).(*ClashRulesBefore)
+	if !ok || table.Len() != 5 || table.FirstAfter() != 4 {
+		t.Fatalf("%T of %d rules", table, table.Len())
+	}
+	for i, want := range []string{"ad.example", "x.example", "a.example", "ad.example", "late.example"} {
+		if got := table.At(i).Payload(); got != want {
+			t.Fatalf("At(%d) = %s, want %s", i, got, want)
+		}
+	}
+	for host, want := range map[string]int{"ad.example": 0, "x.example": 1, "a.example": 2, "late.example": 4, "none.example": -1} {
+		if _, at, _ := walkOf(table, host); at != want {
+			t.Fatalf("%s: stopped at %d, want %d", host, at, want)
+		}
+	}
+	if s, ok := table.Statistics(1); !ok || s.HitCount != 101 {
+		t.Fatalf("Statistics(1) = %+v, %v; want the table before's rule 1", s, ok)
+	}
+	if _, ok := table.Statistics(2); ok {
+		t.Fatal("Statistics(2) answered for a slice's rule, whose object keeps its own")
+	}
+	if s, ok := table.Statistics(4); !ok || s.HitCount != 100 {
+		t.Fatalf("Statistics(4) = %+v, %v; want the table after's rule 0", s, ok)
+	}
+	if !table.SetDisabled(1, true) || !before.disabled[1] || !table.SetDisabled(4, true) || !after.disabled[0] {
+		t.Fatal("SetDisabled did not reach the tables before and after")
+	}
+	var noted []int
+	table.Noted(func(i int) bool { noted = append(noted, i); return true })
+	if !reflect.DeepEqual(noted, []int{1, 2, 4}) {
+		t.Fatalf("Noted = %v, want [1 2 4]", noted)
+	}
+	var ranged []int
+	table.RangeStatistics(func(i int, s RuleStatistics, ok bool) bool {
+		if ok {
+			ranged = append(ranged, i*1000+int(s.HitCount))
+		} else {
+			ranged = append(ranged, -i)
+		}
+		return true
+	})
+	if !reflect.DeepEqual(ranged, []int{100, 1101, -2, -3, 4100}) {
+		t.Fatalf("RangeStatistics = %v", ranged)
+	}
+}
+
+type namingTable struct{ RuleList }
+
+func (t namingTable) AdapterAt(i int) string    { return "named:" + t.RuleList[i].Adapter() }
+func (t namingTable) ClashNamedOnly(i int) bool { return true }
+
+func TestRulesAroundATableAreNamedByTheTableTheyAreIn(t *testing.T) {
+	before := namingTable{RuleList{&hostRule{host: "ad.example", adapter: "REJECT"}}}
+	rest := RuleList{&hostRule{host: "a.example", adapter: "DIRECT"}}
+	table := ClashWithRulesAround(before, nil, rest, nil, nil).(*ClashRulesBefore)
+	if got := table.AdapterAt(0); got != "named:REJECT" {
+		t.Fatalf("AdapterAt(0) = %s, want the table before's", got)
+	}
+	if got := table.AdapterAt(1); got != "DIRECT" {
+		t.Fatalf("AdapterAt(1) = %s, want the slice's object's", got)
+	}
+	if !table.ClashNamedOnly(0) || table.ClashNamedOnly(1) {
+		t.Fatalf("ClashNamedOnly: %v %v, want the table's true and the slice's false", table.ClashNamedOnly(0), table.ClashNamedOnly(1))
+	}
+}

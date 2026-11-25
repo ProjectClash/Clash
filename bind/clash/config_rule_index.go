@@ -170,7 +170,8 @@ func ruleIndexReference(rm resourceMap, names ruleNames, lines ruleLines, before
 	}
 	var removed []int
 	removesUID := removesUIDRules(profile)
-	if err := checkRulesBefore(before, names, removesUID); err != nil {
+	rulesBefore, err := moduleRuleIndex(directory, before, 0, names, removesUID, "before")
+	if err != nil {
 		return nil, err
 	}
 	if removesUID {
@@ -179,9 +180,6 @@ func ruleIndexReference(rm resourceMap, names ruleNames, lines ruleLines, before
 				removed = append(removed, i)
 			}
 		}
-	}
-	if err := checkRulesAfter(after, len(before)+lines.n-len(removed), names, removesUID); err != nil {
-		return nil, err
 	}
 	key := sha256.New()
 	io.WriteString(key, nodeLibraryBuilder()+"\x00rules\x00")
@@ -198,9 +196,13 @@ func ruleIndexReference(rm resourceMap, names ruleNames, lines ruleLines, before
 		err = errors.New("the index is not these rules', or names what the configuration does not have")
 	}
 	if err != nil {
-		if sum, err = compileRuleIndex(path, source, lines, removed, names, len(before)); err != nil {
+		if sum, err = compileRuleIndex(path, source, lines, removed, names, len(before), false, nil); err != nil {
 			return nil, err
 		}
+	}
+	rulesAfter, err := moduleRuleIndex(directory, after, len(before)+lines.n-len(removed), names, removesUID, "after")
+	if err != nil {
+		return nil, err
 	}
 	reference := map[string]any{"path": path, "sha256": hex.EncodeToString(sum)}
 	if len(removed) > 0 {
@@ -210,13 +212,52 @@ func ruleIndexReference(rm resourceMap, names ruleNames, lines ruleLines, before
 		}
 		reference["uid-removed"] = places
 	}
-	if len(before) > 0 {
-		reference["prepend"] = anyStrings(before)
+	if rulesBefore != nil {
+		reference[rulesBeforeKey] = rulesBefore
 	}
-	if len(after) > 0 {
-		reference["append"] = anyStrings(after)
+	if rulesAfter != nil {
+		reference[rulesAfterKey] = rulesAfter
 	}
 	return reference, nil
+}
+
+const rulesBeforeKey, rulesAfterKey = "rules-before", "rules-after"
+
+func moduleRuleIndex(directory string, lines []string, first int, names ruleNames, removesUID bool, side string) (map[string]any, error) {
+	if len(lines) == 0 {
+		return nil, nil
+	}
+	var refuse func(place int, line string) error
+	if removesUID {
+		refuse = func(place int, line string) error {
+			if ruleCarriesUID(line) {
+				return fmt.Errorf("rules[%d] [%s] error: a UID rule cannot go %s the configuration's rules here: UID names a socket owner this platform does not expose", place, line, side)
+			}
+			return nil
+		}
+	}
+	key := sha256.New()
+	io.WriteString(key, nodeLibraryBuilder()+"\x00module-rules\x00")
+	if removesUID {
+		io.WriteString(key, "uid-removed\x00")
+	}
+	var size [binary.MaxVarintLen64]byte
+	for _, line := range lines {
+		key.Write(size[:binary.PutUvarint(size[:], uint64(len(line)))])
+		io.WriteString(key, line)
+	}
+	source := [sha256.Size]byte(key.Sum(nil))
+	path := filepath.Join(directory, ruleIndexPrefix+hex.EncodeToString(source[:16])+ruleIndexSuffix)
+	sum, err := usedNodeLibrary(path)
+	if err == nil && !ruleIndexAgrees(path, sum, source, names, first) {
+		err = errors.New("the index is not these rules', or names what the configuration does not have")
+	}
+	if err != nil {
+		if sum, err = compileRuleIndex(path, source, ruleLinesOf(lines), nil, names, first, true, refuse); err != nil {
+			return nil, err
+		}
+	}
+	return map[string]any{"path": path, "sha256": hex.EncodeToString(sum)}, nil
 }
 
 func removesUIDRules(profile runtimeProfile) bool {
@@ -279,11 +320,23 @@ func indexParsesHere(index *clashindex.Index, names ruleNames, before int) error
 	return failure
 }
 
-func compileRuleIndex(path string, source [sha256.Size]byte, lines ruleLines, removed []int, names ruleNames, before int) ([]byte, error) {
+func compileRuleIndex(path string, source [sha256.Size]byte, lines ruleLines, removed []int, names ruleNames, before int, keepWritten bool, refuse func(place int, line string) error) ([]byte, error) {
 	compiler := config.NewClashRuleIndexCompiler(names.hasTarget, names.hasRuleSet, names.subRules)
+	if keepWritten {
+		compiler.KeepWritten()
+	}
 	compiler.SetSource(source)
 	compiler.SetFirstPlace(before)
-	if err := lines.each(removed, compiler.Add); err != nil {
+	add := compiler.Add
+	if refuse != nil {
+		add = func(line string) error {
+			if err := refuse(before+compiler.Len(), line); err != nil {
+				return err
+			}
+			return compiler.Add(line)
+		}
+	}
+	if err := lines.each(removed, add); err != nil {
 		return nil, err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -339,11 +392,11 @@ func publishedRuleIndexHere(reference any, names ruleNames, viewed bool, rm reso
 	if !viewed {
 		return reference, nil
 	}
-	carried, err := carriedRules(mapping, "prepend")
+	carried, err := carriedRulesAround(mapping, "prepend", rulesBeforeKey)
 	if err != nil {
 		return nil, err
 	}
-	carriedAfter, err := carriedRules(mapping, "append")
+	carriedAfter, err := carriedRulesAround(mapping, "append", rulesAfterKey)
 	if err != nil {
 		return nil, err
 	}
@@ -355,39 +408,28 @@ func publishedRuleIndexHere(reference any, names ruleNames, viewed bool, rm reso
 		}
 		removesUID = removesUIDRules(profile)
 	}
-	removesUIDBefore, removesUIDAfter := removesUID && before != nil, removesUID && after != nil
-	if before == nil {
-		before = carried
-	}
-	if after == nil {
-		after = carriedAfter
-	}
-	if err := checkRulesBefore(before, names, removesUIDBefore); err != nil {
+	rulesBefore, err := rulesAroundHere(rm.RuleIndexDirectory, before, carried, 0, names, removesUID && before != nil, "before")
+	if err != nil {
 		return nil, err
 	}
-	if err := indexParsesHere(index, names, len(before)); err != nil {
+	if err := indexParsesHere(index, names, rulesBefore.n); err != nil {
 		return nil, fmt.Errorf("%w; publish its source instead", err)
 	}
-	if err := checkRulesAfter(after, len(before)+index.Len(), names, removesUIDAfter); err != nil {
+	rulesAfter, err := rulesAroundHere(rm.RuleIndexDirectory, after, carriedAfter, rulesBefore.n+index.Len(), names, removesUID && after != nil, "after")
+	if err != nil {
 		return nil, err
 	}
 	published := make(map[string]any, len(mapping))
 	for key, value := range mapping {
 		published[key] = value
 	}
-	delete(published, "prepend")
-	if len(before) > 0 {
-		published["prepend"] = anyStrings(before)
-	}
-	delete(published, "append")
-	if len(after) > 0 {
-		published["append"] = anyStrings(after)
-	}
-	if places, ok := mapping["uid-removed"].([]any); ok && len(before) != len(carried) {
+	rulesBefore.put(published, "prepend", rulesBeforeKey)
+	rulesAfter.put(published, "append", rulesAfterKey)
+	if places, ok := mapping["uid-removed"].([]any); ok && rulesBefore.n != carried.n {
 		moved := make([]any, len(places))
 		for i, place := range places {
 			if at, isInt := place.(int); isInt {
-				moved[i] = at - len(carried) + len(before)
+				moved[i] = at - carried.n + rulesBefore.n
 			} else {
 				moved[i] = place
 			}
@@ -395,6 +437,98 @@ func publishedRuleIndexHere(reference any, names ruleNames, viewed bool, rm reso
 		published["uid-removed"] = moved
 	}
 	return published, nil
+}
+
+type rulesAround struct {
+	n         int
+	lines     []string
+	reference any
+	index     *clashindex.Index
+}
+
+func (r rulesAround) put(published map[string]any, linesKey, indexKey string) {
+	delete(published, linesKey)
+	delete(published, indexKey)
+	if r.reference != nil {
+		published[indexKey] = r.reference
+	} else if len(r.lines) > 0 {
+		published[linesKey] = anyStrings(r.lines)
+	}
+}
+
+func carriedRulesAround(mapping map[string]any, linesKey, indexKey string) (rulesAround, error) {
+	lines, err := carriedRules(mapping, linesKey)
+	if err != nil {
+		return rulesAround{}, err
+	}
+	named, isNamed := mapping[indexKey]
+	if !isNamed || named == nil {
+		return rulesAround{n: len(lines), lines: lines}, nil
+	}
+	if len(lines) > 0 {
+		return rulesAround{}, fmt.Errorf("x-clash-rule-index: %s and %s name the same rules twice", indexKey, linesKey)
+	}
+	file, ok := indexFileOf(named)
+	if !ok {
+		return rulesAround{}, fmt.Errorf("x-clash-rule-index: %s: a path and a SHA-256 are required", indexKey)
+	}
+	gone := errors.New("x-clash-rule-index: this is a published configuration whose rule index is not here; publish its source instead")
+	sum, err := usedNodeLibrary(file.Path)
+	if err != nil || hex.EncodeToString(sum) != strings.ToLower(file.SHA256) {
+		return rulesAround{}, gone
+	}
+	index, err := clashindex.OpenVerified(file.Path, [sha256.Size]byte(sum))
+	if err != nil {
+		return rulesAround{}, gone
+	}
+	return rulesAround{n: index.Len(), reference: map[string]any{"path": file.Path, "sha256": hex.EncodeToString(sum)}, index: index}, nil
+}
+
+func indexFileOf(value any) (config.ClashRuleIndexFile, bool) {
+	mapping, _ := value.(map[string]any)
+	if generic, isGeneric := value.(map[any]any); isGeneric {
+		mapping = make(map[string]any, len(generic))
+		for key, v := range generic {
+			if name, isString := key.(string); isString {
+				mapping[name] = v
+			}
+		}
+	}
+	var file config.ClashRuleIndexFile
+	file.Path, _ = mapping["path"].(string)
+	file.SHA256, _ = mapping["sha256"].(string)
+	return file, file.Path != "" && file.SHA256 != ""
+}
+
+func rulesAroundHere(directory string, given []string, carried rulesAround, first int, names ruleNames, removesUID bool, side string) (rulesAround, error) {
+	if given == nil {
+		given = carried.lines
+		if carried.index != nil {
+			if err := indexParsesHere(carried.index, names, first); err != nil {
+				return rulesAround{}, fmt.Errorf("%w; publish its source instead", err)
+			}
+			return carried, nil
+		}
+		return rulesAround{n: len(given), lines: given}, checkRulesAround(given, first, names, false, side)
+	}
+	if directory == "" {
+		return rulesAround{n: len(given), lines: given}, checkRulesAround(given, first, names, removesUID, side)
+	}
+	reference, err := moduleRuleIndex(directory, given, first, names, removesUID, side)
+	if err != nil {
+		return rulesAround{}, err
+	}
+	if reference == nil {
+		return rulesAround{}, nil
+	}
+	return rulesAround{n: len(given), reference: reference}, nil
+}
+
+func checkRulesAround(lines []string, first int, names ruleNames, removesUID bool, side string) error {
+	if side == "before" {
+		return checkRulesBefore(lines, names, removesUID)
+	}
+	return checkRulesAfter(lines, first, names, removesUID)
 }
 
 func carriedRulesBefore(mapping map[string]any) ([]string, error) {
@@ -465,7 +599,19 @@ func rawRuleIndexChecked(raw *config.RawConfig) (*clashindex.Index, error) {
 	if raw == nil || len(raw.Rule) > 0 || rawRulesElsewhere(raw) {
 		return nil, nil
 	}
-	return config.ClashOpenRuleIndex(raw.ClashRuleIndex)
+	index, err := config.ClashOpenRuleIndex(raw.ClashRuleIndex)
+	if err != nil || index == nil {
+		return index, err
+	}
+	return index, rulesAroundHereError(raw.ClashRuleIndex)
+}
+
+func rulesAroundHereError(ref config.ClashRuleIndexRef) error {
+	if _, err := ref.ClashRulesBefore(); err != nil {
+		return err
+	}
+	_, err := ref.ClashRulesAfter()
+	return err
 }
 
 func documentRuleIndexError(root map[string]any) error {
@@ -476,8 +622,10 @@ func documentRuleIndexError(root map[string]any) error {
 	if !named {
 		return nil
 	}
-	_, err := config.ClashOpenRuleIndex(ref)
-	return err
+	if _, err := config.ClashOpenRuleIndex(ref); err != nil {
+		return err
+	}
+	return rulesAroundHereError(ref)
 }
 
 func rawRulesElsewhere(raw *config.RawConfig) bool {
@@ -501,15 +649,13 @@ func eachRuleLineOf(raw *config.RawConfig, index *clashindex.Index, f func(index
 		return
 	}
 	if index != nil && len(raw.Rule) == 0 {
-		before := raw.ClashRuleIndex.Prepend
-		for i, line := range before {
-			f(i, line)
-		}
-		index.Others(func(i int, line string) bool { f(len(before)+i, line); return true })
-		first := len(before) + index.Len()
-		for j, line := range raw.ClashRuleIndex.Append {
-			f(first+j, line)
-		}
+		before, _ := raw.ClashRuleIndex.ClashRulesBefore()
+		after, _ := raw.ClashRuleIndex.ClashRulesAfter()
+		before.Others(func(i int, line string) bool { f(i, line); return true })
+		k := before.Len()
+		index.Others(func(i int, line string) bool { f(k+i, line); return true })
+		first := k + index.Len()
+		after.Others(func(j int, line string) bool { f(first+j, line); return true })
 		return
 	}
 	for i, line := range raw.Rule {
@@ -526,7 +672,9 @@ func ruleCountOfIndex(raw *config.RawConfig, index *clashindex.Index) int {
 		return raw.ClashRules.Len()
 	}
 	if index != nil && len(raw.Rule) == 0 {
-		return len(raw.ClashRuleIndex.Prepend) + index.Len() + len(raw.ClashRuleIndex.UIDRemoved) + len(raw.ClashRuleIndex.Append)
+		before, _ := raw.ClashRuleIndex.ClashRulesBefore()
+		after, _ := raw.ClashRuleIndex.ClashRulesAfter()
+		return before.Len() + index.Len() + len(raw.ClashRuleIndex.UIDRemoved) + after.Len()
 	}
 	return len(raw.Rule)
 }
@@ -542,15 +690,13 @@ func eachDocumentRuleLine(root map[string]any, f func(index int, line string)) {
 	}
 	ref, _ := documentRuleIndexRef(root)
 	if index := documentRuleIndex(root); index != nil {
-		before := len(ref.Prepend)
-		for i, line := range ref.Prepend {
-			f(i, line)
-		}
+		rulesBefore, _ := ref.ClashRulesBefore()
+		rulesAfter, _ := ref.ClashRulesAfter()
+		rulesBefore.Others(func(i int, line string) bool { f(i, line); return true })
+		before := rulesBefore.Len()
 		index.Others(func(i int, line string) bool { f(writtenPlace(before+i, ref.UIDRemoved), line); return true })
 		first := before + index.Len()
-		for j, line := range ref.Append {
-			f(writtenPlace(first+j, ref.UIDRemoved), line)
-		}
+		rulesAfter.Others(func(j int, line string) bool { f(writtenPlace(first+j, ref.UIDRemoved), line); return true })
 	}
 }
 
@@ -601,6 +747,14 @@ func documentRuleIndexRef(root map[string]any) (config.ClashRuleIndexRef, bool) 
 	}
 	ref.Prepend, _ = carriedRulesBefore(mapping)
 	ref.Append, _ = carriedRules(mapping, "append")
+	if named := mapping[rulesBeforeKey]; named != nil {
+		file, _ := indexFileOf(named)
+		ref.RulesBefore = &file
+	}
+	if named := mapping[rulesAfterKey]; named != nil {
+		file, _ := indexFileOf(named)
+		ref.RulesAfter = &file
+	}
 	return ref, true
 }
 

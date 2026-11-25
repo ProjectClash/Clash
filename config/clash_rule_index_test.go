@@ -254,8 +254,8 @@ func TestTheRulesBeforeAnIndexParseAsTheSameRulesInlineAndGoFirst(t *testing.T) 
 	if !ok {
 		t.Fatalf("the rules are a %T, not the rules before the index", indexed.RuleTable)
 	}
-	if _, ok := table.Rest.(*clashindex.Table); !ok || len(table.Before) != len(rulesBeforeTheIndex) {
-		t.Fatalf("%d rules before a %T, want %d before the index", len(table.Before), table.Rest, len(rulesBeforeTheIndex))
+	if _, ok := table.Rest.(*clashindex.Table); !ok || table.BeforeLen() != len(rulesBeforeTheIndex) {
+		t.Fatalf("%d rules before a %T, want %d before the index", table.BeforeLen(), table.Rest, len(rulesBeforeTheIndex))
 	}
 	if indexed.RuleTable.Len() != inline.RuleTable.Len() {
 		t.Fatalf("%d rules, want %d", indexed.RuleTable.Len(), inline.RuleTable.Len())

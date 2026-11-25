@@ -32,6 +32,8 @@ type Index struct {
 	keywordLengths         []int
 
 	verify bool
+
+	written bool
 }
 
 type table struct {
@@ -49,10 +51,16 @@ func OpenVerified(path string, want [sha256.Size]byte) (*Index, error) {
 	return open(path, want, true)
 }
 
-var lastOpened struct {
+var recentlyOpened struct {
 	sync.Mutex
+	entries []openedIndex
+}
+
+const recentlyOpenedKept = 3
+
+type openedIndex struct {
 	want     [sha256.Size]byte
-	identity any
+	identity os.FileInfo
 	verified bool
 	index    *Index
 }
@@ -65,10 +73,16 @@ func open(path string, want [sha256.Size]byte, verify bool) (*Index, error) {
 	if !info.Mode().IsRegular() {
 		return nil, errors.New("not a regular file")
 	}
-	lastOpened.Lock()
-	defer lastOpened.Unlock()
-	if l := &lastOpened; l.index != nil && l.want == want && os.SameFile(l.identity.(os.FileInfo), info) && (l.verified || !verify) {
+	recentlyOpened.Lock()
+	defer recentlyOpened.Unlock()
+	entries := recentlyOpened.entries
+	for k, l := range entries {
+		if l.want != want || !os.SameFile(l.identity, info) || (!l.verified && verify) {
+			continue
+		}
 		if stamp, ok := clashsum.StampOf(info); ok && clashsum.ProvenAt(path, stamp, want) || clashsum.Hashes(path, want) {
+			copy(entries[1:k+1], entries[:k])
+			entries[0] = l
 			return l.index, nil
 		}
 		return nil, errors.New("not the index the configuration names")
@@ -77,7 +91,17 @@ func open(path string, want [sha256.Size]byte, verify bool) (*Index, error) {
 	if err != nil {
 		return nil, err
 	}
-	lastOpened.want, lastOpened.identity, lastOpened.verified, lastOpened.index = want, opened, verify, index
+	kept := append([]openedIndex{{want: want, identity: opened, verified: verify, index: index}}, entries...)
+	for k := 1; k < len(kept); k++ {
+		if os.SameFile(kept[k].identity, opened) && kept[k].want == want {
+			kept = append(kept[:k], kept[k+1:]...)
+			break
+		}
+	}
+	if len(kept) > recentlyOpenedKept {
+		kept = kept[:recentlyOpenedKept]
+	}
+	recentlyOpened.entries = kept
 	return index, nil
 }
 
@@ -131,17 +155,26 @@ func decode(data []byte, want *[sha256.Size]byte, verify, hashed bool) (*Index, 
 	if !hashed && clashsum.Sum(body) != trailer {
 		return nil, errors.New("index checksum")
 	}
-	if v := le.Uint32(data[8:]); v != version {
+	sections := sectionCountV1
+	switch v := le.Uint32(data[8:]); v {
+	case version:
+	case versionWritten:
+		sections = sectionCount
+	default:
 		return nil, fmt.Errorf("index version %d", v)
 	}
-	x := &Index{data: data, verify: verify}
+	header := headerSizeOf(sections)
+	if len(body) < header {
+		return nil, errors.New("not a rule index")
+	}
+	x := &Index{data: data, verify: verify, written: sections == sectionCount}
 	x.count = int(le.Uint32(data[12:]))
 	x.others = int(le.Uint32(data[16:]))
 	x.firstResolve = le.Uint32(data[20:])
 	copy(x.source[:], data[sourceAt:sectionsAt])
-	for i := range x.section {
+	for i := 0; i < sections; i++ {
 		off, n := int(le.Uint32(data[sectionsAt+8*i:])), int(le.Uint32(data[sectionsAt+4+8*i:]))
-		if off < headerSize || off%4 != 0 || n < 0 || off+n > len(body) {
+		if off < header || off%4 != 0 || n < 0 || off+n > len(body) {
 			return nil, fmt.Errorf("section %d out of range", i)
 		}
 		x.section[i] = body[off : off+n : off+n]
@@ -202,6 +235,18 @@ func (x *Index) check() error {
 	}
 	if others != x.others {
 		return errors.New("other rule count")
+	}
+	if x.written {
+		entries, pool := x.section[secWrittenRules], x.section[secWrittenPool]
+		if len(entries) != writtenEntry*x.count {
+			return errors.New("written rule count")
+		}
+		for at := 0; at < len(entries); at += writtenEntry {
+			off, n := le.Uint32(entries[at:]), le.Uint32(entries[at+4:])
+			if uint64(off)+uint64(n) > uint64(len(pool)) {
+				return fmt.Errorf("rule %d's line out of range", at/writtenEntry)
+			}
+		}
 	}
 	if !bytes.Equal(x.section[secResolvers], u32s(resolvers)) {
 		return errors.New("resolving rules")
@@ -637,10 +682,24 @@ func (x *Index) MappedTypeAndTarget(i int) (tp, target string, ok bool) {
 	return tp, target, ok
 }
 
+func (x *Index) KeepsWritten() bool { return x.written }
+
 func (x *Index) Written(i int) (line string, mapped, ok bool) {
 	kind, flags, id, payload, ok := x.entry(i)
 	if !ok {
 		return "", false, false
+	}
+	if x.written {
+		entries := x.section[secWrittenRules]
+		if writtenEntry*i+writtenEntry > len(entries) {
+			return "", false, false
+		}
+		e := entries[writtenEntry*i:]
+		written, ok := span(x.section[secWrittenPool], le.Uint32(e[0:]), le.Uint32(e[4:]))
+		if !ok {
+			return "", false, false
+		}
+		return string(written), kind != kindOther, true
 	}
 	if kind == kindOther {
 		return string(payload), false, true

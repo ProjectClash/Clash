@@ -24,6 +24,10 @@ UNPUBLISHED_EASYTIER_BUILDS = {
         module='v0.0.0-20261111015056-2abb1676b475',
         source='2abb1676b475947e46c527b57acc5f296cb48482'),
 }
+# A Go pseudo-version ends in the commit it is: the substitute must be that commit.
+for _build, _entry in UNPUBLISHED_EASYTIER_BUILDS.items():
+    if not _entry['source'].startswith(_entry['module'].rsplit('-', 1)[1]):
+        raise ValueError('The source recorded for EasyTier build ' + _build + ' is not its easytier-go version')
 
 
 def sha(path):

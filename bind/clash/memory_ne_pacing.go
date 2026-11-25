@@ -23,6 +23,15 @@ func nePacingSoftLimit(budgetedPlatform, underNetworkExtension bool, existing in
 	return nePacingSoftLimitBytes
 }
 
+const macPacketTunnelSoftLimitBytes = 1 << 30
+
+func macPacingSoftLimit(profile runtimeProfile, existing int64) int64 {
+	if existing > 0 || profile != runtimeProfileMacOSPacketTunnel {
+		return 0
+	}
+	return macPacketTunnelSoftLimitBytes
+}
+
 func armNEPacingForService(platform PlatformInterface) {
 	setupMu.Lock()
 	existing := currentRuntimeSetup.softMemoryLimit
@@ -35,12 +44,19 @@ func armNEPacingForService(platform PlatformInterface) {
 		currentRuntimeSetup.softMemoryLimit = limit
 		currentRuntimeSetup.softMemoryLimitIsPacingDefault = true
 	}
+	macLimit := macPacingSoftLimit(currentRuntimeProfile(), existing)
+	if macLimit > 0 {
+		debug.SetMemoryLimit(macLimit)
+	}
 	machineLimit := int64(0)
 	if soft := currentRuntimeSetup.softMemoryLimit; soft > 0 {
 		machineLimit = machineBudgetForPacing(soft)
 	}
 	if limit > 0 {
 		log.Infoln("[Memory] GC pacing armed: GOMEMLIMIT=%d (NE budget default; no explicit limit was configured)", limit)
+	}
+	if macLimit > 0 {
+		log.Infoln("[Memory] GC pacing armed: GOMEMLIMIT=%d (macOS packet tunnel default; no explicit limit was configured)", macLimit)
 	}
 	startPressureThresholdMonitor(machineLimit, pressureThresholdShedEnabled.Load())
 	setupMu.Unlock()

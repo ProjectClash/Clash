@@ -34,6 +34,9 @@ func newGoSlabStore(lowWater int) goSlabStore {
 
 func goRegionMap(size int) []byte {
 	size = (size + goPageSize - 1) &^ (goPageSize - 1)
+	if memory := goRegionRecycled(size); memory != nil {
+		return memory
+	}
 	memory, err := unix.Mmap(-1, 0, size, unix.PROT_READ|unix.PROT_WRITE, goRegionMapFlags)
 	if err != nil {
 		panic(E.Cause(err, "go: map memory region"))
@@ -42,6 +45,9 @@ func goRegionMap(size int) []byte {
 }
 
 func goRegionUnmap(memory []byte) {
+	if goRegionKeep(memory) {
+		return
+	}
 	unix.Munmap(memory)
 }
 

@@ -334,9 +334,7 @@ func (e *goEngine) spliceFlushUpload(conn *GoConn) {
 		if consumed >= available {
 			break
 		}
-		e.spliceSegments = conn.receiveChain.appendRuns(e.spliceSegments[:0], consumed, int(available-consumed))
-		e.spliceIovecs = goIovecsFromSegments(e.spliceIovecs, e.spliceSegments)
-		n, errno := splice.socket.writeVector(e.spliceIovecs)
+		n, errno := e.spliceVector(&splice.socket, &conn.receiveChain, consumed, int(available-consumed), (*goSocket).writeVector)
 		switch {
 		case errno == 0:
 			consumed = conn.consumedTail.Add(uint64(n))
@@ -405,9 +403,7 @@ func (e *goEngine) spliceReadPeer(conn *GoConn) {
 		budget = min(budget, goSpliceReadChunk)
 		buffered := conn.bufferedTail.Load()
 		conn.transmitStore.reserve(buffered, budget)
-		e.spliceSegments = conn.transmitStore.chain.appendRuns(e.spliceSegments[:0], buffered, budget)
-		e.spliceIovecs = goIovecsFromSegments(e.spliceIovecs, e.spliceSegments)
-		n, errno := splice.socket.readVector(e.spliceIovecs)
+		n, errno := e.spliceVector(&splice.socket, &conn.transmitStore.chain, buffered, budget, (*goSocket).readVector)
 		if errno != 0 || n < 0 {
 			n = 0
 		}

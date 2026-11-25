@@ -6,4 +6,6 @@ func startMemoryPressureMonitor() {}
 
 func physFootprint() int64 { return -1 }
 
+func virtualSize() int64 { return -1 }
+
 func availableMemory() int64 { return -1 }

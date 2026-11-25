@@ -32,6 +32,9 @@ type Compiler struct {
 	resolvers     []uint32
 	source        [32]byte
 	err           error
+
+	keepWritten          bool
+	written, writtenPool []byte
 }
 
 type keyRef struct{ off, len, rule uint32 }
@@ -47,6 +50,14 @@ func NewCompiler() *Compiler {
 }
 
 func (c *Compiler) SetSource(source [32]byte) { c.source = source }
+
+func (c *Compiler) KeepWritten() {
+	if c.count > 0 {
+		c.err = errors.New("KeepWritten after a rule was added")
+		return
+	}
+	c.keepWritten = true
+}
 
 func (c *Compiler) Len() int { return c.count }
 
@@ -97,9 +108,16 @@ func (c *Compiler) Add(line string, parsed C.Rule) error {
 			return err
 		}
 	}
-	if len(c.pool)+len(text) > maxRules {
+	if len(c.pool)+len(text) > maxRules || len(c.writtenPool)+len(line) > maxRules {
 		c.err = errors.New("the rules are more than 2 GiB")
 		return c.err
+	}
+	if c.keepWritten {
+		var entry [writtenEntry]byte
+		le.PutUint32(entry[0:], uint32(len(c.writtenPool)))
+		le.PutUint32(entry[4:], uint32(len(line)))
+		c.written = append(c.written, entry[:]...)
+		c.writtenPool = append(c.writtenPool, line...)
 	}
 	off := uint32(len(c.pool))
 	c.pool = append(c.pool, text...)
@@ -160,7 +178,11 @@ func (c *Compiler) Write(w io.Writer) (int64, [sha256.Size]byte, error) {
 	if c.err != nil {
 		return 0, sum, c.err
 	}
-	sections := make([][]byte, sectionCount)
+	count, v := sectionCountV1, uint32(version)
+	if c.keepWritten {
+		count, v = sectionCount, versionWritten
+	}
+	sections := make([][]byte, count)
 	sections[secTargets] = c.targets
 	sections[secTargetPool] = c.targetPool
 	sections[secRules] = c.rules
@@ -181,15 +203,19 @@ func (c *Compiler) Write(w io.Writer) (int64, [sha256.Size]byte, error) {
 	sections[secNodes] = u32s(ip.nodes)
 	sections[secIPPosts] = u32s(ip.posts)
 	sections[secResolvers] = u32s(c.resolvers)
+	if c.keepWritten {
+		sections[secWrittenRules] = c.written
+		sections[secWrittenPool] = c.writtenPool
+	}
 
-	header := make([]byte, headerSize)
+	header := make([]byte, headerSizeOf(count))
 	copy(header, magic)
-	le.PutUint32(header[8:], version)
+	le.PutUint32(header[8:], v)
 	le.PutUint32(header[12:], uint32(c.count))
 	le.PutUint32(header[16:], uint32(c.others))
 	le.PutUint32(header[20:], c.firstResolve)
 	copy(header[sourceAt:], c.source[:])
-	at := headerSize
+	at := len(header)
 	for i, section := range sections {
 		le.PutUint32(header[sectionsAt+8*i:], uint32(at))
 		le.PutUint32(header[sectionsAt+4+8*i:], uint32(len(section)))

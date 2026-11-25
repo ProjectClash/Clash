@@ -30,13 +30,7 @@ func finalizeWithRulesAround(t *testing.T, document string, resources map[string
 func rulesAfterOf(t *testing.T, root map[string]any) []string {
 	t.Helper()
 	reference, _ := root["x-clash-rule-index"].(map[string]any)
-	var after []string
-	if list, ok := reference["append"].([]any); ok {
-		for _, line := range list {
-			after = append(after, line.(string))
-		}
-	}
-	return after
+	return rulesAroundOf(t, reference, "append", "rules-after")
 }
 
 const sourceForRulesAfter = "proxies:\n  - {name: P, type: direct}\nrules:\n" +

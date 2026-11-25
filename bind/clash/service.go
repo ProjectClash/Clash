@@ -516,6 +516,7 @@ func (s *BoxService) reload(configContent string) error {
 		done <- attachmentFailure
 	}()
 	err := <-done
+	markStartupComplete()
 	if err != nil && !applying.Load() {
 		setConfiguredTunnelPrefixes(previousTunnelPrefixes)
 	}

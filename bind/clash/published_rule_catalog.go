@@ -16,8 +16,8 @@ var ErrNoPublishedRuleIndex = errors.New("clash: this configuration writes its r
 type PublishedRuleCatalog struct {
 	mu         sync.RWMutex
 	index      *clashindex.Index
-	before     []string
-	after      []string
+	before     config.ClashRulesAround
+	after      config.ClashRulesAround
 	uidRemoved int
 }
 
@@ -56,32 +56,42 @@ func openPublishedRuleCatalog(path string) (*PublishedRuleCatalog, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &PublishedRuleCatalog{index: index, before: published.Index.Prepend, after: published.Index.Append, uidRemoved: len(published.Index.UIDRemoved)}, nil
+	before, err := published.Index.ClashRulesBefore()
+	if err != nil {
+		return nil, err
+	}
+	after, err := published.Index.ClashRulesAfter()
+	if err != nil {
+		return nil, err
+	}
+	return &PublishedRuleCatalog{index: index, before: before, after: after, uidRemoved: len(published.Index.UIDRemoved)}, nil
 }
 
 func (c *PublishedRuleCatalog) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.index, c.before, c.after = nil, nil, nil
+	c.index, c.before, c.after = nil, config.ClashRulesAround{}, config.ClashRulesAround{}
 }
 
 func (c *PublishedRuleCatalog) count() int {
 	if c.index == nil {
 		return 0
 	}
-	return len(c.before) + c.index.Len() + len(c.after)
+	return c.before.Len() + c.index.Len() + c.after.Len()
 }
 
-func (c *PublishedRuleCatalog) firstAfter() int { return len(c.before) + c.index.Len() }
+func (c *PublishedRuleCatalog) firstAfter() int { return c.before.Len() + c.index.Len() }
 
 func (c *PublishedRuleCatalog) line(i int) string {
-	if i < len(c.before) {
-		return c.before[i]
+	if i < c.before.Len() {
+		line, _ := c.before.Line(i)
+		return line
 	}
 	if first := c.firstAfter(); i >= first {
-		return c.after[i-first]
+		line, _ := c.after.Line(i - first)
+		return line
 	}
-	line, _, _ := c.index.Written(i - len(c.before))
+	line, _, _ := c.index.Written(i - c.before.Len())
 	return line
 }
 
@@ -103,7 +113,7 @@ func (c *PublishedRuleCatalog) Prepended() int32 {
 	if c.index == nil {
 		return 0
 	}
-	return int32(len(c.before))
+	return int32(c.before.Len())
 }
 
 func (c *PublishedRuleCatalog) Appended() int32 {
@@ -112,12 +122,18 @@ func (c *PublishedRuleCatalog) Appended() int32 {
 	if c.index == nil {
 		return 0
 	}
-	return int32(len(c.after))
+	return int32(c.after.Len())
 }
 
 func (c *PublishedRuleCatalog) rule(i int) (tp, target, payload string, mapped bool) {
-	if i >= len(c.before) && i < c.firstAfter() {
-		if tp, target, ok := c.index.MappedTypeAndTarget(i - len(c.before)); ok {
+	index, j := c.index, i-c.before.Len()
+	if i < c.before.Len() {
+		index, j = c.before.Index, i
+	} else if first := c.firstAfter(); i >= first {
+		index, j = c.after.Index, i-first
+	}
+	if index != nil {
+		if tp, target, ok := index.MappedTypeAndTarget(j); ok {
 			return tp, target, "", true
 		}
 	}
@@ -130,7 +146,7 @@ func (c *PublishedRuleCatalog) SummaryJSON() string {
 	defer c.mu.RUnlock()
 	prepended, appended := 0, 0
 	if c.index != nil {
-		prepended, appended = len(c.before), len(c.after)
+		prepended, appended = c.before.Len(), c.after.Len()
 	}
 	return bridgeSafeString(summarizeRulesBefore(c.count(), c.uidRemoved, prepended, appended, c.rule))
 }

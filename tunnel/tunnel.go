@@ -1126,15 +1126,22 @@ func sniffingStandsAside(conn any, metadata *C.Metadata) bool {
 
 func snifferStandsAside(conn any, metadata *C.Metadata, dispatcher *sniffer.Dispatcher) bool {
 	if metadata.Host == "" {
-		return standsAsideForItsDial(conn, metadata)
+		return standsAsideUnlessTheEngineMayTakeIt(conn, metadata, dispatcher)
 	}
 	return dialer.IsPhysicalGlobalIPv6(metadata.DstIP) && dispatcher.ReadsPastDnsMapping(metadata) &&
-		standsAsideForItsDial(conn, metadata)
+		standsAsideUnlessTheEngineMayTakeIt(conn, metadata, dispatcher)
 }
 
 func standsAsideForItsDial(conn any, metadata *C.Metadata) bool {
 	return dialer.IsPhysicalGlobalIPv6(metadata.DstIP) &&
 		N.HandshakePending(conn) &&
+		WouldDialPhysically(metadata)
+}
+
+func standsAsideUnlessTheEngineMayTakeIt(conn any, metadata *C.Metadata, dispatcher *sniffer.Dispatcher) bool {
+	return dialer.IsPhysicalGlobalIPv6(metadata.DstIP) &&
+		N.HandshakePending(conn) &&
+		!(dispatcher.ReadsTCP(metadata) && engineMayTakeOnceNamed(metadata)) &&
 		WouldDialPhysically(metadata)
 }
 

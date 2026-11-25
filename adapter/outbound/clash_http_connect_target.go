@@ -20,6 +20,15 @@ func ClashConnectsSniffedHost(mapping map[string]any) bool {
 	return false
 }
 
+func (h *Http) ClashConnectsSniffedHost() bool {
+	return h.option.ClashConnectSniffedHost
+}
+
+func (a *autoCloseProxyAdapter) ClashConnectsSniffedHost() bool {
+	connector, ok := a.ProxyAdapter.(interface{ ClashConnectsSniffedHost() bool })
+	return ok && connector.ClashConnectsSniffedHost()
+}
+
 func (h *Http) connectTarget(metadata *C.Metadata) string {
 	if h.option.ClashConnectSniffedHost && metadata.SniffHost != "" && metadata.Host != "" {
 		sniffed := *metadata

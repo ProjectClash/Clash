@@ -164,7 +164,7 @@ func NewTCPTracker(conn C.Conn, manager *Manager, metadata *C.Metadata, rule C.R
 		Conn:          conn,
 		manager:       manager,
 		finalOutbound: chain.Last(),
-		bucket:        BucketForOutbound(chain.Last()),
+		bucket:        BucketForConnection(conn),
 		TrackerInfo: &TrackerInfo{
 			UUID:          utils.NewUUIDV4(),
 			Start:         time.Now(),
@@ -271,7 +271,7 @@ func NewUDPTracker(conn C.PacketConn, manager *Manager, metadata *C.Metadata, ru
 		PacketConn:    conn,
 		manager:       manager,
 		finalOutbound: chain.Last(),
-		bucket:        BucketForOutbound(chain.Last()),
+		bucket:        BucketForConnection(conn),
 		TrackerInfo: &TrackerInfo{
 			UUID:          utils.NewUUIDV4(),
 			Start:         time.Now(),

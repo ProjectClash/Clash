@@ -132,7 +132,12 @@ func tcpEcho(t *testing.T, banner []byte) string {
 
 func udpEcho(t *testing.T) string {
 	t.Helper()
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	return udpEchoAt(t, loopbackUDPHost(t))
+}
+
+func udpEchoAt(t *testing.T, host string) string {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", net.JoinHostPort(host, "0"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -606,7 +611,7 @@ func TestASnellV6ListenerWithUDPOffEndsTheSession(t *testing.T) {
 	withSnellV6Tunnel(t, node)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	echo := udpEcho(t)
+	echo := udpEchoAt(t, "127.0.0.1")
 	host, p, _ := net.SplitHostPort(echo)
 	portNumber, _ := strconv.Atoi(p)
 	pc, err := node.ListenPacketContext(ctx, &C.Metadata{NetWork: C.UDP, Host: host, DstPort: uint16(portNumber)})

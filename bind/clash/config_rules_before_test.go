@@ -64,13 +64,36 @@ func rulesBeforeOf(t *testing.T, root map[string]any) (string, []string) {
 	if path == "" {
 		t.Fatalf("no index named: %+v", root["x-clash-rule-index"])
 	}
-	var before []string
-	if list, ok := reference["prepend"].([]any); ok {
+	return path, rulesAroundOf(t, reference, "prepend", "rules-before")
+}
+
+func rulesAroundOf(t *testing.T, reference map[string]any, linesKey, indexKey string) []string {
+	t.Helper()
+	var lines []string
+	if list, ok := reference[linesKey].([]any); ok {
 		for _, line := range list {
-			before = append(before, line.(string))
+			lines = append(lines, line.(string))
 		}
 	}
-	return path, before
+	if named, ok := reference[indexKey].(map[string]any); ok {
+		if lines != nil {
+			t.Fatalf("the reference writes %s and names %s", linesKey, indexKey)
+		}
+		path, _ := named["path"].(string)
+		sum, _ := named["sha256"].(string)
+		index, err := config.ClashOpenRuleIndexFile(config.ClashRuleIndexFile{Path: path, SHA256: sum})
+		if err != nil {
+			t.Fatalf("%s: %v", indexKey, err)
+		}
+		if !index.KeepsWritten() {
+			t.Fatalf("the index %s names keeps no lines as written", indexKey)
+		}
+		for i := 0; i < index.Len(); i++ {
+			line, _, _ := index.Written(i)
+			lines = append(lines, line)
+		}
+	}
+	return lines
 }
 
 func TestTheRulesBeforeAConfigurationsOwnRideBesideItsIndexWhichStaysTheSame(t *testing.T) {

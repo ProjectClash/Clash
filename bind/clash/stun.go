@@ -19,6 +19,7 @@ import (
 
 	internalSTUN "github.com/ProjectClash/Clash/bind/clash/internal/stun"
 	"github.com/ProjectClash/Clash/component/resolver"
+	C "github.com/ProjectClash/Clash/constant"
 	"github.com/ProjectClash/Clash/tunnel"
 	"github.com/ProjectClash/Clash/tunnel/statistic"
 )
@@ -458,21 +459,26 @@ func dialSTUNThroughCore(ctx context.Context, endpoint, outbound string) (net.Pa
 		_ = connection.Close()
 		return nil, netip.AddrPort{}, errors.New("clash: STUN Core dialer returned an invalid address")
 	}
-	return &countedSTUNPacketConn{
-		PacketConn:    connection,
-		finalOutbound: tracker.Info().Chain.Last(),
-	}, logicalAddress, nil
+	return newCountedSTUNPacketConn(connection, tracker.Info()), logicalAddress, nil
 }
 
 type countedSTUNPacketConn struct {
 	net.PacketConn
-	finalOutbound string
+	bucket statistic.OutboundBucket
+}
+
+func newCountedSTUNPacketConn(connection net.PacketConn, info *statistic.TrackerInfo) *countedSTUNPacketConn {
+	bucket := statistic.BucketForOutbound(info.Chain.Last())
+	if outbound, ok := connection.(C.Connection); ok {
+		bucket = statistic.BucketForConnection(outbound)
+	}
+	return &countedSTUNPacketConn{PacketConn: connection, bucket: bucket}
 }
 
 func (c *countedSTUNPacketConn) ReadFrom(payload []byte) (int, net.Addr, error) {
 	count, address, err := c.PacketConn.ReadFrom(payload)
 	if count > 0 {
-		statistic.DefaultManager.PushDownloaded(c.finalOutbound, int64(count))
+		statistic.DefaultManager.PushDownloadedInto(c.bucket, int64(count))
 	}
 	return count, address, err
 }
@@ -480,7 +486,7 @@ func (c *countedSTUNPacketConn) ReadFrom(payload []byte) (int, net.Addr, error) 
 func (c *countedSTUNPacketConn) WriteTo(payload []byte, address net.Addr) (int, error) {
 	count, err := c.PacketConn.WriteTo(payload, address)
 	if count > 0 {
-		statistic.DefaultManager.PushUploaded(c.finalOutbound, int64(count))
+		statistic.DefaultManager.PushUploadedInto(c.bucket, int64(count))
 	}
 	return count, err
 }

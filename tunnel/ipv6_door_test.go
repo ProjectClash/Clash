@@ -18,6 +18,7 @@ func (p doorProxy) Name() string                     { return p.name }
 func (p doorProxy) Type() C.AdapterType              { return p.typ }
 func (p doorProxy) Unwrap(*C.Metadata, bool) C.Proxy { return nil }
 func (p doorProxy) SupportUDP() bool                 { return true }
+func (p doorProxy) Adapter() C.ProxyAdapter          { return p }
 
 func tunFlowTo(dst string) *C.Metadata {
 	return &C.Metadata{

@@ -22,8 +22,8 @@ func TestTheRulesAfterAnIndexParseAsTheSameRulesInlineAndGoLast(t *testing.T) {
 		t.Fatal(err)
 	}
 	table, ok := indexed.RuleTable.(*C.ClashRulesBefore)
-	if !ok || len(table.After) != len(after) || table.FirstAfter() != len(rulesBeforeTheIndex)+len(own) {
-		t.Fatalf("the rules are %T with %d after at %d", indexed.RuleTable, len(table.After), table.FirstAfter())
+	if !ok || table.AfterLen() != len(after) || table.FirstAfter() != len(rulesBeforeTheIndex)+len(own) {
+		t.Fatalf("the rules are %T with %d after at %d", indexed.RuleTable, table.AfterLen(), table.FirstAfter())
 	}
 	if indexed.RuleTable.Len() != inline.RuleTable.Len() {
 		t.Fatalf("%d rules, want %d", indexed.RuleTable.Len(), inline.RuleTable.Len())

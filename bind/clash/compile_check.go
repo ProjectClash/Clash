@@ -427,14 +427,23 @@ func readersRuleIndex(document string, index int, message string) (int, bool) {
 		if !named {
 			return 0, false
 		}
-		if before := len(ref.Prepend); index < before {
-			return index, strings.TrimSpace(ref.Prepend[index]) == quoted[1]
+		rulesBefore, err := ref.ClashRulesBefore()
+		if err != nil {
+			return 0, false
+		}
+		if before := rulesBefore.Len(); index < before {
+			line, ok := rulesBefore.Line(index)
+			return index, ok && strings.TrimSpace(line) == quoted[1]
 		}
 		if indexed := documentRuleIndex(root); indexed != nil {
-			if first := len(ref.Prepend) + indexed.Len(); index >= first && index-first < len(ref.Append) {
-				return writtenPlace(index, ref.UIDRemoved), strings.TrimSpace(ref.Append[index-first]) == quoted[1]
+			before := rulesBefore.Len()
+			if rulesAfter, err := ref.ClashRulesAfter(); err == nil {
+				if first := before + indexed.Len(); index >= first && index-first < rulesAfter.Len() {
+					line, ok := rulesAfter.Line(index - first)
+					return writtenPlace(index, ref.UIDRemoved), ok && strings.TrimSpace(line) == quoted[1]
+				}
 			}
-			if line, _, ok := indexed.Written(index - len(ref.Prepend)); ok && strings.TrimSpace(line) == quoted[1] {
+			if line, _, ok := indexed.Written(index - before); ok && strings.TrimSpace(line) == quoted[1] {
 				return writtenPlace(index, ref.UIDRemoved), true
 			}
 		}
