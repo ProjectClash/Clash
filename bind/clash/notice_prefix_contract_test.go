@@ -38,6 +38,15 @@ func TestNoNewLogPrefixArrivesUnnoticed(t *testing.T) {
 			"name resolving is not something to tell a user about. It exists because the path " +
 			"was unobservable and a device round could not tell a sandbox that blocks the " +
 			"daemon's socket from a query that never reached the core at all"},
+		"FetchThrough|Infoln": {"Infoln", "developer-facing: one line per lookup the App asked for " +
+			"through a named outbound, for the External IP page: the URL, the chain it went " +
+			"through, the status and the body's size. Instrumentation, NOT selected by the app: " +
+			"the page shows the address it got, and this is where a reader looks for which node " +
+			"answered"},
+		"FetchThrough|Warnln": {"Warnln", "developer-facing: a lookup that brought nothing back, in " +
+			"the App's word (notFound, refused, timeout, dialFailed, requestFailed, tooLarge, " +
+			"invalidRequest) and the core's own, as they are. NOT selected by the app: the page says " +
+			"only that the exit could not be checked, and the reason is read here"},
 		"mDNS|Warnln": {"Warnln", "developer-facing: a multicast-DNS query that did not answer. " +
 			"Two wordings on purpose -- \"unreachable\" means the daemon's socket could not be " +
 			"reached, which inside a Network Extension is the sandbox question and the errno " +
